@@ -46,6 +46,9 @@ class Config:
     rest_base: str = "https://fapi.binance.com"
     ws_base: str = "wss://fstream.binance.com"
 
+    # Bybit cross-exchange signal
+    bybit_ws_base: str = "wss://stream.bybit.com/v5/public/linear"
+
     def __post_init__(self) -> None:
         if not self.api_key or not self.api_secret:
             raise ValueError("BINANCE_API_KEY and BINANCE_API_SECRET are required")

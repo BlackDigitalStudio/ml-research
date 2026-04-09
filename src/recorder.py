@@ -27,13 +27,15 @@ class Recorder:
         self._depth_dir = self._data_dir / "depth"
         self._trades_dir = self._data_dir / "trades"
         self._bot_trades_dir = self._data_dir / "bot_trades"
+        self._bybit_dir = self._data_dir / "bybit_trades"
 
-        for d in (self._depth_dir, self._trades_dir, self._bot_trades_dir):
+        for d in (self._depth_dir, self._trades_dir, self._bot_trades_dir, self._bybit_dir):
             d.mkdir(parents=True, exist_ok=True)
 
         self._depth_buf: list[dict] = []
         self._trade_buf: list[dict] = []
         self._bot_trade_buf: list[dict] = []
+        self._bybit_buf: list[dict] = []
         self._flush_task: asyncio.Task | None = None
 
     async def start(self) -> None:
@@ -93,6 +95,14 @@ class Recorder:
             "reason": reason,
         })
 
+    def record_bybit_trade(self, data: dict) -> None:
+        self._bybit_buf.append({
+            "timestamp": int(data.get("T", 0)),
+            "price": float(data.get("p", 0)),
+            "quantity": float(data.get("q", 0)),
+            "is_seller": data.get("m", False),
+        })
+
     async def _flush_loop(self) -> None:
         while True:
             await asyncio.sleep(FLUSH_INTERVAL)
@@ -109,6 +119,8 @@ class Recorder:
         if self._bot_trade_buf:
             day_key = now.strftime("%Y%m%d")
             self._write_bot_trades(day_key)
+        if self._bybit_buf:
+            self._write_bybit_trades(hour_key)
 
     def _write_depth(self, hour_key: str) -> None:
         rows = self._depth_buf
@@ -162,6 +174,21 @@ class Recorder:
         pq.write_table(table, path, compression="snappy")
         logger.debug("Flushed %d bot trade records to %s", len(rows), path.name)
 
+    def _write_bybit_trades(self, hour_key: str) -> None:
+        rows = self._bybit_buf
+        self._bybit_buf = []
+
+        df = pd.DataFrame(rows)
+        table = pa.Table.from_pandas(df, preserve_index=False)
+
+        path = self._bybit_dir / f"{hour_key}.parquet"
+        if path.exists():
+            existing = pq.read_table(path)
+            table = pa.concat_tables([existing, table])
+
+        pq.write_table(table, path, compression="snappy")
+        logger.debug("Flushed %d bybit trade records to %s", len(rows), path.name)
+
     async def _rotation_loop(self) -> None:
         while True:
             await asyncio.sleep(3600)  # check every hour
@@ -170,7 +197,7 @@ class Recorder:
     def _rotate_old_files(self) -> None:
         cutoff = time.time() - RETENTION_HOURS * 3600
         count = 0
-        for d in (self._depth_dir, self._trades_dir):
+        for d in (self._depth_dir, self._trades_dir, self._bybit_dir):
             for f in d.iterdir():
                 if f.suffix == ".parquet" and f.stat().st_mtime < cutoff:
                     f.unlink()

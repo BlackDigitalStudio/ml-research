@@ -35,7 +35,9 @@ class BinanceWSClient:
         # Secondary instrument streams (ETH for leading signal)
         self._on_secondary_depth: Callback | None = None
         self._on_secondary_aggtrade: Callback | None = None
+        self._on_bybit_aggtrade: Callback | None = None
         self.last_message_time: float = 0.0
+        self.rate_limit_weight: int = 0
 
     def on_depth(self, cb: Callback) -> None:
         self._on_depth = cb
@@ -57,6 +59,9 @@ class BinanceWSClient:
 
     def on_secondary_aggtrade(self, cb: Callback) -> None:
         self._on_secondary_aggtrade = cb
+
+    def on_bybit_aggtrade(self, cb: Callback) -> None:
+        self._on_bybit_aggtrade = cb
 
     async def start(self) -> None:
         tcp = aiohttp.TCPConnector(
@@ -112,6 +117,9 @@ class BinanceWSClient:
         # OI + long/short ratio polling
         asyncio.create_task(self._poll_derivatives_data())
 
+        # Bybit cross-exchange signal
+        asyncio.create_task(self._run_bybit_stream())
+
     async def stop(self) -> None:
         for handler in self._streams.values():
             handler.stop()
@@ -138,6 +146,9 @@ class BinanceWSClient:
         url = f"{self._cfg.rest_base}{path}"
         t0 = time.monotonic()
         async with self._session.get(url, params=params) as r:
+            self.rate_limit_weight = int(r.headers.get("X-MBX-USED-WEIGHT-1M", "0"))
+            if self.rate_limit_weight > 1000:
+                logger.warning("Rate limit approaching: %d/1200", self.rate_limit_weight)
             data = await r.json(loads=orjson.loads)
             latency = (time.monotonic() - t0) * 1000
             if r.status != 200:
@@ -151,6 +162,9 @@ class BinanceWSClient:
         url = f"{self._cfg.rest_base}{path}"
         t0 = time.monotonic()
         async with self._session.post(url, params=params) as r:
+            self.rate_limit_weight = int(r.headers.get("X-MBX-USED-WEIGHT-1M", "0"))
+            if self.rate_limit_weight > 1000:
+                logger.warning("Rate limit approaching: %d/1200", self.rate_limit_weight)
             data = await r.json(loads=orjson.loads)
             latency = (time.monotonic() - t0) * 1000
             if r.status != 200:
@@ -166,6 +180,9 @@ class BinanceWSClient:
         url = f"{self._cfg.rest_base}{path}"
         t0 = time.monotonic()
         async with self._session.delete(url, params=params) as r:
+            self.rate_limit_weight = int(r.headers.get("X-MBX-USED-WEIGHT-1M", "0"))
+            if self.rate_limit_weight > 1000:
+                logger.warning("Rate limit approaching: %d/1200", self.rate_limit_weight)
             data = await r.json(loads=orjson.loads)
             latency = (time.monotonic() - t0) * 1000
             if r.status != 200:
@@ -175,6 +192,10 @@ class BinanceWSClient:
     @property
     def rest_latency_ms(self) -> float:
         return getattr(self, "_last_rest_latency", 0.0)
+
+    @property
+    def is_rate_limited(self) -> bool:
+        return self.rate_limit_weight > 1100
 
     # --- User data stream ---
 
@@ -288,6 +309,37 @@ class BinanceWSClient:
                 logger.debug("Derivatives poll error: %s", e)
 
             await asyncio.sleep(15)
+
+
+    async def _run_bybit_stream(self) -> None:
+        """Bybit BTCUSDT aggTrade -- leads Binance by 100-500ms."""
+        backoff = 1
+        while True:
+            try:
+                async with self._session.ws_connect("wss://stream.bybit.com/v5/public/linear") as ws:
+                    await ws.send_json({"op": "subscribe", "args": ["publicTrade.BTCUSDT"]})
+                    logger.info("Bybit WS connected")
+                    backoff = 1
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            raw = orjson.loads(msg.data)
+                            if raw.get("topic") == "publicTrade.BTCUSDT" and self._on_bybit_aggtrade:
+                                for t in raw.get("data", []):
+                                    await self._on_bybit_aggtrade({
+                                        "T": t.get("T", 0),
+                                        "p": t.get("p", "0"),
+                                        "q": t.get("v", "0"),
+                                        "m": t.get("S") == "Sell",
+                                    })
+                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                            break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Bybit WS error: %s", e)
+            logger.warning("Bybit WS disconnected, reconnect in %ds", backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
 
 
 class _StreamHandler:

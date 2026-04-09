@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from enum import Enum
 from typing import Any
 
@@ -66,12 +67,48 @@ class Executor:
         self.dynamic_threshold: float = config.confidence_threshold
         self._last_threshold_tune: float = 0.0
 
+        # Order book reference (set via set_order_book)
+        self._ob = None
+
+        # Timeout tracking (Item 2)
+        self._recent_timeouts: deque[float] = deque(maxlen=100)
+
+        # Volatility tracking (Item 3)
+        self._avg_volatility: float = 0.0
+        self._current_volatility: float = 0.0
+
+        # Stepped trailing stop-loss (Item 14)
+        self._tp_target: float = 0.0
+        self._tp_dist: float = 0.0
+        self._trailing_sl: float = 0.0
+        self._trailing_step: int = 0  # 0=none, 1=50%, 2=75%
+        self._trailing_task: asyncio.Task | None = None
+
+        # Partial take-profit (Item 15)
+        self._partial_filled: bool = False
+        self._partial_order_id: str = ""
+
+        # Adverse selection (Item 16)
+        self._entry_submit_time: float = 0.0
+
     @property
     def fill_rate(self) -> float:
         """Fill rate of last 20 entry attempts (0.0 - 1.0)."""
         if not self._fill_history:
             return 1.0
         return sum(self._fill_history) / len(self._fill_history)
+
+    def set_order_book(self, ob) -> None:
+        """Set order book reference for mid-price access."""
+        self._ob = ob
+
+    def update_volatility(self, avg_vol: float, current_vol: float) -> None:
+        """Update volatility tracking (called from main loop)."""
+        if self._avg_volatility == 0.0:
+            self._avg_volatility = avg_vol
+        else:
+            self._avg_volatility = 0.95 * self._avg_volatility + 0.05 * avg_vol
+        self._current_volatility = current_vol
 
     def tune_threshold(self) -> None:
         """Recalculate confidence threshold to maximize profit factor on recent trades.
@@ -103,6 +140,16 @@ class Executor:
         else:
             new_thresh = base
 
+        # Timeout rate check (Item 2): if >30% of recent trades are timeouts, raise threshold
+        now = time.monotonic()
+        recent_timeouts = sum(1 for t in self._recent_timeouts if now - t < 3600)
+        if len(pnls) > 0 and recent_timeouts / len(pnls) > 0.30:
+            new_thresh = min(0.70, new_thresh + 0.02)
+            logger.info(
+                "High timeout rate (%d/%d in last hour) → threshold bumped to %.2f",
+                recent_timeouts, len(pnls), new_thresh,
+            )
+
         if new_thresh != self.dynamic_threshold:
             logger.info(
                 "Threshold tuned: %.2f → %.2f (PF=%.2f, WR=%.1f%%)",
@@ -113,6 +160,7 @@ class Executor:
     async def start(self) -> None:
         self._ws.on_user_data(self._on_user_data)
         await self._sync_balance()
+        await self._recover_position()
         logger.info("Executor started, balance=$%.2f, state=%s", self.balance, self.state.value)
 
     async def _sync_balance(self) -> None:
@@ -123,6 +171,55 @@ class Executor:
                     self.balance = float(b.get("balance", 0))
                     self._risk.set_deposit(self.balance)
                     return
+
+    async def _recover_position(self) -> None:
+        """Recover open position state on startup."""
+        data = await self._ws.rest_get("/fapi/v2/positionRisk", signed=True)
+        if not isinstance(data, list):
+            return
+
+        for entry in data:
+            if entry.get("symbol") != self._cfg.symbol:
+                continue
+            pos_amt = float(entry.get("positionAmt", 0))
+            if pos_amt == 0:
+                return
+
+            # Recover position state
+            self.state = State.IN_POSITION
+            self._direction = Direction.LONG if pos_amt > 0 else Direction.SHORT
+            self._size = abs(pos_amt)
+            self._entry_price = float(entry.get("entryPrice", 0))
+            self._position_time = time.monotonic()
+
+            # Place backup SL (same pattern as in _enter)
+            sl_side = "SELL" if self._direction == Direction.LONG else "BUY"
+            sl_dist = self._entry_price * self._cfg.stop_loss_pct / 100
+            if self._direction == Direction.LONG:
+                sl_price = self._entry_price - sl_dist
+            else:
+                sl_price = self._entry_price + sl_dist
+            sl_result = await self._ws.rest_post("/fapi/v1/order", params={
+                "symbol": self._cfg.symbol,
+                "side": sl_side,
+                "type": "STOP_MARKET",
+                "stopPrice": f"{sl_price:.2f}",
+                "closePosition": "true",
+                "workingType": "MARK_PRICE",
+            })
+            if "orderId" in sl_result:
+                self._sl_order_id = str(sl_result["orderId"])
+
+            # Start position timeout task
+            self._position_timeout_task = asyncio.create_task(
+                self._position_timeout()
+            )
+
+            logger.info(
+                "Recovered position: %s %.3f @ $%.2f (SL=$%.2f)",
+                self._direction.value, self._size, self._entry_price, sl_price,
+            )
+            return
 
     async def process_signal(self, signal: Signal) -> None:
         if self.state != State.IDLE:
@@ -144,6 +241,8 @@ class Executor:
         self._direction = signal.direction
         self._size = signal.size
         self._entry_time = time.monotonic()
+        self._tp_target = signal.take_profit
+        self._entry_submit_time = time.monotonic()
 
         side = "BUY" if signal.direction == Direction.LONG else "SELL"
 
@@ -213,6 +312,15 @@ class Executor:
         fill_price = float(data.get("ap", self._entry_price))  # avg price
         self._entry_price = fill_price
 
+        # --- Adverse selection check (Item 16) ---
+        fill_ms = (time.monotonic() - self._entry_submit_time) * 1000
+        if fill_ms < 100:
+            logger.warning("Fast fill %.0fms — adverse selection risk", fill_ms)
+            if fill_ms < 50:
+                logger.warning("Extremely fast fill — closing immediately")
+                await self._close_position("adverse_selection")
+                return
+
         logger.info(
             "Position opened: %s %.3f @ $%.2f",
             self._direction.value, self._size, fill_price,
@@ -221,10 +329,44 @@ class Executor:
 
         # Place take-profit
         tp_side = "SELL" if self._direction == Direction.LONG else "BUY"
-        if self._direction == Direction.LONG:
-            tp_price = fill_price + self._cfg.take_profit_usd
-        else:
-            tp_price = fill_price - self._cfg.take_profit_usd
+        tp_price = self._tp_target
+        if tp_price == 0.0:
+            # Fallback: compute from config percentage
+            tp_usd = fill_price * self._cfg.take_profit_pct / 100
+            if self._direction == Direction.LONG:
+                tp_price = fill_price + tp_usd
+            else:
+                tp_price = fill_price - tp_usd
+            self._tp_target = tp_price
+
+        # Trailing stop setup (Item 14)
+        self._tp_dist = abs(tp_price - fill_price)
+        self._trailing_sl = 0.0
+        self._trailing_step = 0
+        self._partial_filled = False
+        self._partial_order_id = ""
+
+        # Adverse selection: tighten SL for fast fills (50-100ms)
+        if fill_ms < 100:
+            # Tighten SL to 50% of normal distance
+            await self._cancel_order(self._sl_order_id)
+            sl_side = "SELL" if self._direction == Direction.LONG else "BUY"
+            sl_dist = fill_price * self._cfg.stop_loss_pct / 100 * 0.5
+            if self._direction == Direction.LONG:
+                tight_sl = fill_price - sl_dist
+            else:
+                tight_sl = fill_price + sl_dist
+            sl_result = await self._ws.rest_post("/fapi/v1/order", params={
+                "symbol": self._cfg.symbol,
+                "side": sl_side,
+                "type": "STOP_MARKET",
+                "stopPrice": f"{tight_sl:.2f}",
+                "closePosition": "true",
+                "workingType": "MARK_PRICE",
+            })
+            if "orderId" in sl_result:
+                self._sl_order_id = str(sl_result["orderId"])
+                logger.info("Tightened SL (fast fill): $%.2f (id=%s)", tight_sl, self._sl_order_id)
 
         tp_result = await self._ws.rest_post("/fapi/v1/order", params={
             "symbol": self._cfg.symbol,
@@ -239,16 +381,79 @@ class Executor:
             self._tp_order_id = str(tp_result["orderId"])
             logger.info("TP placed: $%.2f (id=%s)", tp_price, self._tp_order_id)
 
+        # Start trailing monitor (Item 14)
+        self._trailing_task = asyncio.create_task(self._monitor_trailing())
+
         # Start position timeout
         self._position_timeout_task = asyncio.create_task(
             self._position_timeout()
         )
 
     async def _position_timeout(self) -> None:
-        await asyncio.sleep(self._cfg.position_timeout_sec)
+        # Dynamic timeout based on volatility (Item 3)
+        base_timeout = self._cfg.position_timeout_sec
+        if self._current_volatility > 0 and self._avg_volatility > 0:
+            timeout = base_timeout * (self._avg_volatility / max(self._current_volatility, 1e-10))
+            timeout = max(15.0, min(timeout, 120.0))
+        else:
+            timeout = base_timeout
+
+        await asyncio.sleep(timeout)
+        if self.state != State.IN_POSITION:
+            return
+
+        logger.info("Position timeout (%.0fs), attempting limit close", timeout)
+
+        # Item 1: Try limit close at mid price first
+        # Cancel TP and SL
+        await self._cancel_order(self._tp_order_id)
+        await self._cancel_order(self._sl_order_id)
+
+        # Get mid price from order book
+        mid_price = None
+        if self._ob is not None and self._ob.current is not None:
+            mid_price = self._ob.current.mid_price
+
+        if mid_price and mid_price > 0:
+            close_side = "SELL" if self._direction == Direction.LONG else "BUY"
+            limit_result = await self._ws.rest_post("/fapi/v1/order", params={
+                "symbol": self._cfg.symbol,
+                "side": close_side,
+                "type": "LIMIT",
+                "timeInForce": "GTX",
+                "quantity": f"{self._size:.3f}",
+                "price": f"{mid_price:.2f}",
+                "newOrderRespType": "RESULT",
+            })
+
+            if "orderId" in limit_result:
+                limit_order_id = str(limit_result["orderId"])
+                logger.info("Timeout limit close at $%.2f (id=%s)", mid_price, limit_order_id)
+
+                # Wait 2 seconds for fill
+                await asyncio.sleep(2.0)
+
+                if self.state == State.IN_POSITION:
+                    # Not filled yet — cancel and fall back to market
+                    await self._cancel_order(limit_order_id)
+                    logger.info("Timeout limit not filled, falling back to market")
+                else:
+                    # Already closed (filled via _on_user_data)
+                    return
+
+        # Fallback: market close
         if self.state == State.IN_POSITION:
-            logger.info("Position timeout, closing at market")
-            await self._close_position("timeout")
+            self.state = State.EXITING
+            close_side = "SELL" if self._direction == Direction.LONG else "BUY"
+            result = await self._ws.rest_post("/fapi/v1/order", params={
+                "symbol": self._cfg.symbol,
+                "side": close_side,
+                "type": "MARKET",
+                "quantity": f"{self._size:.3f}",
+                "newOrderRespType": "RESULT",
+            })
+            exit_price = float(result.get("avgPrice", 0))
+            self._finalize_trade(exit_price, "timeout")
 
     async def _close_position(self, reason: str) -> None:
         if self.state not in (State.IN_POSITION, State.EXITING):
@@ -287,6 +492,10 @@ class Executor:
         else:
             fees = notional * self._cfg.commission_win_pct / 100
         net_pnl = pnl - fees
+
+        # Track timeouts (Item 2)
+        if "timeout" in reason:
+            self._recent_timeouts.append(time.monotonic())
 
         self._risk.record_trade(net_pnl)
         self._recent_trades_pnl.append(net_pnl)
@@ -338,6 +547,16 @@ class Executor:
             self._order_timeout_task.cancel()
         if self._position_timeout_task:
             self._position_timeout_task.cancel()
+        # Reset trailing state (Item 14)
+        if self._trailing_task:
+            self._trailing_task.cancel()
+            self._trailing_task = None
+        self._tp_target = 0.0
+        self._tp_dist = 0.0
+        self._trailing_sl = 0.0
+        self._trailing_step = 0
+        self._partial_filled = False
+        self._partial_order_id = ""
 
     async def _on_user_data(self, data: dict) -> None:
         event_type = data.get("e", "")
@@ -376,6 +595,121 @@ class Executor:
                 if self._position_timeout_task:
                     self._position_timeout_task.cancel()
                 self._finalize_trade(exit_price, "stop_loss")
+
+            # Partial TP filled (Item 15)
+            elif order_id == self._partial_order_id and status == "FILLED":
+                fill_price = float(order.get("ap", 0))
+                self._size = round(self._size / 2, 3)
+                self._partial_filled = True
+                logger.info(
+                    "Partial TP filled: closed 50%% at $%.2f, remaining=%.3f",
+                    fill_price, self._size,
+                )
+                # Update the TP order quantity to match remaining size
+                await self._cancel_order(self._tp_order_id)
+                if self._tp_target > 0 and self._size > 0:
+                    tp_side = "SELL" if self._direction == Direction.LONG else "BUY"
+                    tp_result = await self._ws.rest_post("/fapi/v1/order", params={
+                        "symbol": self._cfg.symbol,
+                        "side": tp_side,
+                        "type": "LIMIT",
+                        "timeInForce": "GTX",
+                        "quantity": f"{self._size:.3f}",
+                        "price": f"{self._tp_target:.2f}",
+                        "newOrderRespType": "RESULT",
+                    })
+                    if "orderId" in tp_result:
+                        self._tp_order_id = str(tp_result["orderId"])
+
+    async def _monitor_trailing(self) -> None:
+        """Monitor price progress toward TP and adjust SL / partial TP (Items 14, 15)."""
+        try:
+            while self.state == State.IN_POSITION:
+                await asyncio.sleep(0.1)
+                if self._ob is None or self._ob.current is None:
+                    continue
+
+                current_price = self._ob.current.mid_price
+                if self._tp_dist <= 0:
+                    continue
+
+                # Calculate progress toward TP
+                if self._direction == Direction.LONG:
+                    progress = (current_price - self._entry_price) / self._tp_dist
+                else:
+                    progress = (self._entry_price - current_price) / self._tp_dist
+
+                # Step 1 at 50% progress: partial TP + move SL to profit
+                if progress >= 0.5 and self._trailing_step < 1:
+                    # Partial take-profit (Item 15)
+                    if not self._partial_filled and self._size > 0:
+                        half_size = round(self._size / 2, 3)
+                        if half_size > 0:
+                            close_side = "SELL" if self._direction == Direction.LONG else "BUY"
+                            partial_result = await self._ws.rest_post("/fapi/v1/order", params={
+                                "symbol": self._cfg.symbol,
+                                "side": close_side,
+                                "type": "LIMIT",
+                                "timeInForce": "GTX",
+                                "quantity": f"{half_size:.3f}",
+                                "price": f"{current_price:.2f}",
+                                "newOrderRespType": "RESULT",
+                            })
+                            if "orderId" in partial_result:
+                                self._partial_order_id = str(partial_result["orderId"])
+                                logger.info(
+                                    "Partial TP order placed: %.3f @ $%.2f (id=%s)",
+                                    half_size, current_price, self._partial_order_id,
+                                )
+
+                    # Move SL to max(+0.08%, 30% of TP distance)
+                    min_sl_offset = self._entry_price * 0.0008
+                    tp_30_offset = self._tp_dist * 0.3
+                    sl_offset = max(min_sl_offset, tp_30_offset)
+                    if self._direction == Direction.LONG:
+                        new_sl = self._entry_price + sl_offset
+                    else:
+                        new_sl = self._entry_price - sl_offset
+                    await self._update_trailing_sl(new_sl)
+                    self._trailing_step = 1
+                    logger.info(
+                        "Trailing SL step 1: $%.2f (progress=%.0f%%)",
+                        new_sl, progress * 100,
+                    )
+
+                # Step 2 at 75% progress: move SL to 50% of TP distance
+                elif progress >= 0.75 and self._trailing_step < 2:
+                    sl_offset = self._tp_dist * 0.5
+                    if self._direction == Direction.LONG:
+                        new_sl = self._entry_price + sl_offset
+                    else:
+                        new_sl = self._entry_price - sl_offset
+                    await self._update_trailing_sl(new_sl)
+                    self._trailing_step = 2
+                    logger.info(
+                        "Trailing SL step 2: $%.2f (progress=%.0f%%)",
+                        new_sl, progress * 100,
+                    )
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error("Trailing monitor error: %s", e)
+
+    async def _update_trailing_sl(self, new_price: float) -> None:
+        """Cancel existing SL and place new STOP_MARKET at new_price."""
+        await self._cancel_order(self._sl_order_id)
+        sl_side = "SELL" if self._direction == Direction.LONG else "BUY"
+        sl_result = await self._ws.rest_post("/fapi/v1/order", params={
+            "symbol": self._cfg.symbol,
+            "side": sl_side,
+            "type": "STOP_MARKET",
+            "stopPrice": f"{new_price:.2f}",
+            "closePosition": "true",
+            "workingType": "MARK_PRICE",
+        })
+        if "orderId" in sl_result:
+            self._sl_order_id = str(sl_result["orderId"])
+            self._trailing_sl = new_price
 
     async def emergency_close(self, reason: str) -> None:
         logger.warning("EMERGENCY CLOSE: %s", reason)
