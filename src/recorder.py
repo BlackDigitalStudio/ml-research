@@ -52,7 +52,21 @@ class Recorder:
         self._funding_buf: list[dict] = []
         self._derivatives_buf: list[dict] = []
         self._exchange_bufs: dict[str, list[dict]] = {ex: [] for ex in self._exchange_dirs}
+        # Dedup ring: (timestamp, price, qty, side) → skip if seen in last 200 entries
+        self._trade_dedup: dict[str, set] = {}  # per-source dedup sets
         self._flush_task: asyncio.Task | None = None
+
+    def _dedup_trade(self, source: str, ts: int, price: float, qty: float, side: bool) -> bool:
+        """Return True if this trade is a duplicate (should be skipped)."""
+        key = (ts, price, qty, side)
+        s = self._trade_dedup.setdefault(source, set())
+        if key in s:
+            return True
+        s.add(key)
+        if len(s) > 50_000:
+            # Prune: keep only recent half (arbitrary, but prevents memory growth)
+            self._trade_dedup[source] = set(list(s)[-25_000:])
+        return False
 
     async def start(self) -> None:
         self._flush_task = asyncio.create_task(self._flush_loop())
@@ -112,12 +126,13 @@ class Recorder:
         })
 
     def record_bybit_trade(self, data: dict) -> None:
-        self._bybit_buf.append({
-            "timestamp": int(data.get("T", 0)),
-            "price": float(data.get("p", 0)),
-            "quantity": float(data.get("q", 0)),
-            "is_seller": data.get("m", False),
-        })
+        ts = int(data.get("T", 0))
+        price = float(data.get("p", 0))
+        qty = float(data.get("q", 0))
+        side = data.get("m", False)
+        if self._dedup_trade("bybit", ts, price, qty, side):
+            return
+        self._bybit_buf.append({"timestamp": ts, "price": price, "quantity": qty, "is_seller": side})
 
     def record_eth_trade(self, data: dict) -> None:
         self._eth_trade_buf.append({
@@ -157,12 +172,13 @@ class Recorder:
         """Record trade from cross-exchange stream (okx, bitget, gateio, htx, deribit)."""
         ex = data.get("exchange", "")
         if ex in self._exchange_bufs:
-            self._exchange_bufs[ex].append({
-                "timestamp": int(data.get("T", 0)),
-                "price": float(data.get("p", 0)),
-                "quantity": float(data.get("q", 0)),
-                "is_seller": data.get("m", False),
-            })
+            ts = int(data.get("T", 0))
+            price = float(data.get("p", 0))
+            qty = float(data.get("q", 0))
+            side = data.get("m", False)
+            if self._dedup_trade(ex, ts, price, qty, side):
+                return
+            self._exchange_bufs[ex].append({"timestamp": ts, "price": price, "quantity": qty, "is_seller": side})
 
     async def _flush_loop(self) -> None:
         while True:
