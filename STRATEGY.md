@@ -166,11 +166,20 @@ Bybit trades lead Binance by 100-500ms. No account needed — public stream.
 | `/futures/data/topLongShortAccountRatio` | 15s |
 
 ### Data Storage
-- Depth snapshots: `data/depth/YYYYMMDD_HH.parquet` (hourly rotation, Snappy compression)
-- Binance trades: `data/trades/YYYYMMDD_HH.parquet`
-- Bybit trades: `data/bybit_trades/YYYYMMDD_HH.parquet`
-- Bot trades: `data/bot_trades/YYYYMMDD.parquet`
-- Retention: 72 hours
+All data is saved to hourly Parquet files with Snappy compression, 72-hour retention.
+
+| Directory | Content | Source | Used in Training |
+|---|---|---|---|
+| `data/depth/` | BTC L20 order book snapshots | WS depth@100ms | Features 0-5, 20-25, LOB tensor |
+| `data/trades/` | BTC aggregated trades | WS aggTrade | Features 6-9, 11-12 |
+| `data/eth_depth/` | ETH L20 order book snapshots | WS ethusdt@depth@100ms | Feature 15 (eth_ofi) |
+| `data/eth_trades/` | ETH aggregated trades | WS ethusdt@aggTrade | Features 14, 16 (eth_momentum, leading_signal) |
+| `data/bybit_trades/` | Bybit BTC trades | WS publicTrade.BTCUSDT | Cross-exchange signal (future) |
+| `data/funding/` | Funding rate + mark price | WS markPrice@1s | Feature 13 |
+| `data/derivatives/` | Open interest + L/S ratio | REST poll 15s | Features 17-19 |
+| `data/bot_trades/` | Executed bot trades | Trading engine | Performance tracking |
+
+**Training-runtime consistency:** All 30 features are computed from recorded data during training. No placeholders or zeroed features — the model sees identical distributions in training and live inference.
 
 ---
 
