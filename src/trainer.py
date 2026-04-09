@@ -89,6 +89,20 @@ class Trainer:
         logger.info("Loaded %d trades", len(df))
         return df
 
+    def _load_parquet_dir(self, subdir: str, hours: int) -> pd.DataFrame | None:
+        """Load parquet files from a data subdirectory. Returns None if empty."""
+        d = self._data_dir / subdir
+        if not d.exists():
+            return None
+        files = sorted(d.glob("*.parquet"))
+        if not files:
+            return None
+        files = files[-hours:]
+        dfs = [pd.read_parquet(f) for f in files]
+        df = pd.concat(dfs, ignore_index=True).sort_values("timestamp").reset_index(drop=True)
+        logger.info("Loaded %d rows from %s (%d files)", len(df), subdir, len(files))
+        return df
+
     # ---- Sample building (vectorized) ----
 
     def build_samples(
@@ -141,7 +155,36 @@ class Trainer:
         trade_qty = trade_df["quantity"].values.astype(np.float64).copy()
         trade_side = trade_df["is_buyer_maker"].values.copy()
         del trade_df
-        gc.collect()  # True = sell
+        gc.collect()
+
+        # === Load auxiliary data (ETH trades, funding, derivatives) ===
+        eth_trade_df = self._load_parquet_dir("eth_trades", hours)
+        eth_ts = eth_qty = eth_side = eth_price = None
+        if eth_trade_df is not None and len(eth_trade_df) > 0:
+            eth_ts = eth_trade_df["timestamp"].values.astype(np.int64).copy()
+            eth_price = eth_trade_df["price"].values.astype(np.float64).copy()
+            eth_qty = eth_trade_df["quantity"].values.astype(np.float64).copy()
+            eth_side = eth_trade_df["is_buyer_maker"].values.copy()
+            logger.info("ETH trades loaded: %d", len(eth_ts))
+        del eth_trade_df
+
+        funding_df = self._load_parquet_dir("funding", hours)
+        funding_ts = funding_rate = None
+        if funding_df is not None and len(funding_df) > 0:
+            funding_ts = funding_df["timestamp"].values.astype(np.int64).copy()
+            funding_rate = funding_df["funding_rate"].values.astype(np.float64).copy()
+            logger.info("Funding data loaded: %d", len(funding_ts))
+        del funding_df
+
+        deriv_df = self._load_parquet_dir("derivatives", hours)
+        deriv_ts = deriv_oi = deriv_ls = None
+        if deriv_df is not None and len(deriv_df) > 0:
+            deriv_ts = deriv_df["timestamp"].values.astype(np.int64).copy()
+            deriv_oi = deriv_df["open_interest"].values.astype(np.float64).copy()
+            deriv_ls = deriv_df["long_short_ratio"].values.astype(np.float64).copy()
+            logger.info("Derivatives data loaded: %d", len(deriv_ts))
+        del deriv_df
+        gc.collect()
 
         tick_buy_vol = np.zeros(n, dtype=np.float32)
         tick_sell_vol = np.zeros(n, dtype=np.float32)
@@ -195,11 +238,16 @@ class Trainer:
         X_feat = self._calc_features_batch(
             bid_vols, ask_vols, bid_prices, ask_prices, mid_prices,
             trade_ts, trade_qty, trade_side, depth_ts, end_indices,
+            eth_ts=eth_ts, eth_price=eth_price, eth_qty=eth_qty, eth_side=eth_side,
+            funding_ts=funding_ts, funding_rate_arr=funding_rate,
+            deriv_ts=deriv_ts, deriv_oi=deriv_oi, deriv_ls=deriv_ls,
         )
 
         # Free large parse arrays (LOB + features are done)
         del bid_vols, ask_vols, bid_prices, ask_prices
         del tick_buy_vol, tick_sell_vol, trade_ts, trade_qty, trade_side, depth_ts
+        del eth_ts, eth_price, eth_qty, eth_side
+        del funding_ts, funding_rate, deriv_ts, deriv_oi, deriv_ls
         import gc; gc.collect()
 
         # === Labels (vectorized) ===
@@ -246,6 +294,10 @@ class Trainer:
         trade_side: np.ndarray,
         depth_ts: np.ndarray,
         indices: np.ndarray,
+        *,
+        eth_ts=None, eth_price=None, eth_qty=None, eth_side=None,
+        funding_ts=None, funding_rate_arr=None,
+        deriv_ts=None, deriv_oi=None, deriv_ls=None,
     ) -> np.ndarray:
         """Compute all 25 features for all sample indices at once."""
         from src.features import NUM_FEATURES
@@ -344,12 +396,98 @@ class Trainer:
         feat[m50, 12] = np.where(prev50 > 0,
                                   (mid_prices[indices[m50]] - prev50) / prev50, 0).astype(np.float32)
 
-        # [13] Funding rate — unavailable in historical data, 0.0
-        # [14-16] ETH signals — unavailable (ETH data not loaded in trainer), 0.0
-        # [17] OI delta — unavailable, 0.0
-        # [18] L/S ratio — unavailable, 0.0 (NOT 1.0 — must match runtime zeroing)
-        # [19] Liquidation proximity — unavailable, 0.0
-        # NOTE: these features are also zeroed in runtime features.py to ensure consistency
+        # [13] Funding rate — from funding parquet (1s resolution)
+        if funding_ts is not None and len(funding_ts) > 0:
+            # For each sample, find the latest funding rate before that timestamp
+            fund_idx = np.searchsorted(funding_ts, sample_ts, side="right") - 1
+            fund_idx = np.clip(fund_idx, 0, len(funding_rate_arr) - 1)
+            feat[:, 13] = funding_rate_arr[fund_idx].astype(np.float32)
+
+        # [14-16] ETH leading signals — from eth_trades parquet
+        if eth_ts is not None and len(eth_ts) > 0:
+            # ETH cumulative volumes for flow features
+            eth_cum_buy = np.zeros(len(eth_ts) + 1, dtype=np.float64)
+            eth_cum_sell = np.zeros(len(eth_ts) + 1, dtype=np.float64)
+            eth_cum_buy[1:] = np.cumsum(eth_qty * ~eth_side)
+            eth_cum_sell[1:] = np.cumsum(eth_qty * eth_side)
+
+            # ETH cumulative price*qty for VWAP / mid-price proxy
+            eth_cum_pv = np.zeros(len(eth_ts) + 1, dtype=np.float64)
+            eth_cum_pv[1:] = np.cumsum(eth_price * eth_qty)
+            eth_cum_qty = np.zeros(len(eth_ts) + 1, dtype=np.float64)
+            eth_cum_qty[1:] = np.cumsum(eth_qty)
+
+            eth_right = np.searchsorted(eth_ts, sample_ts, side="right")
+
+            # [14] eth_momentum_1s — ETH price change over 1 second
+            eth_left_1s = np.searchsorted(eth_ts, sample_ts - 1000, side="left")
+            # VWAP in [left, right) as proxy for price at each boundary
+            eth_qty_now = eth_cum_qty[eth_right] - eth_cum_qty[eth_left_1s]
+            eth_pv_now = eth_cum_pv[eth_right] - eth_cum_pv[eth_left_1s]
+            eth_vwap_1s = np.divide(eth_pv_now, eth_qty_now,
+                                     out=np.zeros(ns, dtype=np.float64), where=eth_qty_now > 0)
+            # Price 1s ago
+            eth_left_2s = np.searchsorted(eth_ts, sample_ts - 2000, side="left")
+            eth_qty_prev = eth_cum_qty[eth_left_1s] - eth_cum_qty[eth_left_2s]
+            eth_pv_prev = eth_cum_pv[eth_left_1s] - eth_cum_pv[eth_left_2s]
+            eth_vwap_prev = np.divide(eth_pv_prev, eth_qty_prev,
+                                       out=np.zeros(ns, dtype=np.float64), where=eth_qty_prev > 0)
+            feat[:, 14] = np.where(
+                (eth_vwap_1s > 0) & (eth_vwap_prev > 0),
+                (eth_vwap_1s - eth_vwap_prev) / eth_vwap_prev, 0.0,
+            ).astype(np.float32)
+
+            # [15] eth_ofi — approximated from ETH trade flow (buy - sell imbalance)
+            eth_left_500ms = np.searchsorted(eth_ts, sample_ts - 500, side="left")
+            eth_buys = eth_cum_buy[eth_right] - eth_cum_buy[eth_left_500ms]
+            eth_sells = eth_cum_sell[eth_right] - eth_cum_sell[eth_left_500ms]
+            eth_total = eth_buys + eth_sells
+            feat[:, 15] = np.divide(eth_buys - eth_sells, eth_total,
+                                     out=np.zeros(ns, dtype=np.float64), where=eth_total > 0).astype(np.float32)
+
+            # [16] eth_leading_signal — BTC/ETH ratio deviation
+            # Current ETH price (VWAP over last 1s)
+            eth_mid = eth_vwap_1s
+            btc_mid = mid_prices[indices]
+            ratio = np.divide(btc_mid, eth_mid,
+                              out=np.zeros(ns, dtype=np.float64), where=eth_mid > 0)
+            # Rolling mean of ratio over 30s (300 ticks in depth)
+            # Use cumsum of ratio for efficient rolling mean
+            if ratio.sum() > 0:
+                # Simple: compare current ratio to mean of all ratios
+                ratio_mean = ratio[ratio > 0].mean() if (ratio > 0).any() else 1.0
+                feat[:, 16] = np.where(
+                    ratio > 0, (ratio - ratio_mean) / (ratio_mean + 1e-10), 0.0,
+                ).astype(np.float32)
+
+        # [17-19] Derivatives — from derivatives parquet (15s resolution)
+        if deriv_ts is not None and len(deriv_ts) > 1:
+            d_idx = np.searchsorted(deriv_ts, sample_ts, side="right") - 1
+            d_idx = np.clip(d_idx, 0, len(deriv_oi) - 1)
+
+            # [17] OI delta — change vs previous poll
+            d_idx_prev = np.clip(d_idx - 1, 0, len(deriv_oi) - 1)
+            oi_now = deriv_oi[d_idx]
+            oi_prev = deriv_oi[d_idx_prev]
+            feat[:, 17] = np.where(
+                oi_prev > 0, (oi_now - oi_prev) / oi_prev, 0.0,
+            ).astype(np.float32)
+
+            # [18] L/S ratio
+            feat[:, 18] = deriv_ls[d_idx].astype(np.float32)
+
+            # [19] Liquidation proximity — heuristic from L/S ratio
+            ls = deriv_ls[d_idx]
+            btc_mid = mid_prices[indices]
+            cluster_pct = 0.015  # ~1.5% for x50-x100 leverage
+            liq_prox = np.zeros(ns, dtype=np.float32)
+            # More longs → cluster below (negative = danger below)
+            long_heavy = ls > 1.2
+            liq_prox[long_heavy] = -cluster_pct
+            # More shorts → cluster above (positive = danger above)
+            short_heavy = ls < 0.8
+            liq_prox[short_heavy] = cluster_pct
+            feat[:, 19] = liq_prox
 
         # [20] Spoof score approximation
         m25 = indices >= 25
