@@ -11,7 +11,7 @@ from src.order_book import OrderBook, Snapshot, BOOK_DEPTH
 
 logger = logging.getLogger(__name__)
 
-NUM_FEATURES = 30
+NUM_FEATURES = 31
 NORM_WINDOW = 300   # 30 sec at 100ms
 EMA_SPAN = 5
 TRADE_WINDOW_SEC = 5
@@ -47,7 +47,8 @@ FEATURE_KEYS = [
     "cancel_rate_diff",
     # Multi-timeframe OFI (26-29) — divergence signals reversal
     "ofi_1s", "ofi_5s", "ofi_30s", "ofi_divergence",
-    # Bybit cross-exchange signal (30 — reserved, computed externally)
+    # Cross-exchange momentum (30) — net-buy count across 6 exchanges in 500ms
+    "cross_exchange_momentum_500ms",
 ]
 
 assert len(FEATURE_KEYS) == NUM_FEATURES

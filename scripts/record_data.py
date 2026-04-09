@@ -79,6 +79,12 @@ async def main() -> None:
         rec.record_eth_trade(data)
         counts["eth_trade"] += 1
 
+    # --- Cross-exchange trades (5 exchanges) ---
+    async def on_exchange_trade(data: dict) -> None:
+        rec.record_exchange_trade(data)
+        ex = data.get("exchange", "?")
+        counts[f"ex_{ex}"] = counts.get(f"ex_{ex}", 0) + 1
+
     # --- Funding rate (from markPrice stream, every 1s) ---
     async def on_markprice(data: dict) -> None:
         rec.record_funding(data)
@@ -103,6 +109,8 @@ async def main() -> None:
     ws.on_aggtrade(on_trade)
     ws.on_bybit_aggtrade(on_bybit_trade)
     ws.on_secondary_aggtrade(on_eth_trade)
+    for ex in ("okx", "bitget", "gateio", "htx", "deribit"):
+        ws.on_exchange_trade(ex, on_exchange_trade)
     ws.on_markprice(on_markprice)
 
     await asyncio.sleep(2)
@@ -134,19 +142,22 @@ async def main() -> None:
 
         # Calculate total size across all data dirs
         total_size = 0
-        for subdir in ("depth", "trades", "bybit_trades", "eth_depth", "eth_trades", "funding", "derivatives"):
-            d = cfg.data_dir / subdir
-            if d.exists():
-                total_size += sum(f.stat().st_size for f in d.glob("*.parquet"))
+        for subdir in cfg.data_dir.iterdir():
+            if subdir.is_dir():
+                total_size += sum(f.stat().st_size for f in subdir.glob("*.parquet"))
 
         total_mb = total_size / 1024 / 1024
 
+        # Exchange counts
+        ex_str = " ".join(f"{k.replace('ex_','')}={v}" for k, v in sorted(counts.items()) if k.startswith("ex_"))
+
         logger.info(
-            "Stats: %.1fh | btc_depth=%d btc_trade=%d eth_depth=%d eth_trade=%d bybit=%d funding=%d deriv=%d | %.1f MB",
+            "Stats: %.1fh | depth=%d trade=%d eth_d=%d eth_t=%d bybit=%d fund=%d deriv=%d | %s | %.1f MB",
             hours,
             counts["depth"], counts["trade"],
             counts["eth_depth"], counts["eth_trade"],
             counts["bybit"], counts["funding"], counts["deriv"],
+            ex_str or "exchanges=connecting",
             total_mb,
         )
 

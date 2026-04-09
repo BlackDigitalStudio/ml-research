@@ -32,10 +32,15 @@ class Recorder:
         self._eth_depth_dir = self._data_dir / "eth_depth"
         self._funding_dir = self._data_dir / "funding"
         self._derivatives_dir = self._data_dir / "derivatives"
+        # Cross-exchange trade directories
+        self._exchange_dirs: dict[str, Path] = {}
+        for ex in ("okx", "bitget", "gateio", "htx", "deribit"):
+            self._exchange_dirs[ex] = self._data_dir / f"{ex}_trades"
 
-        for d in (self._depth_dir, self._trades_dir, self._bot_trades_dir,
-                  self._bybit_dir, self._eth_trades_dir, self._eth_depth_dir,
-                  self._funding_dir, self._derivatives_dir):
+        all_dirs = [self._depth_dir, self._trades_dir, self._bot_trades_dir,
+                    self._bybit_dir, self._eth_trades_dir, self._eth_depth_dir,
+                    self._funding_dir, self._derivatives_dir] + list(self._exchange_dirs.values())
+        for d in all_dirs:
             d.mkdir(parents=True, exist_ok=True)
 
         self._depth_buf: list[dict] = []
@@ -46,6 +51,7 @@ class Recorder:
         self._eth_depth_buf: list[dict] = []
         self._funding_buf: list[dict] = []
         self._derivatives_buf: list[dict] = []
+        self._exchange_bufs: dict[str, list[dict]] = {ex: [] for ex in self._exchange_dirs}
         self._flush_task: asyncio.Task | None = None
 
     async def start(self) -> None:
@@ -147,6 +153,17 @@ class Recorder:
             "long_short_ratio": ls_ratio,
         })
 
+    def record_exchange_trade(self, data: dict) -> None:
+        """Record trade from cross-exchange stream (okx, bitget, gateio, htx, deribit)."""
+        ex = data.get("exchange", "")
+        if ex in self._exchange_bufs:
+            self._exchange_bufs[ex].append({
+                "timestamp": int(data.get("T", 0)),
+                "price": float(data.get("p", 0)),
+                "quantity": float(data.get("q", 0)),
+                "is_seller": data.get("m", False),
+            })
+
     async def _flush_loop(self) -> None:
         while True:
             await asyncio.sleep(FLUSH_INTERVAL)
@@ -177,6 +194,10 @@ class Recorder:
         if self._derivatives_buf:
             self._write_generic(self._derivatives_buf, self._derivatives_dir, hour_key)
             self._derivatives_buf = []
+        for ex, buf in self._exchange_bufs.items():
+            if buf:
+                self._write_generic(buf, self._exchange_dirs[ex], hour_key)
+                self._exchange_bufs[ex] = []
 
     def _write_depth(self, hour_key: str) -> None:
         rows = self._depth_buf
@@ -281,9 +302,9 @@ class Recorder:
     def _rotate_old_files(self) -> None:
         cutoff = time.time() - RETENTION_HOURS * 3600
         count = 0
-        all_dirs = (self._depth_dir, self._trades_dir, self._bybit_dir,
+        all_dirs = [self._depth_dir, self._trades_dir, self._bybit_dir,
                     self._eth_trades_dir, self._eth_depth_dir,
-                    self._funding_dir, self._derivatives_dir)
+                    self._funding_dir, self._derivatives_dir] + list(self._exchange_dirs.values())
         for d in all_dirs:
             for f in d.iterdir():
                 if f.suffix == ".parquet" and f.stat().st_mtime < cutoff:

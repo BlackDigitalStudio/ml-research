@@ -36,6 +36,8 @@ class BinanceWSClient:
         self._on_secondary_depth: Callback | None = None
         self._on_secondary_aggtrade: Callback | None = None
         self._on_bybit_aggtrade: Callback | None = None
+        # Cross-exchange trade callbacks (5 additional exchanges)
+        self._on_exchange_trade: dict[str, Callback] = {}
         self.last_message_time: float = 0.0
         self.rate_limit_weight: int = 0
 
@@ -62,6 +64,10 @@ class BinanceWSClient:
 
     def on_bybit_aggtrade(self, cb: Callback) -> None:
         self._on_bybit_aggtrade = cb
+
+    def on_exchange_trade(self, exchange: str, cb: Callback) -> None:
+        """Register callback for cross-exchange trades (okx, bitget, gateio, htx, deribit)."""
+        self._on_exchange_trade[exchange] = cb
 
     async def start(self) -> None:
         tcp = aiohttp.TCPConnector(
@@ -117,8 +123,13 @@ class BinanceWSClient:
         # OI + long/short ratio polling
         asyncio.create_task(self._poll_derivatives_data())
 
-        # Bybit cross-exchange signal
+        # Cross-exchange signals (Bybit + 5 exchanges)
         asyncio.create_task(self._run_bybit_stream())
+        asyncio.create_task(self._run_okx_stream())
+        asyncio.create_task(self._run_bitget_stream())
+        asyncio.create_task(self._run_gateio_stream())
+        asyncio.create_task(self._run_htx_stream())
+        asyncio.create_task(self._run_deribit_stream())
 
     async def stop(self) -> None:
         for handler in self._streams.values():
@@ -348,6 +359,143 @@ class BinanceWSClient:
             except Exception as e:
                 logger.error("Bybit WS error: %s", e)
             logger.warning("Bybit WS disconnected, reconnect in %ds", backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+    # --- Cross-exchange streams (5 exchanges) ---
+
+    async def _dispatch_exchange(self, exchange: str, ts: int, price: str, qty: str, is_sell: bool) -> None:
+        cb = self._on_exchange_trade.get(exchange)
+        if cb:
+            await cb({"T": ts, "p": price, "q": qty, "m": is_sell, "exchange": exchange})
+
+    async def _run_okx_stream(self) -> None:
+        backoff = 1
+        while True:
+            try:
+                async with self._session.ws_connect("wss://ws.okx.com:8443/ws/v5/public") as ws:
+                    await ws.send_json({"op": "subscribe", "args": [{"channel": "trades", "instId": "BTC-USDT-SWAP"}]})
+                    logger.info("OKX WS connected")
+                    backoff = 1
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            raw = orjson.loads(msg.data)
+                            for t in raw.get("data", []):
+                                await self._dispatch_exchange(
+                                    "okx", int(t.get("ts", 0)), t.get("px", "0"),
+                                    t.get("sz", "0"), t.get("side") == "sell")
+                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                            break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("OKX WS error: %s", e)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+    async def _run_bitget_stream(self) -> None:
+        backoff = 1
+        while True:
+            try:
+                async with self._session.ws_connect("wss://ws.bitget.com/v2/ws/public") as ws:
+                    await ws.send_json({"op": "subscribe", "args": [{"instType": "USDT-FUTURES", "channel": "trade", "instId": "BTCUSDT"}]})
+                    logger.info("Bitget WS connected")
+                    backoff = 1
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            raw = orjson.loads(msg.data)
+                            for t in raw.get("data", []):
+                                await self._dispatch_exchange(
+                                    "bitget", int(t.get("ts", 0)), t.get("price", "0"),
+                                    t.get("size", "0"), t.get("side") == "sell")
+                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                            break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Bitget WS error: %s", e)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+    async def _run_gateio_stream(self) -> None:
+        import time as _time
+        backoff = 1
+        while True:
+            try:
+                async with self._session.ws_connect("wss://fx-ws.gateio.ws/v4/ws/usdt") as ws:
+                    await ws.send_json({"channel": "futures.trades", "event": "subscribe", "payload": ["BTC_USDT"], "time": int(_time.time())})
+                    logger.info("Gate.io WS connected")
+                    backoff = 1
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            raw = orjson.loads(msg.data)
+                            if raw.get("channel") == "futures.trades" and raw.get("event") == "update":
+                                for t in raw.get("result", []):
+                                    ts = int(float(t.get("create_time_ms", t.get("create_time", 0) * 1000)))
+                                    await self._dispatch_exchange(
+                                        "gateio", ts, str(t.get("price", "0")),
+                                        str(t.get("size", "0")), t.get("size", 0) < 0)
+                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                            break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Gate.io WS error: %s", e)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+    async def _run_htx_stream(self) -> None:
+        import gzip
+        backoff = 1
+        while True:
+            try:
+                async with self._session.ws_connect("wss://api.hbdm.com/linear-swap-ws") as ws:
+                    await ws.send_json({"sub": "market.BTC-USDT.trade.detail"})
+                    logger.info("HTX WS connected")
+                    backoff = 1
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.BINARY:
+                            raw = orjson.loads(gzip.decompress(msg.data))
+                            # Heartbeat
+                            if "ping" in raw:
+                                await ws.send_json({"pong": raw["ping"]})
+                                continue
+                            tick = raw.get("tick", {})
+                            for t in tick.get("data", []):
+                                await self._dispatch_exchange(
+                                    "htx", int(t.get("ts", 0)), str(t.get("price", 0)),
+                                    str(t.get("amount", 0)), t.get("direction") == "sell")
+                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                            break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("HTX WS error: %s", e)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+    async def _run_deribit_stream(self) -> None:
+        backoff = 1
+        while True:
+            try:
+                async with self._session.ws_connect("wss://www.deribit.com/ws/api/v2") as ws:
+                    await ws.send_json({"method": "public/subscribe", "params": {"channels": ["trades.BTC-PERPETUAL.raw"]}, "jsonrpc": "2.0", "id": 1})
+                    logger.info("Deribit WS connected")
+                    backoff = 1
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            raw = orjson.loads(msg.data)
+                            params = raw.get("params", {})
+                            for t in params.get("data", []):
+                                await self._dispatch_exchange(
+                                    "deribit", int(t.get("timestamp", 0)), str(t.get("price", 0)),
+                                    str(t.get("amount", 0)), t.get("direction") == "sell")
+                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                            break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Deribit WS error: %s", e)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30)
 
