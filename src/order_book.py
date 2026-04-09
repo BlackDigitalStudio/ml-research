@@ -48,9 +48,10 @@ class Snapshot:
 
 
 class OrderBook:
-    def __init__(self, ws: BinanceWSClient, symbol: str = "ETHUSDT") -> None:
+    def __init__(self, ws: BinanceWSClient, symbol: str = "ETHUSDT", *, secondary: bool = False) -> None:
         self._ws = ws
         self._symbol = symbol
+        self._secondary = secondary
         self._bids: dict[float, float] = {}
         self._asks: dict[float, float] = {}
         self._last_update_id: int = 0
@@ -64,7 +65,10 @@ class OrderBook:
         self._on_snapshot = cb
 
     async def start(self) -> None:
-        self._ws.on_depth(self._on_depth_update)
+        if self._secondary:
+            self._ws.on_secondary_depth(self._on_depth_update)
+        else:
+            self._ws.on_depth(self._on_depth_update)
         await self._fetch_snapshot()
 
     async def _fetch_snapshot(self) -> None:
