@@ -344,19 +344,46 @@ def run_walk_forward(
     emb_test = trainer.extract_embeddings(encoder, X_lob_test)
     del X_lob_train, X_lob_test
 
-    logger.info("Training XGBoost on %d samples...", split)
-    xgb_model = trainer.train_xgboost(emb_train, X_feat_train, y_train)
+    logger.info("Training ensemble on %d samples...", split)
+    xgb_models, lgb_model, logreg, top5_features = trainer.train_ensemble(
+        emb_train, X_feat_train, y_train,
+    )
 
-    # Predict on test set
+    # Predict on test set using ensemble majority vote
     import xgboost as xgb_lib
     X_test_combined = np.hstack([emb_test, X_feat_test])
-    dtest = xgb_lib.DMatrix(X_test_combined)
-    proba = xgb_model.predict(dtest)
-    if proba.ndim == 1:
-        proba = proba.reshape(-1, 3)
+    n_test = len(X_test_combined)
 
-    predictions = proba.argmax(axis=1)
-    confidences = proba.max(axis=1)
+    # Collect votes from all 5 models
+    all_proba = []
+    for xgb_m in xgb_models:
+        p = xgb_m.predict(xgb_lib.DMatrix(X_test_combined))
+        if p.ndim == 1:
+            p = p.reshape(-1, 3)
+        all_proba.append(p)
+    lgb_p = lgb_model.predict(X_test_combined)
+    if lgb_p.ndim == 1:
+        lgb_p = lgb_p.reshape(-1, 3)
+    all_proba.append(lgb_p)
+    lr_p = logreg.predict_proba(X_test_combined[:, top5_features])
+    all_proba.append(lr_p)
+
+    # Majority vote
+    ensemble_votes = np.zeros((n_test, 3), dtype=np.int32)
+    ensemble_conf_sum = np.zeros((n_test, 3), dtype=np.float64)
+    for p in all_proba:
+        classes = p.argmax(axis=1)
+        ensemble_votes[np.arange(n_test), classes] += 1
+        ensemble_conf_sum[np.arange(n_test), classes] += p.max(axis=1)
+
+    predictions = ensemble_votes.argmax(axis=1)
+    # Mean confidence of majority voters
+    majority_counts = ensemble_votes[np.arange(n_test), predictions]
+    confidences = np.where(
+        majority_counts > 0,
+        ensemble_conf_sum[np.arange(n_test), predictions] / majority_counts,
+        0.0,
+    )
 
     from sklearn.metrics import accuracy_score, classification_report
     acc = accuracy_score(y_test, predictions)
