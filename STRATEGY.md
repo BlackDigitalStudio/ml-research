@@ -35,7 +35,7 @@ Instead of a single XGBoost, the model uses an ensemble of 5 diverse models:
 2. **1x LightGBM** — full training data, same hyperparameters
 3. **1x Logistic Regression** — trained on top-5 most important hand-crafted features (selected by average feature importance across the 3 XGBoost models)
 
-**Input to ensemble:** concatenated `[64-dim CNN embedding + 30 hand-crafted features]` = 94 features.
+**Input to ensemble:** concatenated `[64-dim CNN embedding + 31 hand-crafted features]` = 95 features.
 
 **Voting rules:**
 - Entry requires **minimum 3/5 agreement** on direction (UP or DOWN)
@@ -57,7 +57,7 @@ Instead of a single XGBoost, the model uses an ensemble of 5 diverse models:
 
 ---
 
-## 2. Features (30 total)
+## 2. Features (31 total)
 
 ### LOB Features (0-5) — Primary BTC Order Book
 | # | Name | Description |
@@ -135,6 +135,11 @@ Cancellation = volume drop at a price level without a corresponding trade. Compu
 | 28 | `ofi_30s` | Sum of raw OFI over 30-second window |
 | 29 | `ofi_divergence` | ofi_1s - ofi_30s when they have opposite signs (reversal signal) |
 
+### Cross-Exchange Momentum (30)
+| # | Name | Description |
+|---|---|---|
+| 30 | `cross_exchange_momentum_500ms` | Count of exchanges (out of 6) showing net-buy in last 500ms. Deferred until after first backtest. |
+
 ### Normalization
 All features are z-score normalized using a 30-second rolling window (300 ticks at 100ms).
 
@@ -152,12 +157,17 @@ All features are z-score normalized using a 30-second rolling window (300 ticks 
 | ETH Trades | `ethusdt@aggTrade` | variable |
 | User Data | via listenKey | events |
 
-### Bybit WebSocket (Cross-Exchange Signal)
-| Stream | URL | Rate |
+### Cross-Exchange WebSocket (6 exchanges, public trades, no account needed)
+| Exchange | Stream | URL |
 |---|---|---|
-| BTC Trades | `publicTrade.BTCUSDT` via `wss://stream.bybit.com/v5/public/linear` | variable |
+| Bybit | `publicTrade.BTCUSDT` | `wss://stream.bybit.com/v5/public/linear` |
+| OKX | `trades.BTC-USDT-SWAP` | `wss://ws.okx.com:8443/ws/v5/public` |
+| Bitget | `trade.BTCUSDT` | `wss://ws.bitget.com/v2/ws/public` |
+| Gate.io | `futures.trades.BTC_USDT` | `wss://fx-ws.gateio.ws/v4/ws/usdt` |
+| HTX | `market.BTC-USDT.trade.detail` | `wss://api.hbdm.com/linear-swap-ws` (gzip) |
+| Deribit | `trades.BTC-PERPETUAL.raw` | `wss://www.deribit.com/ws/api/v2` (geo-blocked from Tokyo) |
 
-Bybit trades lead Binance by 100-500ms. No account needed — public stream.
+Cross-exchange trades lead or lag Binance by 100-500ms. Feature #30 (`cross_exchange_momentum_500ms`) counts how many exchanges show net-buy in a 500ms window — deferred until after first backtest.
 
 ### Binance REST (Polled)
 | Endpoint | Interval |
@@ -166,7 +176,7 @@ Bybit trades lead Binance by 100-500ms. No account needed — public stream.
 | `/futures/data/topLongShortAccountRatio` | 15s |
 
 ### Data Storage
-All data is saved to hourly Parquet files with Snappy compression, 72-hour retention.
+All data is saved to hourly Parquet files with Snappy compression, 72-hour retention. Recorder-level dedup by (timestamp, price, quantity, side) for all exchange trades.
 
 | Directory | Content | Source | Used in Training |
 |---|---|---|---|
@@ -174,12 +184,17 @@ All data is saved to hourly Parquet files with Snappy compression, 72-hour reten
 | `data/trades/` | BTC aggregated trades | WS aggTrade | Features 6-9, 11-12 |
 | `data/eth_depth/` | ETH L20 order book snapshots | WS ethusdt@depth@100ms | Feature 15 (eth_ofi) |
 | `data/eth_trades/` | ETH aggregated trades | WS ethusdt@aggTrade | Features 14, 16 (eth_momentum, leading_signal) |
-| `data/bybit_trades/` | Bybit BTC trades | WS publicTrade.BTCUSDT | Cross-exchange signal (future) |
+| `data/bybit_trades/` | Bybit BTC trades | WS Bybit | Feature 30 (cross-exchange) |
+| `data/okx_trades/` | OKX BTC trades | WS OKX | Feature 30 |
+| `data/bitget_trades/` | Bitget BTC trades | WS Bitget | Feature 30 |
+| `data/gateio_trades/` | Gate.io BTC trades | WS Gate.io | Feature 30 |
+| `data/htx_trades/` | HTX BTC trades | WS HTX | Feature 30 |
+| `data/deribit_trades/` | Deribit BTC trades | WS Deribit | Feature 30 (no data — geo-blocked) |
 | `data/funding/` | Funding rate + mark price | WS markPrice@1s | Feature 13 |
 | `data/derivatives/` | Open interest + L/S ratio | REST poll 15s | Features 17-19 |
 | `data/bot_trades/` | Executed bot trades | Trading engine | Performance tracking |
 
-**Training-runtime consistency:** All 30 features are computed from recorded data during training. No placeholders or zeroed features — the model sees identical distributions in training and live inference.
+**Training-runtime consistency:** 29 of 31 features computed from recorded data in training. Feature 19 (liquidation_proximity) returns 0 when L/S ratio is balanced (0.8-1.2). Feature 30 (cross_exchange_momentum) reserved — implementation after first backtest.
 
 ---
 
