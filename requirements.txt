@@ -1,0 +1,9 @@
+aiohttp==3.11.18
+websockets==15.0.1
+numpy==2.2.4
+pandas==2.2.3
+pyarrow==19.0.1
+xgboost==2.1.4
+scikit-learn==1.6.1
+orjson==3.10.16
+python-telegram-bot==21.11.1

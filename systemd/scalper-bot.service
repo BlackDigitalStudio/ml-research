@@ -1,0 +1,17 @@
+[Unit]
+Description=Scalper Bot ETHUSDT
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=scalper
+WorkingDirectory=/home/scalper/scalper-bot
+ExecStart=/home/scalper/scalper-bot/venv/bin/python main.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/scalper/scalper-bot/logs/bot_stdout.log
+StandardError=append:/home/scalper/scalper-bot/logs/bot_stderr.log
+
+[Install]
+WantedBy=multi-user.target

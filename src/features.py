@@ -1,0 +1,633 @@
+from __future__ import annotations
+
+import logging
+import time
+from collections import deque
+from typing import Any
+
+import numpy as np
+
+from src.order_book import OrderBook, Snapshot, BOOK_DEPTH
+
+logger = logging.getLogger(__name__)
+
+NUM_FEATURES = 25
+NORM_WINDOW = 300   # 30 sec at 100ms
+EMA_SPAN = 5
+TRADE_WINDOW_SEC = 5
+CVD_WINDOW_SEC = 30
+VWAP_WINDOW_SEC = 60
+SPOOF_LIFETIME_SEC = 2.5
+SPOOF_SIZE_THRESHOLD = 1.0  # 1 BTC (was 100 ETH)
+HURST_WINDOW = 3000  # ~5 min of 100ms ticks
+
+# Feature vector keys (ordered, used for normalization and model input)
+# Now primary instrument = BTCUSDT, secondary = ETHUSDT
+FEATURE_KEYS = [
+    # LOB — primary BTC (0-5)
+    "ofi", "imbalance_ratio", "imbalance_velocity", "spread",
+    "depth_ratio_l5", "large_order",
+    # Trade flow — primary BTC (6-9)
+    "trade_flow_imbalance", "trade_intensity", "large_trade", "cvd",
+    # Derived — primary BTC (10-13)
+    "volatility_1s", "vwap_deviation", "momentum_5s", "funding_rate",
+    # ETH leading signal (14-16) — ETH sometimes moves before BTC
+    "eth_momentum_1s", "eth_ofi", "eth_leading_signal",
+    # Liquidation clusters (17-19)
+    "open_interest_delta", "long_short_ratio", "liquidation_proximity",
+    # Spoofing (20)
+    "spoof_score",
+    # Volatility regime (21-22)
+    "volatility_ratio", "trade_intensity_ratio",
+    # Market regime (23)
+    "hurst_exponent",
+    # Sweep detection (24)
+    "sweep_intensity",
+]
+
+assert len(FEATURE_KEYS) == NUM_FEATURES
+
+
+class FeatureEngine:
+    def __init__(self, order_book: OrderBook) -> None:
+        self._ob = order_book
+
+        # Trade accumulators (ETH)
+        self._trades: deque[dict] = deque(maxlen=5000)
+
+        # BTC state
+        self._eth_trades: deque[dict] = deque(maxlen=3000)
+        self._eth_bids: dict[float, float] = {}
+        self._eth_asks: dict[float, float] = {}
+        self._eth_mid_history: deque[tuple[float, float]] = deque(maxlen=100)  # (timestamp, mid)
+        self._eth_prev_best_bid_vol: float = 0.0
+        self._eth_prev_best_ask_vol: float = 0.0
+        self._eth_ofi_ema: float = 0.0
+
+        # ETH-BTC spread tracking
+        self._eth_btc_ratio_history: deque[float] = deque(maxlen=NORM_WINDOW)
+
+        # Rolling stats for z-score normalization
+        self._feature_history: deque[np.ndarray] = deque(maxlen=NORM_WINDOW)
+
+        # OFI EMA state
+        self._ofi_ema: float = 0.0
+        self._ofi_alpha: float = 2.0 / (EMA_SPAN + 1)
+
+        # Previous snapshot for OFI delta
+        self._prev_snap: Snapshot | None = None
+
+        # Mark price / funding
+        self.funding_rate: float = 0.0
+        self.mark_price: float = 0.0
+
+        # Volatility tracking
+        self._vol_history: deque[float] = deque(maxlen=NORM_WINDOW)
+        self._intensity_history: deque[float] = deque(maxlen=NORM_WINDOW)
+
+        # Spoofing detection: track large orders
+        # {price_level: (first_seen_time, volume)}
+        self._large_order_tracker: dict[float, tuple[float, float]] = {}
+
+        # Hurst exponent: rolling mid-price history
+        self._mid_price_history: deque[float] = deque(maxlen=HURST_WINDOW)
+
+        # Sweep detection: previous best bid/ask levels count
+        self._prev_bid_levels: int = 0
+        self._prev_ask_levels: int = 0
+        self._sweep_events: deque[tuple[float, int]] = deque(maxlen=100)  # (timestamp, levels_swept)
+
+        # Derivatives data (set by ws_client polling)
+        self._ws = None  # set via set_ws_client()
+
+        # Current feature vector
+        self.features: np.ndarray = np.zeros(NUM_FEATURES, dtype=np.float64)
+        self.features_raw: dict[str, float] = {}
+        self.last_update: float = 0.0
+
+    def set_ws_client(self, ws: Any) -> None:
+        """Set reference to ws_client for OI/LS data access."""
+        self._ws = ws
+
+    # --- Data ingestion callbacks ---
+
+    def on_aggtrade(self, data: dict) -> None:
+        self._trades.append({
+            "T": data.get("T", int(time.time() * 1000)),
+            "p": float(data.get("p", 0)),
+            "q": float(data.get("q", 0)),
+            "m": data.get("m", False),
+        })
+
+    def on_markprice(self, data: dict) -> None:
+        self.funding_rate = float(data.get("r", 0))
+        self.mark_price = float(data.get("p", 0))
+
+    def on_secondary_aggtrade(self, data: dict) -> None:
+        ts = data.get("T", int(time.time() * 1000))
+        price = float(data.get("p", 0))
+        self._eth_trades.append({
+            "T": ts,
+            "p": price,
+            "q": float(data.get("q", 0)),
+            "m": data.get("m", False),
+        })
+        self._eth_mid_history.append((ts / 1000.0, price))
+
+    def on_secondary_depth(self, data: dict) -> None:
+        for price_s, qty_s in data.get("b", []):
+            p, q = float(price_s), float(qty_s)
+            if q == 0:
+                self._eth_bids.pop(p, None)
+            else:
+                self._eth_bids[p] = q
+        for price_s, qty_s in data.get("a", []):
+            p, q = float(price_s), float(qty_s)
+            if q == 0:
+                self._eth_asks.pop(p, None)
+            else:
+                self._eth_asks[p] = q
+
+    # --- Main update ---
+
+    def update(self) -> np.ndarray:
+        snap = self._ob.current
+        if snap is None or not self._ob.is_synced:
+            return self.features
+
+        now_ms = int(time.time() * 1000)
+        now_s = time.monotonic()
+        raw = {}
+
+        # === LOB features ===
+        raw["ofi"] = self._calc_ofi(snap)
+        raw["imbalance_ratio"] = self._calc_imbalance_ratio(snap)
+        raw["imbalance_velocity"] = self._calc_imbalance_velocity()
+        raw["spread"] = snap.spread
+        raw["depth_ratio_l5"] = self._calc_depth_ratio(snap)
+        raw["large_order"] = self._calc_large_order(snap)
+
+        # === Trade flow features ===
+        raw["trade_flow_imbalance"] = self._calc_trade_flow_imbalance(now_ms)
+        raw["trade_intensity"] = self._calc_trade_intensity(now_ms)
+        raw["large_trade"] = self._calc_large_trade()
+        raw["cvd"] = self._calc_cvd(now_ms)
+
+        # === Derived features ===
+        raw["volatility_1s"] = self._calc_volatility()
+        raw["vwap_deviation"] = self._calc_vwap_deviation(snap, now_ms)
+        raw["momentum_5s"] = self._calc_momentum()
+        raw["funding_rate"] = self.funding_rate
+
+        # === ETH leading signal (secondary instrument) ===
+        raw["eth_momentum_1s"] = self._calc_eth_momentum()
+        raw["eth_ofi"] = self._calc_eth_ofi()
+        raw["eth_leading_signal"] = self._calc_eth_leading_signal(snap)
+
+        # === Liquidation cluster features ===
+        raw["open_interest_delta"] = self._calc_oi_delta()
+        raw["long_short_ratio"] = self._get_long_short_ratio()
+        raw["liquidation_proximity"] = self._calc_liquidation_proximity(snap)
+
+        # === Spoofing detection ===
+        raw["spoof_score"] = self._calc_spoof_score(snap, now_s)
+
+        # === Market regime ===
+        self._mid_price_history.append(snap.mid_price)
+        raw["hurst_exponent"] = self._calc_hurst()
+
+        # === Sweep detection ===
+        raw["sweep_intensity"] = self._calc_sweep(snap, now_s)
+
+        # === Volatility regime ===
+        self._vol_history.append(raw["volatility_1s"])
+        self._intensity_history.append(raw["trade_intensity"])
+
+        if len(self._vol_history) >= 30:
+            vol_mean = float(np.mean(list(self._vol_history)))
+            vol_std = float(np.std(list(self._vol_history)))
+            raw["volatility_3sigma"] = vol_mean + 3 * vol_std
+            raw["volatility_ratio"] = raw["volatility_1s"] / (vol_mean + 1e-10)
+        else:
+            raw["volatility_3sigma"] = raw["volatility_1s"] * 3
+            raw["volatility_ratio"] = 1.0
+
+        if len(self._intensity_history) >= 30:
+            int_mean = float(np.mean(list(self._intensity_history)))
+            raw["trade_intensity_ratio"] = raw["trade_intensity"] / (int_mean + 1e-10)
+        else:
+            raw["trade_intensity_ratio"] = 1.0
+
+        self.features_raw = raw
+        self._prev_snap = snap
+
+        # Build normalized feature vector
+        vec = np.array([raw.get(k, 0.0) for k in FEATURE_KEYS], dtype=np.float64)
+
+        # Z-score normalization
+        self._feature_history.append(vec.copy())
+        if len(self._feature_history) >= 10:
+            hist = np.array(list(self._feature_history))
+            mean = hist.mean(axis=0)
+            std = hist.std(axis=0) + 1e-8
+            vec = (vec - mean) / std
+
+        self.features = vec
+        self.last_update = time.monotonic()
+        return vec
+
+    # === LOB features ===
+
+    def _calc_ofi(self, snap: Snapshot) -> float:
+        if self._prev_snap is None:
+            return 0.0
+        prev = self._prev_snap
+        delta_bid = float(snap.bids[0, 1]) - float(prev.bids[0, 1])
+        if snap.bids[0, 0] != prev.bids[0, 0]:
+            delta_bid = float(snap.bids[0, 1])
+        delta_ask = float(snap.asks[0, 1]) - float(prev.asks[0, 1])
+        if snap.asks[0, 0] != prev.asks[0, 0]:
+            delta_ask = float(snap.asks[0, 1])
+        ofi = delta_bid - delta_ask
+        self._ofi_ema = self._ofi_alpha * ofi + (1 - self._ofi_alpha) * self._ofi_ema
+        return self._ofi_ema
+
+    def _calc_imbalance_ratio(self, snap: Snapshot) -> float:
+        bid_vol = float(snap.bids[:5, 1].sum())
+        ask_vol = float(snap.asks[:5, 1].sum())
+        total = bid_vol + ask_vol
+        return (bid_vol - ask_vol) / total if total > 0 else 0.0
+
+    def _calc_imbalance_velocity(self) -> float:
+        ring = self._ob.ring
+        if len(ring) < 6:
+            return 0.0
+
+        def _imb(s: Snapshot) -> float:
+            bv = float(s.bids[:5, 1].sum())
+            av = float(s.asks[:5, 1].sum())
+            t = bv + av
+            return (bv - av) / t if t > 0 else 0.0
+
+        return _imb(ring[-1]) - _imb(ring[-6])
+
+    def _calc_depth_ratio(self, snap: Snapshot) -> float:
+        bid_vol = float(snap.bids[:5, 1].sum())
+        ask_vol = float(snap.asks[:5, 1].sum())
+        return bid_vol / ask_vol if ask_vol > 0 else 10.0
+
+    def _calc_large_order(self, snap: Snapshot) -> float:
+        if np.any(snap.bids[:5, 1] > SPOOF_SIZE_THRESHOLD) or \
+           np.any(snap.asks[:5, 1] > SPOOF_SIZE_THRESHOLD):
+            return 1.0
+        return 0.0
+
+    # === Trade flow ===
+
+    def _calc_trade_flow_imbalance(self, now_ms: int) -> float:
+        cutoff = now_ms - TRADE_WINDOW_SEC * 1000
+        buy_vol = sell_vol = 0.0
+        for t in reversed(self._trades):
+            if t["T"] < cutoff:
+                break
+            if t["m"]:
+                sell_vol += t["q"]
+            else:
+                buy_vol += t["q"]
+        total = buy_vol + sell_vol
+        return (buy_vol - sell_vol) / total if total > 0 else 0.0
+
+    def _calc_trade_intensity(self, now_ms: int) -> float:
+        cutoff = now_ms - 1000
+        return float(sum(1 for t in reversed(self._trades) if t["T"] >= cutoff))
+
+    def _calc_large_trade(self) -> float:
+        if not self._trades:
+            return 0.0
+        return 1.0 if self._trades[-1]["q"] > 10.0 else 0.0
+
+    def _calc_cvd(self, now_ms: int) -> float:
+        cutoff = now_ms - CVD_WINDOW_SEC * 1000
+        cvd = 0.0
+        for t in reversed(self._trades):
+            if t["T"] < cutoff:
+                break
+            cvd += -t["q"] if t["m"] else t["q"]
+        return cvd
+
+    # === Derived ===
+
+    def _calc_volatility(self) -> float:
+        ring = self._ob.ring
+        if len(ring) < 11:
+            return 0.0
+        prices = [s.mid_price for s in list(ring)[-11:]]
+        returns = np.diff(prices) / np.array(prices[:-1])
+        return float(np.std(returns))
+
+    def _calc_vwap_deviation(self, snap: Snapshot, now_ms: int) -> float:
+        cutoff = now_ms - VWAP_WINDOW_SEC * 1000
+        pv_sum = v_sum = 0.0
+        for t in reversed(self._trades):
+            if t["T"] < cutoff:
+                break
+            pv_sum += t["p"] * t["q"]
+            v_sum += t["q"]
+        if v_sum == 0:
+            return 0.0
+        vwap = pv_sum / v_sum
+        return (snap.mid_price - vwap) / vwap
+
+    def _calc_momentum(self) -> float:
+        ring = self._ob.ring
+        n = min(50, len(ring))
+        if n < 2:
+            return 0.0
+        curr = ring[-1].mid_price
+        prev = ring[-n].mid_price
+        return (curr - prev) / prev if prev > 0 else 0.0
+
+    # === ETH leading signal (secondary instrument) ===
+
+    def _calc_eth_momentum(self) -> float:
+        """ETH price change over last 1 second (may lead BTC)."""
+        if len(self._eth_mid_history) < 2:
+            return 0.0
+        now = self._eth_mid_history[-1]
+        cutoff = now[0] - 1.0
+        oldest = now
+        for ts, price in reversed(self._eth_mid_history):
+            if ts < cutoff:
+                oldest = (ts, price)
+                break
+        if oldest[1] == 0 or oldest[0] == now[0]:
+            return 0.0
+        return (now[1] - oldest[1]) / oldest[1]
+
+    def _calc_eth_ofi(self) -> float:
+        """ETH order flow imbalance from depth updates."""
+        if not self._eth_bids:
+            return 0.0
+        best_bid_price = max(self._eth_bids.keys()) if self._eth_bids else 0
+        best_bid_vol = self._eth_bids.get(best_bid_price, 0)
+        best_ask_price = min(self._eth_asks.keys()) if self._eth_asks else 0
+        best_ask_vol = self._eth_asks.get(best_ask_price, 0)
+
+        delta_bid = best_bid_vol - self._eth_prev_best_bid_vol
+        delta_ask = best_ask_vol - self._eth_prev_best_ask_vol
+        self._eth_prev_best_bid_vol = best_bid_vol
+        self._eth_prev_best_ask_vol = best_ask_vol
+
+        ofi = delta_bid - delta_ask
+        self._eth_ofi_ema = self._ofi_alpha * ofi + (1 - self._ofi_alpha) * self._eth_ofi_ema
+        return self._eth_ofi_ema
+
+    def _calc_eth_leading_signal(self, snap: Snapshot) -> float:
+        """ETH/BTC ratio deviation from rolling average.
+
+        If ETH moved but BTC hasn't yet → leading signal for BTC direction.
+        """
+        if not self._eth_mid_history:
+            return 0.0
+        btc_price = self._eth_mid_history[-1][1]
+        if btc_price == 0:
+            return 0.0
+        eth_btc = snap.mid_price / btc_price
+
+        self._eth_btc_ratio_history.append(eth_btc)
+        if len(self._eth_btc_ratio_history) < 30:
+            return 0.0
+
+        mean = float(np.mean(list(self._eth_btc_ratio_history)))
+        return (eth_btc - mean) / mean if mean > 0 else 0.0
+
+    # === Liquidation clusters ===
+
+    def _calc_oi_delta(self) -> float:
+        """Open interest change (current vs previous poll, ~15s apart)."""
+        if self._ws is None:
+            return 0.0
+        if self._ws.open_interest_prev == 0:
+            return 0.0
+        return (self._ws.open_interest - self._ws.open_interest_prev) / self._ws.open_interest_prev
+
+    def _get_long_short_ratio(self) -> float:
+        if self._ws is None:
+            return 1.0
+        return self._ws.long_short_ratio
+
+    def _calc_liquidation_proximity(self, snap: Snapshot) -> float:
+        """Estimate proximity to liquidation cluster.
+
+        Heuristic: with x50-x100 leverage, liquidation happens at ~1-2% from entry.
+        If L/S ratio is skewed (lots of longs), liquidation cluster is ~1-2% BELOW price.
+        If lots of shorts, cluster is ~1-2% ABOVE.
+
+        Returns signed value: positive = cluster above (shorts at risk),
+        negative = cluster below (longs at risk).
+        """
+        if self._ws is None:
+            return 0.0
+        ls = self._ws.long_short_ratio
+        mid = snap.mid_price
+        if mid == 0 or ls == 0:
+            return 0.0
+
+        # Estimate cluster distance (1.5% for x50-x100 leverage average)
+        cluster_pct = 0.015
+
+        if ls > 1.2:
+            # More longs → cluster below (longs get liquidated on dip)
+            cluster_price = mid * (1 - cluster_pct)
+            return -(mid - cluster_price) / mid  # negative: danger below
+        elif ls < 0.8:
+            # More shorts → cluster above (shorts get liquidated on pump)
+            cluster_price = mid * (1 + cluster_pct)
+            return (cluster_price - mid) / mid  # positive: danger above
+        else:
+            return 0.0  # balanced, no dominant cluster
+
+    # === Spoofing detection ===
+
+    def _calc_spoof_score(self, snap: Snapshot, now_s: float) -> float:
+        """Detect spoofed orders: large orders that persist without price reaction.
+
+        Real large orders cause price to move toward them.
+        Spoof orders sit at a level, create false imbalance, then disappear.
+        """
+        current_large = set()
+
+        # Track large orders on bid side (top 5 levels)
+        for i in range(min(5, len(snap.bids))):
+            price = float(snap.bids[i, 0])
+            vol = float(snap.bids[i, 1])
+            if vol > SPOOF_SIZE_THRESHOLD:
+                current_large.add(price)
+                if price not in self._large_order_tracker:
+                    self._large_order_tracker[price] = (now_s, vol)
+
+        # Track large orders on ask side
+        for i in range(min(5, len(snap.asks))):
+            price = float(snap.asks[i, 0])
+            vol = float(snap.asks[i, 1])
+            if vol > SPOOF_SIZE_THRESHOLD:
+                current_large.add(price)
+                if price not in self._large_order_tracker:
+                    self._large_order_tracker[price] = (now_s, vol)
+
+        # Remove orders that disappeared
+        gone = [p for p in self._large_order_tracker if p not in current_large]
+        for p in gone:
+            del self._large_order_tracker[p]
+
+        if not self._large_order_tracker:
+            return 0.0
+
+        # Score: how many large orders have persisted > SPOOF_LIFETIME without price moving to them
+        spoof_count = 0
+        real_count = 0
+        mid = snap.mid_price
+
+        for price, (first_seen, vol) in self._large_order_tracker.items():
+            age = now_s - first_seen
+            if age < SPOOF_LIFETIME_SEC:
+                continue  # too early to judge
+
+            # Did price move toward this order?
+            distance_pct = abs(price - mid) / mid
+            if distance_pct < 0.0001:
+                # Price reached the order — real
+                real_count += 1
+            else:
+                # Price didn't move toward it — likely spoof
+                spoof_count += 1
+
+        total = spoof_count + real_count
+        if total == 0:
+            return 0.0
+        return spoof_count / total  # 0 = all real, 1 = all spoof
+
+    # === Market regime: Hurst exponent ===
+
+    def _calc_hurst(self) -> float:
+        """Simplified Hurst exponent via rescaled range (R/S) method.
+
+        H > 0.55: trending (momentum works)
+        H < 0.45: mean-reverting (reversal works)
+        0.45-0.55: random walk
+        """
+        prices = list(self._mid_price_history)
+        n = len(prices)
+        if n < 100:
+            return 0.5  # default: random walk
+
+        # Use last 600-3000 points (1-5 minutes)
+        series = np.array(prices[-min(n, HURST_WINDOW):])
+        returns = np.diff(np.log(series + 1e-10))
+
+        if len(returns) < 20:
+            return 0.5
+
+        # R/S analysis over multiple sub-intervals
+        rs_list = []
+        for chunk_size in [20, 50, 100, 200]:
+            if chunk_size > len(returns):
+                break
+            n_chunks = len(returns) // chunk_size
+            for i in range(n_chunks):
+                chunk = returns[i * chunk_size:(i + 1) * chunk_size]
+                mean = chunk.mean()
+                deviate = np.cumsum(chunk - mean)
+                r = deviate.max() - deviate.min()
+                s = chunk.std()
+                if s > 0:
+                    rs_list.append((chunk_size, r / s))
+
+        if len(rs_list) < 4:
+            return 0.5
+
+        # Log-log regression: log(R/S) = H * log(n) + c
+        sizes = np.array([np.log(x[0]) for x in rs_list])
+        rs_vals = np.array([np.log(x[1]) for x in rs_list])
+
+        # Simple linear regression
+        n_pts = len(sizes)
+        sx = sizes.sum()
+        sy = rs_vals.sum()
+        sxx = (sizes * sizes).sum()
+        sxy = (sizes * rs_vals).sum()
+        denom = n_pts * sxx - sx * sx
+        if denom == 0:
+            return 0.5
+
+        h = (n_pts * sxy - sx * sy) / denom
+        return float(np.clip(h, 0.0, 1.0))
+
+    # === Sweep detection ===
+
+    def _calc_sweep(self, snap: Snapshot, now_s: float) -> float:
+        """Detect sweeps: market orders that consume 3+ levels in one tick.
+
+        Tracks how many bid/ask levels were removed since last snapshot.
+        """
+        if self._prev_snap is None:
+            self._prev_bid_levels = int((snap.bids[:, 1] > 0).sum())
+            self._prev_ask_levels = int((snap.asks[:, 1] > 0).sum())
+            return 0.0
+
+        prev = self._prev_snap
+        # Count non-zero levels
+        curr_bid_levels = int((snap.bids[:, 1] > 0).sum())
+        curr_ask_levels = int((snap.asks[:, 1] > 0).sum())
+
+        # Levels disappeared = swept by market orders
+        bid_swept = max(0, self._prev_bid_levels - curr_bid_levels)
+        ask_swept = max(0, self._prev_ask_levels - curr_ask_levels)
+
+        # Also detect price jumping multiple ticks
+        # BTC tick size = $0.10
+        tick_size = 0.10
+        bid_price_jump = abs(snap.best_bid - prev.best_bid) / tick_size if prev.best_bid > 0 else 0
+        ask_price_jump = abs(snap.best_ask - prev.best_ask) / tick_size if prev.best_ask > 0 else 0
+
+        levels_swept = max(bid_swept, ask_swept, int(bid_price_jump) - 1, int(ask_price_jump) - 1)
+        levels_swept = max(0, levels_swept)
+
+        self._prev_bid_levels = curr_bid_levels
+        self._prev_ask_levels = curr_ask_levels
+
+        if levels_swept >= 3:
+            self._sweep_events.append((now_s, levels_swept))
+
+        # Sweep intensity: total levels swept in last 1 second
+        cutoff = now_s - 1.0
+        intensity = sum(lvl for ts, lvl in self._sweep_events if ts >= cutoff)
+        return float(intensity)
+
+    # === LOB tensor for CNN ===
+
+    def build_lob_tensor(self) -> np.ndarray | None:
+        ring = self._ob.ring
+        if len(ring) < 50:
+            return None
+
+        snapshots = list(ring)[-50:]
+        tensor = np.zeros((3, BOOK_DEPTH, 50), dtype=np.float32)
+        for t, snap in enumerate(snapshots):
+            tensor[0, :, t] = snap.bids[:, 1]
+            tensor[1, :, t] = snap.asks[:, 1]
+
+        for t, snap in enumerate(snapshots):
+            ts = snap.timestamp
+            ts_next = snapshots[t + 1].timestamp if t < 49 else ts + 100
+            buy_vol = sell_vol = 0.0
+            for trade in self._trades:
+                if ts <= trade["T"] < ts_next:
+                    if trade["m"]:
+                        sell_vol += trade["q"]
+                    else:
+                        buy_vol += trade["q"]
+            tensor[2, 0, t] = buy_vol
+            tensor[2, 1, t] = sell_vol
+
+        return tensor

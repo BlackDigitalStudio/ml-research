@@ -1,0 +1,8 @@
+data/
+logs/
+models/
+*.pyc
+__pycache__/
+venv/
+config.env
+_tmp_*
