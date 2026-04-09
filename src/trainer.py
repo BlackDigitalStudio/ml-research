@@ -89,7 +89,7 @@ class Trainer:
         logger.info("Loaded %d trades", len(df))
         return df
 
-    def _load_parquet_dir(self, subdir: str, hours: int) -> pd.DataFrame | None:
+    def _load_parquet_dir(self, subdir: str, hours: int, dedup_cols: list[str] | None = None) -> pd.DataFrame | None:
         """Load parquet files from a data subdirectory. Returns None if empty."""
         d = self._data_dir / subdir
         if not d.exists():
@@ -100,6 +100,12 @@ class Trainer:
         files = files[-hours:]
         dfs = [pd.read_parquet(f) for f in files]
         df = pd.concat(dfs, ignore_index=True).sort_values("timestamp").reset_index(drop=True)
+        if dedup_cols:
+            before = len(df)
+            df = df.drop_duplicates(subset=dedup_cols).reset_index(drop=True)
+            dupes = before - len(df)
+            if dupes > 0:
+                logger.info("Removed %d duplicates from %s (%.1f%%)", dupes, subdir, dupes / before * 100)
         logger.info("Loaded %d rows from %s (%d files)", len(df), subdir, len(files))
         return df
 
@@ -147,7 +153,21 @@ class Trainer:
         depth_ts = depth_df["timestamp"].values.astype(np.int64).copy()
         del depth_df, bids_raw, asks_raw  # free ~1 GB of Python objects
         gc.collect()
-        logger.info("Depth parsed, DataFrame freed")
+
+        # Filter crossed books (bid >= ask = desync after reconnect)
+        valid_book = bid_prices[:, 0] < ask_prices[:, 0]
+        n_crossed = (~valid_book).sum()
+        if n_crossed > 0:
+            logger.info("Filtering %d crossed-book snapshots (%.2f%%)", n_crossed, n_crossed / n * 100)
+            bid_prices = bid_prices[valid_book]
+            bid_vols = bid_vols[valid_book]
+            ask_prices = ask_prices[valid_book]
+            ask_vols = ask_vols[valid_book]
+            mid_prices = mid_prices[valid_book]
+            depth_ts = depth_ts[valid_book]
+            n = len(depth_ts)
+
+        logger.info("Depth parsed, %d valid snapshots", n)
 
         # === Load and parse trades (free DataFrame ASAP) ===
         trade_df = self.load_trade_data(hours)
@@ -158,7 +178,7 @@ class Trainer:
         gc.collect()
 
         # === Load auxiliary data (ETH trades, funding, derivatives) ===
-        eth_trade_df = self._load_parquet_dir("eth_trades", hours)
+        eth_trade_df = self._load_parquet_dir("eth_trades", hours, dedup_cols=["timestamp", "price", "quantity"])
         eth_ts = eth_qty = eth_side = eth_price = None
         if eth_trade_df is not None and len(eth_trade_df) > 0:
             eth_ts = eth_trade_df["timestamp"].values.astype(np.int64).copy()

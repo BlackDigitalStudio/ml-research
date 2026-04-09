@@ -314,8 +314,10 @@ class BinanceWSClient:
     async def _run_bybit_stream(self) -> None:
         """Bybit BTCUSDT aggTrade -- leads Binance by 100-500ms."""
         backoff = 1
+        seen_ids: set[str] = set()  # dedup Bybit trade IDs within session
         while True:
             try:
+                seen_ids.clear()
                 async with self._session.ws_connect("wss://stream.bybit.com/v5/public/linear") as ws:
                     await ws.send_json({"op": "subscribe", "args": ["publicTrade.BTCUSDT"]})
                     logger.info("Bybit WS connected")
@@ -325,6 +327,14 @@ class BinanceWSClient:
                             raw = orjson.loads(msg.data)
                             if raw.get("topic") == "publicTrade.BTCUSDT" and self._on_bybit_aggtrade:
                                 for t in raw.get("data", []):
+                                    tid = t.get("i", "")
+                                    if tid and tid in seen_ids:
+                                        continue  # skip duplicate
+                                    if tid:
+                                        seen_ids.add(tid)
+                                        if len(seen_ids) > 100_000:
+                                            # Prune old entries to avoid memory growth
+                                            seen_ids = set(list(seen_ids)[-50_000:])
                                     await self._on_bybit_aggtrade({
                                         "T": t.get("T", 0),
                                         "p": t.get("p", "0"),
