@@ -103,7 +103,8 @@ class SignalGenerator:
 
         # Hurst-based regime adjustment
         hurst = raw.get("hurst_exponent", 0.5)
-        size = self._calc_size(balance, hurst)
+        n_votes = getattr(self._model, 'last_n_votes', 5)
+        size = self._calc_size(balance, hurst, confidence=confidence, n_votes=n_votes)
         if size <= 0:
             return Signal.NONE
 
@@ -177,7 +178,10 @@ class SignalGenerator:
 
         return tp_pct, sl_pct
 
-    def _calc_size(self, balance: float, hurst: float = 0.5) -> float:
+    def _calc_size(
+        self, balance: float, hurst: float = 0.5,
+        confidence: float = 0.6, n_votes: int = 5,
+    ) -> float:
         if balance <= 0:
             return 0.0
 
@@ -188,6 +192,14 @@ class SignalGenerator:
         if 0.45 <= hurst <= 0.55:
             position_notional *= 0.5  # uncertain regime → half size
         # In trending or mean-reverting regime → full size
+
+        # Ensemble confidence scaling (Item 4)
+        if n_votes >= 5 and confidence > 0.65:
+            pass  # full size
+        elif n_votes >= 4:
+            position_notional *= 0.75
+        elif n_votes >= 3:
+            position_notional *= 0.50
 
         mid = self._features._ob.current.mid_price
         if mid <= 0:
