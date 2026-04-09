@@ -204,17 +204,17 @@ class FeatureEngine:
         raw["volatility_1s"] = self._calc_volatility()
         raw["vwap_deviation"] = self._calc_vwap_deviation(snap, now_ms)
         raw["momentum_5s"] = self._calc_momentum()
-        raw["funding_rate"] = self.funding_rate
-
-        # === ETH leading signal (secondary instrument) ===
-        raw["eth_momentum_1s"] = self._calc_eth_momentum()
-        raw["eth_ofi"] = self._calc_eth_ofi()
-        raw["eth_leading_signal"] = self._calc_eth_leading_signal(snap)
-
-        # === Liquidation cluster features ===
-        raw["open_interest_delta"] = self._calc_oi_delta()
-        raw["long_short_ratio"] = self._get_long_short_ratio()
-        raw["liquidation_proximity"] = self._calc_liquidation_proximity(snap)
+        # === Features zeroed to match training (no historical data available) ===
+        # These are computed in runtime but NOT in training, so we zero them
+        # to prevent train/inference distribution mismatch.
+        # TODO: enable once training pipeline can consume this data
+        raw["funding_rate"] = 0.0            # [13] — no funding in historical
+        raw["eth_momentum_1s"] = 0.0         # [14] — ETH not loaded in trainer
+        raw["eth_ofi"] = 0.0                 # [15]
+        raw["eth_leading_signal"] = 0.0      # [16]
+        raw["open_interest_delta"] = 0.0     # [17] — no OI in historical
+        raw["long_short_ratio"] = 0.0        # [18] — no L/S in historical
+        raw["liquidation_proximity"] = 0.0   # [19] — depends on L/S
 
         # === Spoofing detection ===
         raw["spoof_score"] = self._calc_spoof_score(snap, now_s)

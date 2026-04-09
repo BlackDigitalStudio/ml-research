@@ -323,12 +323,20 @@ class Trainer:
             adj = np.clip(indices[m10] - 10, 0, len(vol_all) - 1)
             feat[m10, 10] = vol_all[adj].astype(np.float32)
 
-        # [11] VWAP deviation — placeholder in training
-        # [13] Funding rate — placeholder
-        # [14-16] ETH signals — placeholder
-        # [17] OI delta — placeholder
-        # [19] Liquidation proximity — placeholder
-        feat[:, 18] = 1.0   # neutral L/S ratio
+        # [11] VWAP deviation — (mid - VWAP_60s) / VWAP_60s
+        # Approximate VWAP as rolling mean of mid_prices over 60s window (vectorized)
+        left_60s = np.searchsorted(depth_ts, sample_ts - 60000, side="left")
+        cum_mid = np.zeros(len(mid_prices) + 1, dtype=np.float64)
+        cum_mid[1:] = np.cumsum(mid_prices)
+        hi = indices + 1
+        lo = np.clip(left_60s, 0, len(mid_prices))
+        counts = hi - lo
+        safe_counts = np.where(counts > 0, counts, 1)
+        vwap = (cum_mid[hi] - cum_mid[lo]) / safe_counts
+        feat[:, 11] = np.where(
+            (counts > 0) & (vwap > 0),
+            (mid_prices[indices] - vwap) / vwap, 0.0,
+        ).astype(np.float32)
 
         # [12] Momentum 5s
         m50 = indices >= 50
@@ -336,15 +344,53 @@ class Trainer:
         feat[m50, 12] = np.where(prev50 > 0,
                                   (mid_prices[indices[m50]] - prev50) / prev50, 0).astype(np.float32)
 
+        # [13] Funding rate — unavailable in historical data, 0.0
+        # [14-16] ETH signals — unavailable (ETH data not loaded in trainer), 0.0
+        # [17] OI delta — unavailable, 0.0
+        # [18] L/S ratio — unavailable, 0.0 (NOT 1.0 — must match runtime zeroing)
+        # [19] Liquidation proximity — unavailable, 0.0
+        # NOTE: these features are also zeroed in runtime features.py to ensure consistency
+
         # [20] Spoof score approximation
         m25 = indices >= 25
         has_large = feat[:, 5] > 0
         pc = np.abs(mid_prices[indices] - mid_prices[np.maximum(indices - 25, 0)])
         feat[:, 20] = np.where(has_large & m25 & (pc < 0.10), 1.0, 0.0)
 
-        # [21-22] Volatility/intensity ratios — placeholder
-        feat[:, 21] = 1.0
-        feat[:, 22] = 1.0
+        # [21] Volatility ratio (current / 30-tick rolling average)
+        if m10.any():
+            vol_win_30 = np.lib.stride_tricks.sliding_window_view(vol_all, 30) if len(vol_all) >= 30 else None
+            if vol_win_30 is not None:
+                vol_mean_all = vol_win_30.mean(axis=1)  # (n - 10 - 29,)
+                m_vr = indices >= 40  # need 10 for vol + 30 for rolling mean
+                adj_vr = np.clip(indices[m_vr] - 40, 0, len(vol_mean_all) - 1)
+                adj_v = np.clip(indices[m_vr] - 10, 0, len(vol_all) - 1)
+                feat[m_vr, 21] = np.where(
+                    vol_mean_all[adj_vr] > 0,
+                    vol_all[adj_v] / (vol_mean_all[adj_vr] + 1e-10),
+                    1.0,
+                ).astype(np.float32)
+
+        # [22] Trade intensity ratio (current / 30-tick rolling average)
+        # Per-tick trade count
+        tick_intensity = np.zeros(len(depth_ts), dtype=np.float32)
+        t_tick_idx = np.searchsorted(depth_ts, trade_ts, side="right") - 1
+        t_tick_idx = np.clip(t_tick_idx, 0, len(depth_ts) - 1)
+        np.add.at(tick_intensity, t_tick_idx, 1.0)
+        if len(tick_intensity) >= 40:
+            int_win = np.lib.stride_tricks.sliding_window_view(tick_intensity, 10)
+            curr_int = int_win.sum(axis=1)  # intensity over 10 ticks (1s)
+            if len(curr_int) >= 30:
+                int_mean_win = np.lib.stride_tricks.sliding_window_view(curr_int, 30)
+                int_mean_all = int_mean_win.mean(axis=1)
+                m_ir = indices >= 40
+                adj_ci = np.clip(indices[m_ir] - 10, 0, len(curr_int) - 1)
+                adj_im = np.clip(indices[m_ir] - 40, 0, len(int_mean_all) - 1)
+                feat[m_ir, 22] = np.where(
+                    int_mean_all[adj_im] > 0,
+                    curr_int[adj_ci] / (int_mean_all[adj_im] + 1e-10),
+                    1.0,
+                ).astype(np.float32)
 
         # [23] Hurst exponent (R/S, batched for memory)
         log_ret = np.diff(np.log(mid_prices + 1e-10))
@@ -376,6 +422,49 @@ class Trainer:
         bid_jump = np.abs(bid_prices[indices[m1], 0] - bid_prices[indices[m1] - 1, 0]) / tick_size
         ask_jump = np.abs(ask_prices[indices[m1], 0] - ask_prices[indices[m1] - 1, 0]) / tick_size
         feat[m1, 24] = np.maximum(0, np.maximum(bid_jump, ask_jump) - 1).astype(np.float32)
+
+        # [25] Cancellation rate diff (ask_cancel - bid_cancel over ~10 ticks ≈ 1s)
+        # Cancel = volume drop at a level without trade. Approximate: Δvol < 0 at each level.
+        bid_vol_diff = np.diff(bid_vols[:, :5], axis=0)  # (n-1, 5)
+        ask_vol_diff = np.diff(ask_vols[:, :5], axis=0)  # (n-1, 5)
+        # Negative diff = volume removed (cancelled or filled)
+        bid_cancel_tick = np.maximum(0, -bid_vol_diff).sum(axis=1)  # (n-1,)
+        ask_cancel_tick = np.maximum(0, -ask_vol_diff).sum(axis=1)
+        # Pad to length n
+        bid_cancel_tick = np.concatenate([[0], bid_cancel_tick])
+        ask_cancel_tick = np.concatenate([[0], ask_cancel_tick])
+        # Rolling sum over 10 ticks (~1 second)
+        if len(bid_cancel_tick) >= 10:
+            bc_win = np.lib.stride_tricks.sliding_window_view(bid_cancel_tick, 10).sum(axis=1)
+            ac_win = np.lib.stride_tricks.sliding_window_view(ask_cancel_tick, 10).sum(axis=1)
+            m_cr = indices >= 10
+            adj_cr = np.clip(indices[m_cr] - 10, 0, len(bc_win) - 1)
+            feat[m_cr, 25] = (ac_win[adj_cr] - bc_win[adj_cr]).astype(np.float32)
+
+        # [26-29] Multi-timeframe OFI
+        # Raw OFI per tick already computed as (d_bid - d_ask)
+        ofi_raw = (d_bid - d_ask)  # (n,)
+        # [26] OFI 1s (sum over 10 ticks)
+        if len(ofi_raw) >= 10:
+            ofi_1s_all = np.lib.stride_tricks.sliding_window_view(ofi_raw, 10).sum(axis=1)
+            m_o1 = indices >= 10
+            feat[m_o1, 26] = ofi_1s_all[np.clip(indices[m_o1] - 10, 0, len(ofi_1s_all) - 1)].astype(np.float32)
+        # [27] OFI 5s (sum over 50 ticks)
+        if len(ofi_raw) >= 50:
+            ofi_5s_all = np.lib.stride_tricks.sliding_window_view(ofi_raw, 50).sum(axis=1)
+            m_o5 = indices >= 50
+            feat[m_o5, 27] = ofi_5s_all[np.clip(indices[m_o5] - 50, 0, len(ofi_5s_all) - 1)].astype(np.float32)
+        # [28] OFI 30s (sum over 300 ticks)
+        if len(ofi_raw) >= 300:
+            ofi_30s_all = np.lib.stride_tricks.sliding_window_view(ofi_raw, 300).sum(axis=1)
+            m_o30 = indices >= 300
+            feat[m_o30, 28] = ofi_30s_all[np.clip(indices[m_o30] - 300, 0, len(ofi_30s_all) - 1)].astype(np.float32)
+        # [29] OFI divergence: ofi_1s - ofi_30s when signs differ
+        if len(ofi_raw) >= 300:
+            m_div = indices >= 300
+            short = feat[m_div, 26]
+            long_ = feat[m_div, 28]
+            feat[m_div, 29] = np.where(short * long_ < 0, short - long_, 0.0).astype(np.float32)
 
         return feat
 
