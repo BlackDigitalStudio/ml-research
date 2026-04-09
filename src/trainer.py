@@ -1,16 +1,18 @@
-"""CNN encoder + XGBoost trainer.
+"""CNN encoder + ensemble trainer.
 
 Reads Parquet data, builds training samples, trains models, saves with symlinks.
 Designed to run in a separate process (not in the trading event loop).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
@@ -488,55 +490,110 @@ class Trainer:
             embeddings.append(emb)
         return np.vstack(embeddings)
 
-    def train_xgboost(
+    def train_ensemble(
         self,
         embeddings: np.ndarray,
         X_feat: np.ndarray,
         y: np.ndarray,
         val_split: float = 0.2,
-    ) -> xgb.Booster:
+    ) -> tuple[list[xgb.Booster], object, object, list[int]]:
         X = np.hstack([embeddings, X_feat])
         n = len(X)
         split = int(n * (1 - val_split))
+        X_train, X_val = X[:split], X[split:]
+        y_train, y_val = y[:split], y[split:]
 
-        dtrain = xgb.DMatrix(X[:split], label=y[:split])
-        dval = xgb.DMatrix(X[split:], label=y[split:])
+        # --- 3 XGBoost with different seeds, each on random 80% of training rows ---
+        xgb_models = []
+        xgb_importances = []
+        for seed in [42, 123, 456]:
+            rng = np.random.RandomState(seed)
+            idx = rng.choice(len(X_train), size=int(len(X_train) * 0.8), replace=False)
+            dtrain = xgb.DMatrix(X_train[idx], label=y_train[idx])
+            dval_dm = xgb.DMatrix(X_val, label=y_val)
+            params = {
+                "objective": "multi:softprob", "num_class": 3, "max_depth": 6,
+                "learning_rate": 0.05, "min_child_weight": 50, "subsample": 0.8,
+                "colsample_bytree": 0.8, "eval_metric": "mlogloss", "verbosity": 0,
+                "seed": seed,
+            }
+            logger.info("Training XGBoost (seed=%d): %d train (80%%), %d val",
+                         seed, len(idx), len(X_val))
+            model = xgb.train(
+                params, dtrain, num_boost_round=300,
+                evals=[(dval_dm, "val")], early_stopping_rounds=20, verbose_eval=0,
+            )
+            xgb_models.append(model)
+            scores = model.get_score(importance_type="gain")
+            imp = np.zeros(X.shape[1])
+            for k, v in scores.items():
+                imp[int(k[1:])] = v  # feature names are f0, f1, ...
+            xgb_importances.append(imp)
 
-        params = {
-            "objective": "multi:softprob",
-            "num_class": 3,
-            "max_depth": 6,
-            "learning_rate": 0.05,
-            "min_child_weight": 50,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "eval_metric": "mlogloss",
-            "verbosity": 0,
+            # Evaluate individual XGBoost
+            preds = model.predict(dval_dm)
+            y_pred = preds.argmax(axis=1)
+            acc = accuracy_score(y_val, y_pred)
+            logger.info("XGBoost (seed=%d) val accuracy: %.4f", seed, acc)
+
+        # Average importance, get top-5 from hand-crafted features (indices 64+)
+        avg_imp = np.mean(xgb_importances, axis=0)
+        hand_start = embeddings.shape[1]  # 64
+        hand_imp = avg_imp[hand_start:]
+        top5_local = np.argsort(hand_imp)[-5:][::-1]
+        top5_global = (top5_local + hand_start).tolist()
+        logger.info("Top-5 hand-crafted features: %s (importance: %s)",
+                     top5_local.tolist(), hand_imp[top5_local].tolist())
+
+        # --- 1 LightGBM ---
+        import lightgbm as lgb
+        lgb_train = lgb.Dataset(X_train, label=y_train)
+        lgb_val_ds = lgb.Dataset(X_val, label=y_val, reference=lgb_train)
+        lgb_params = {
+            "objective": "multiclass", "num_class": 3, "max_depth": 6,
+            "learning_rate": 0.05, "min_child_samples": 50, "subsample": 0.8,
+            "colsample_bytree": 0.8, "metric": "multi_logloss", "verbosity": -1,
         }
-
-        logger.info("Training XGBoost: %d train, %d val", split, n - split)
-
-        model = xgb.train(
-            params,
-            dtrain,
-            num_boost_round=300,
-            evals=[(dtrain, "train"), (dval, "val")],
-            early_stopping_rounds=20,
-            verbose_eval=50,
+        logger.info("Training LightGBM: %d train, %d val", len(X_train), len(X_val))
+        lgb_model = lgb.train(
+            lgb_params, lgb_train, num_boost_round=300,
+            valid_sets=[lgb_val_ds],
+            callbacks=[lgb.early_stopping(20), lgb.log_evaluation(50)],
         )
 
-        # Evaluate
-        preds = model.predict(dval)
-        y_pred = preds.argmax(axis=1)
-        y_true = y[split:]
+        # Evaluate LightGBM
+        lgb_preds = lgb_model.predict(X_val)
+        lgb_y_pred = lgb_preds.argmax(axis=1)
+        lgb_acc = accuracy_score(y_val, lgb_y_pred)
+        logger.info("LightGBM val accuracy: %.4f", lgb_acc)
 
-        acc = accuracy_score(y_true, y_pred)
-        logger.info("XGBoost val accuracy: %.4f", acc)
+        # --- 1 LogisticRegression on top-5 features ---
+        from sklearn.linear_model import LogisticRegression
+        logreg = LogisticRegression(max_iter=1000, multi_class="multinomial", solver="lbfgs")
+        logger.info("Training LogisticRegression on top-5 features: %s", top5_global)
+        logreg.fit(X_train[:, top5_global], y_train)
+
+        # Evaluate LogisticRegression
+        lr_y_pred = logreg.predict(X_val[:, top5_global])
+        lr_acc = accuracy_score(y_val, lr_y_pred)
+        logger.info("LogisticRegression val accuracy: %.4f", lr_acc)
+
+        # --- Evaluate full ensemble on val ---
+        ensemble_votes = np.zeros((len(X_val), 3), dtype=np.int32)
+        for xgb_m in xgb_models:
+            preds = xgb_m.predict(xgb.DMatrix(X_val))
+            ensemble_votes[np.arange(len(X_val)), preds.argmax(axis=1)] += 1
+        ensemble_votes[np.arange(len(X_val)), lgb_preds.argmax(axis=1)] += 1
+        lr_proba = logreg.predict_proba(X_val[:, top5_global])
+        ensemble_votes[np.arange(len(X_val)), lr_proba.argmax(axis=1)] += 1
+        ensemble_pred = ensemble_votes.argmax(axis=1)
+        ens_acc = accuracy_score(y_val, ensemble_pred)
+        logger.info("Ensemble (5-model majority) val accuracy: %.4f", ens_acc)
         logger.info("\n%s", classification_report(
-            y_true, y_pred, target_names=["UP", "DOWN", "FLAT"],
+            y_val, ensemble_pred, target_names=["UP", "DOWN", "FLAT"],
         ))
 
-        return model
+        return xgb_models, lgb_model, logreg, top5_global
 
     # ---- Save / load ----
 
@@ -552,17 +609,55 @@ class Trainer:
         logger.info("Saved encoder: %s → %s", latest.name, path.name)
         return path
 
-    def save_xgboost(self, model: xgb.Booster) -> Path:
+    def save_ensemble(
+        self,
+        xgb_models: list[xgb.Booster],
+        lgb_model: object,
+        logreg: object,
+        top5_features: list[int],
+    ) -> dict[str, str]:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
-        path = self._model_dir / f"xgb_{ts}.json"
-        model.save_model(str(path))
+        paths: dict[str, str] = {}
 
-        latest = self._model_dir / "xgb_latest.json"
-        latest.unlink(missing_ok=True)
-        latest.symlink_to(path.name)
+        # Save 3 XGBoost models
+        for i, model in enumerate(xgb_models):
+            path = self._model_dir / f"xgb_{i}_{ts}.json"
+            model.save_model(str(path))
+            latest = self._model_dir / f"xgb_{i}_latest.json"
+            latest.unlink(missing_ok=True)
+            latest.symlink_to(path.name)
+            logger.info("Saved XGBoost %d: %s -> %s", i, latest.name, path.name)
+            paths[f"xgb_{i}"] = str(path)
 
-        logger.info("Saved XGBoost: %s → %s", latest.name, path.name)
-        return path
+        # Save LightGBM
+        lgb_path = self._model_dir / f"lgb_{ts}.txt"
+        lgb_model.save_model(str(lgb_path))
+        lgb_latest = self._model_dir / "lgb_latest.txt"
+        lgb_latest.unlink(missing_ok=True)
+        lgb_latest.symlink_to(lgb_path.name)
+        logger.info("Saved LightGBM: %s -> %s", lgb_latest.name, lgb_path.name)
+        paths["lgb"] = str(lgb_path)
+
+        # Save LogisticRegression
+        logreg_path = self._model_dir / f"logreg_{ts}.pkl"
+        joblib.dump(logreg, logreg_path)
+        logreg_latest = self._model_dir / "logreg_latest.pkl"
+        logreg_latest.unlink(missing_ok=True)
+        logreg_latest.symlink_to(logreg_path.name)
+        logger.info("Saved LogReg: %s -> %s", logreg_latest.name, logreg_path.name)
+        paths["logreg"] = str(logreg_path)
+
+        # Save top-5 feature indices
+        feat_path = self._model_dir / f"logreg_features_{ts}.json"
+        with open(feat_path, "w") as f:
+            json.dump(top5_features, f)
+        feat_latest = self._model_dir / "logreg_features.json"
+        feat_latest.unlink(missing_ok=True)
+        feat_latest.symlink_to(feat_path.name)
+        logger.info("Saved LogReg features: %s -> %s", feat_latest.name, feat_path.name)
+        paths["logreg_features"] = str(feat_path)
+
+        return paths
 
     # ---- Full pipeline ----
 
@@ -578,10 +673,12 @@ class Trainer:
         encoder = self.train_cnn(X_lob, y)
         self.save_encoder(encoder)
 
-        # Extract embeddings and train XGBoost
+        # Extract embeddings and train ensemble
         embeddings = self.extract_embeddings(encoder, X_lob)
-        xgb_model = self.train_xgboost(embeddings, X_feat, y)
-        self.save_xgboost(xgb_model)
+        xgb_models, lgb_model, logreg, top5_features = self.train_ensemble(
+            embeddings, X_feat, y,
+        )
+        ensemble_paths = self.save_ensemble(xgb_models, lgb_model, logreg, top5_features)
 
         elapsed = time.monotonic() - t0
         logger.info("Full training completed in %.1f minutes", elapsed / 60)
@@ -590,5 +687,5 @@ class Trainer:
             "samples": len(y),
             "elapsed_min": elapsed / 60,
             "encoder_path": str(self._model_dir / "encoder_latest.pt"),
-            "xgb_path": str(self._model_dir / "xgb_latest.json"),
+            **ensemble_paths,
         }
