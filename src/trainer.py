@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 BOOK_DEPTH = 20
 WINDOW_SIZE = 50       # 5 seconds of snapshots (50 x 100ms)
-HORIZON = 150          # look 15 seconds ahead (150 x 100ms)
+HORIZON = 600          # look 60 seconds ahead (600 x 100ms)
 FLAT_THRESHOLD_PCT = 0.20  # ±0.2% for UP/DOWN label
 
 

@@ -1,6 +1,6 @@
-"""Phase 0: Standalone data recorder for ETHUSDT depth + trades.
+"""Phase 0: Standalone data recorder for BTCUSDT depth + trades + Bybit.
 
-Connects to Binance WebSocket and writes raw data to Parquet files.
+Connects to Binance & Bybit WebSocket and writes raw data to Parquet files.
 Runs independently — no model, no trading.
 
 Usage:
@@ -51,6 +51,7 @@ async def main() -> None:
 
     depth_count = 0
     trade_count = 0
+    bybit_count = 0
     t_start = time.monotonic()
 
     def on_snapshot(snap) -> None:
@@ -63,15 +64,21 @@ async def main() -> None:
         rec.record_trade(data)
         trade_count += 1
 
+    async def on_bybit_trade(data: dict) -> None:
+        nonlocal bybit_count
+        rec.record_bybit_trade(data)
+        bybit_count += 1
+
     ob.on_snapshot(on_snapshot)
 
     await ws.start()
     ws.on_aggtrade(on_trade)
+    ws.on_bybit_aggtrade(on_bybit_trade)
     await asyncio.sleep(2)
     await ob.start()
     await rec.start()
 
-    logger.info("Recording to %s", cfg.data_dir)
+    logger.info("Recording to %s (+ Bybit trades)", cfg.data_dir)
 
     # Graceful shutdown
     shutdown = asyncio.Event()
@@ -97,10 +104,17 @@ async def main() -> None:
         trade_size = sum(f.stat().st_size for f in trades_dir.glob("*.parquet"))
         total_mb = (depth_size + trade_size) / 1024 / 1024
 
+        # Bybit stats
+        bybit_dir = cfg.data_dir / "bybit_trades"
+        bybit_files = len(list(bybit_dir.glob("*.parquet"))) if bybit_dir.exists() else 0
+        bybit_size = sum(f.stat().st_size for f in bybit_dir.glob("*.parquet")) if bybit_dir.exists() else 0
+        total_mb = (depth_size + trade_size + bybit_size) / 1024 / 1024
+
         logger.info(
-            "Stats: %.1fh | depth=%d msgs (%d files, %.1f MB) | trades=%d msgs (%d files, %.1f MB) | total=%.1f MB",
+            "Stats: %.1fh | depth=%d msgs (%d files, %.1f MB) | trades=%d msgs (%d files, %.1f MB) | bybit=%d msgs (%d files, %.1f MB) | total=%.1f MB",
             hours, depth_count, depth_files, depth_size / 1024 / 1024,
-            trade_count, trade_files, trade_size / 1024 / 1024, total_mb,
+            trade_count, trade_files, trade_size / 1024 / 1024,
+            bybit_count, bybit_files, bybit_size / 1024 / 1024, total_mb,
         )
 
     logger.info("Flushing final data...")
@@ -109,8 +123,8 @@ async def main() -> None:
 
     elapsed = time.monotonic() - t_start
     logger.info(
-        "Recording complete: %.1f hours, %d depth, %d trades",
-        elapsed / 3600, depth_count, trade_count,
+        "Recording complete: %.1f hours, %d depth, %d trades, %d bybit",
+        elapsed / 3600, depth_count, trade_count, bybit_count,
     )
 
 
