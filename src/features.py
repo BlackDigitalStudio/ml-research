@@ -11,7 +11,7 @@ from src.order_book import OrderBook, Snapshot, BOOK_DEPTH
 
 logger = logging.getLogger(__name__)
 
-NUM_FEATURES = 25
+NUM_FEATURES = 30
 NORM_WINDOW = 300   # 30 sec at 100ms
 EMA_SPAN = 5
 TRADE_WINDOW_SEC = 5
@@ -43,6 +43,11 @@ FEATURE_KEYS = [
     "hurst_exponent",
     # Sweep detection (24)
     "sweep_intensity",
+    # Cancellation rate (25) — ask cancel - bid cancel, positive = bullish
+    "cancel_rate_diff",
+    # Multi-timeframe OFI (26-29) — divergence signals reversal
+    "ofi_1s", "ofi_5s", "ofi_30s", "ofi_divergence",
+    # Bybit cross-exchange signal (30 — reserved, computed externally)
 ]
 
 assert len(FEATURE_KEYS) == NUM_FEATURES
@@ -97,6 +102,19 @@ class FeatureEngine:
         self._prev_ask_levels: int = 0
         self._sweep_events: deque[tuple[float, int]] = deque(maxlen=100)  # (timestamp, levels_swept)
 
+        # Cancellation rate tracking (item 8)
+        self._prev_bid_depth: dict[float, float] = {}  # {price: vol} from previous tick
+        self._prev_ask_depth: dict[float, float] = {}
+        self._bid_cancel_vol: deque[tuple[float, float]] = deque(maxlen=100)  # (ts, vol_cancelled)
+        self._ask_cancel_vol: deque[tuple[float, float]] = deque(maxlen=100)
+
+        # Multi-timeframe OFI (item 9) — OFI at 1s, 5s, 30s windows
+        self._ofi_raw_history: deque[tuple[float, float]] = deque(maxlen=3000)  # (ts, raw_ofi)
+
+        # Bybit cross-exchange signal (item 7)
+        self._bybit_trades: deque[dict] = deque(maxlen=3000)
+        self.bybit_momentum: float = 0.0  # last 1s price change on Bybit
+
         # Derivatives data (set by ws_client polling)
         self._ws = None  # set via set_ws_client()
 
@@ -122,6 +140,15 @@ class FeatureEngine:
     def on_markprice(self, data: dict) -> None:
         self.funding_rate = float(data.get("r", 0))
         self.mark_price = float(data.get("p", 0))
+
+    def on_bybit_aggtrade(self, data: dict) -> None:
+        """Bybit BTCUSDT trade — leads Binance by 100-500ms."""
+        self._bybit_trades.append({
+            "T": int(data.get("T", time.time() * 1000)),
+            "p": float(data.get("p", 0)),
+            "q": float(data.get("q", 0)),
+            "m": data.get("m", False),
+        })
 
     def on_secondary_aggtrade(self, data: dict) -> None:
         ts = data.get("T", int(time.time() * 1000))
@@ -198,6 +225,20 @@ class FeatureEngine:
 
         # === Sweep detection ===
         raw["sweep_intensity"] = self._calc_sweep(snap, now_s)
+
+        # === Cancellation rate (item 8) ===
+        raw["cancel_rate_diff"] = self._calc_cancel_rate(snap, now_s)
+
+        # === Multi-timeframe OFI (item 9) ===
+        raw_ofi = raw["ofi"]  # already computed above (100ms OFI)
+        self._ofi_raw_history.append((now_s, raw_ofi))
+        raw["ofi_1s"] = self._calc_ofi_window(now_s, 1.0)
+        raw["ofi_5s"] = self._calc_ofi_window(now_s, 5.0)
+        raw["ofi_30s"] = self._calc_ofi_window(now_s, 30.0)
+        # Divergence: sign mismatch between short and long OFI
+        ofi_short = raw["ofi_1s"]
+        ofi_long = raw["ofi_30s"]
+        raw["ofi_divergence"] = ofi_short - ofi_long if (ofi_short * ofi_long < 0) else 0.0
 
         # === Volatility regime ===
         self._vol_history.append(raw["volatility_1s"])
@@ -603,6 +644,59 @@ class FeatureEngine:
         cutoff = now_s - 1.0
         intensity = sum(lvl for ts, lvl in self._sweep_events if ts >= cutoff)
         return float(intensity)
+
+    # === Cancellation rate (item 8) ===
+
+    def _calc_cancel_rate(self, snap: Snapshot, now_s: float) -> float:
+        """Cancel rate = volume drop without corresponding trade at that level.
+
+        Sliding 1-second window, separate for bid and ask.
+        Feature = ask_cancel_rate - bid_cancel_rate.
+        Positive = asks cancelled more = sellers retreating = bullish.
+        """
+        # Build current depth map from snapshot
+        curr_bids = {float(snap.bids[i, 0]): float(snap.bids[i, 1])
+                     for i in range(min(5, len(snap.bids))) if snap.bids[i, 1] > 0}
+        curr_asks = {float(snap.asks[i, 0]): float(snap.asks[i, 1])
+                     for i in range(min(5, len(snap.asks))) if snap.asks[i, 1] > 0}
+
+        # Compare with previous tick — volume drops without trade = cancellation
+        bid_cancel = 0.0
+        for price, prev_vol in self._prev_bid_depth.items():
+            curr_vol = curr_bids.get(price, 0.0)
+            if curr_vol < prev_vol:
+                bid_cancel += prev_vol - curr_vol
+
+        ask_cancel = 0.0
+        for price, prev_vol in self._prev_ask_depth.items():
+            curr_vol = curr_asks.get(price, 0.0)
+            if curr_vol < prev_vol:
+                ask_cancel += prev_vol - curr_vol
+
+        self._prev_bid_depth = curr_bids
+        self._prev_ask_depth = curr_asks
+
+        # Accumulate in 1-second window
+        self._bid_cancel_vol.append((now_s, bid_cancel))
+        self._ask_cancel_vol.append((now_s, ask_cancel))
+
+        cutoff = now_s - 1.0
+        bid_rate = sum(v for ts, v in self._bid_cancel_vol if ts >= cutoff)
+        ask_rate = sum(v for ts, v in self._ask_cancel_vol if ts >= cutoff)
+
+        return ask_rate - bid_rate  # positive = bullish
+
+    # === Multi-timeframe OFI (item 9) ===
+
+    def _calc_ofi_window(self, now_s: float, window_sec: float) -> float:
+        """Sum of raw OFI values over a time window."""
+        cutoff = now_s - window_sec
+        total = 0.0
+        for ts, ofi_val in reversed(self._ofi_raw_history):
+            if ts < cutoff:
+                break
+            total += ofi_val
+        return total
 
     # === LOB tensor for CNN ===
 
