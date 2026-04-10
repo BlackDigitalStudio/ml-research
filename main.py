@@ -105,10 +105,20 @@ async def main() -> None:
     async def on_secondary_aggtrade(data: dict) -> None:
         features.on_secondary_aggtrade(data)
 
+    # Bybit + cross-exchange callbacks (feed feature 30 cross_exchange_momentum)
+    async def on_bybit_aggtrade(data: dict) -> None:
+        features.on_bybit_aggtrade(data)
+
+    async def on_exchange_trade(data: dict) -> None:
+        features.on_exchange_trade(data)
+
     ws.on_aggtrade(on_aggtrade)
     ws.on_markprice(on_markprice)
     ws.on_secondary_depth(on_secondary_depth)
     ws.on_secondary_aggtrade(on_secondary_aggtrade)
+    ws.on_bybit_aggtrade(on_bybit_aggtrade)
+    for ex in ("okx", "bitget", "gateio"):
+        ws.on_exchange_trade(ex, on_exchange_trade)
     ws.on_disconnect(on_disconnect)
 
     notifier.info("Bot Started", f"{cfg.symbol} x{cfg.leverage} | Balance: ${executor.balance:.2f}")

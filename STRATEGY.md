@@ -138,7 +138,7 @@ Cancellation = volume drop at a price level without a corresponding trade. Compu
 ### Cross-Exchange Momentum (30)
 | # | Name | Description |
 |---|---|---|
-| 30 | `cross_exchange_momentum_500ms` | Count of exchanges (out of 6) showing net-buy in last 500ms. Deferred until after first backtest. |
+| 30 | `cross_exchange_momentum_500ms` | Count of exchanges (0..4) out of Bybit/OKX/Bitget/Gate.io whose net signed volume in the last 500ms is strictly positive (more buys than sells). Computed identically in realtime (`features.py`) and training (`trainer._calc_features_batch`). |
 
 ### Normalization
 All features are z-score normalized using a 30-second rolling window (300 ticks at 100ms).
@@ -157,17 +157,17 @@ All features are z-score normalized using a 30-second rolling window (300 ticks 
 | ETH Trades | `ethusdt@aggTrade` | variable |
 | User Data | via listenKey | events |
 
-### Cross-Exchange WebSocket (6 exchanges, public trades, no account needed)
+### Cross-Exchange WebSocket (4 exchanges, public trades, no account needed)
 | Exchange | Stream | URL |
 |---|---|---|
 | Bybit | `publicTrade.BTCUSDT` | `wss://stream.bybit.com/v5/public/linear` |
 | OKX | `trades.BTC-USDT-SWAP` | `wss://ws.okx.com:8443/ws/v5/public` |
-| Bitget | `trade.BTCUSDT` | `wss://ws.bitget.com/v2/ws/public` |
+| Bitget | `trade.BTCUSDT` | `wss://ws.bitget.com/v2/ws/public` (text "ping" keepalive every 20s) |
 | Gate.io | `futures.trades.BTC_USDT` | `wss://fx-ws.gateio.ws/v4/ws/usdt` |
-| HTX | `market.BTC-USDT.trade.detail` | `wss://api.hbdm.com/linear-swap-ws` (gzip) |
-| Deribit | `trades.BTC-PERPETUAL.raw` | `wss://www.deribit.com/ws/api/v2` (geo-blocked from Tokyo) |
 
-Cross-exchange trades lead or lag Binance by 100-500ms. Feature #30 (`cross_exchange_momentum_500ms`) counts how many exchanges show net-buy in a 500ms window — deferred until after first backtest.
+**Removed (2026-04-10):** HTX (`api.hbdm.com`) and Deribit (`www.deribit.com`) — both Cloudflare-fronted, exhibited synchronized failures (~3-4 min cycle of timeouts) under the production 12-stream load on the Tokyo VPS despite working in standalone probes. Root cause not isolated; cost/benefit didn't justify keeping degraded data feeds.
+
+Cross-exchange trades lead or lag Binance by 100-500ms. Feature #30 (`cross_exchange_momentum_500ms`) counts how many of the 4 exchanges show net-buy in a 500ms window. Implemented in both realtime (FeatureEngine.on_bybit_aggtrade / on_exchange_trade → `_calc_cross_exchange_momentum`) and training (`trainer._calc_features_batch` via per-exchange cumsum + searchsorted).
 
 ### Binance REST (Polled)
 | Endpoint | Interval |
@@ -188,8 +188,6 @@ All data is saved to hourly Parquet files with Snappy compression, 72-hour reten
 | `data/okx_trades/` | OKX BTC trades | WS OKX | Feature 30 |
 | `data/bitget_trades/` | Bitget BTC trades | WS Bitget | Feature 30 |
 | `data/gateio_trades/` | Gate.io BTC trades | WS Gate.io | Feature 30 |
-| `data/htx_trades/` | HTX BTC trades | WS HTX | Feature 30 |
-| `data/deribit_trades/` | Deribit BTC trades | WS Deribit | Feature 30 (no data — geo-blocked) |
 | `data/funding/` | Funding rate + mark price | WS markPrice@1s | Feature 13 |
 | `data/derivatives/` | Open interest + L/S ratio | REST poll 15s | Features 17-19 |
 | `data/bot_trades/` | Executed bot trades | Trading engine | Performance tracking |

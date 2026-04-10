@@ -66,12 +66,17 @@ class BinanceWSClient:
         self._on_bybit_aggtrade = cb
 
     def on_exchange_trade(self, exchange: str, cb: Callback) -> None:
-        """Register callback for cross-exchange trades (okx, bitget, gateio, htx, deribit)."""
+        """Register callback for cross-exchange trades (okx, bitget, gateio)."""
         self._on_exchange_trade[exchange] = cb
 
     async def start(self) -> None:
+        # We hold ~10 sustained WebSocket connections (BTC depth/agg/mark,
+        # ETH depth/agg, user data, Bybit, OKX, Bitget, Gate.io) plus
+        # occasional REST polling. limit=10 was too small and starved the
+        # later streams; bumped to 64 with per-host headroom.
         tcp = aiohttp.TCPConnector(
-            limit=10,
+            limit=64,
+            limit_per_host=8,
             enable_cleanup_closed=True,
             force_close=False,
         )
@@ -123,13 +128,15 @@ class BinanceWSClient:
         # OI + long/short ratio polling
         asyncio.create_task(self._poll_derivatives_data())
 
-        # Cross-exchange signals (Bybit + 5 exchanges)
+        # Cross-exchange signals (Bybit + 3 exchanges).
+        # HTX and Deribit removed: both proved structurally unstable from this
+        # Tokyo VPS (synchronized timeouts every 3-4 min in production despite
+        # standalone probes succeeding). Both are Cloudflare-fronted; root
+        # cause not isolated. Cost/benefit didn't justify keeping flaky data.
         asyncio.create_task(self._run_bybit_stream())
         asyncio.create_task(self._run_okx_stream())
         asyncio.create_task(self._run_bitget_stream())
         asyncio.create_task(self._run_gateio_stream())
-        asyncio.create_task(self._run_htx_stream())
-        asyncio.create_task(self._run_deribit_stream())
 
     async def stop(self) -> None:
         for handler in self._streams.values():
@@ -224,7 +231,7 @@ class BinanceWSClient:
                 await self.rest_post("/fapi/v1/listenKey", signed=False)
                 logger.debug("listenKey keepalive sent")
             except Exception as e:
-                logger.error("listenKey keepalive failed: %s", e)
+                logger.error("listenKey keepalive failed: %r", e)
 
     async def _run_user_data_stream(self) -> None:
         backoff = 1
@@ -253,7 +260,7 @@ class BinanceWSClient:
                             break
 
             except Exception as e:
-                logger.error("User data stream error: %s", e)
+                logger.error("User data stream error: %r", e)
 
             if self._listen_key_task:
                 self._listen_key_task.cancel()
@@ -322,21 +329,68 @@ class BinanceWSClient:
             await asyncio.sleep(15)
 
 
+    # --- Cross-exchange WS helpers ---
+
+    async def _data_staleness_watchdog(
+        self,
+        ws: aiohttp.ClientWebSocketResponse,
+        last_data_ts: list[float],
+        idle_max: float,
+        name: str,
+    ) -> None:
+        """Force-close ws if no DATA message arrives for `idle_max` seconds.
+
+        This catches half-open / "server still responds to PING but stopped
+        sending data" failures that aiohttp's WS-level heartbeat misses.
+        Closing the ws makes the outer reader loop exit and the caller
+        reconnects with backoff.
+        """
+        check_interval = max(5.0, idle_max / 4)
+        try:
+            while not ws.closed:
+                await asyncio.sleep(check_interval)
+                if ws.closed:
+                    return
+                idle = time.monotonic() - last_data_ts[0]
+                if idle > idle_max:
+                    logger.warning(
+                        "%s WS idle %.0fs (no data) — forcing reconnect",
+                        name, idle,
+                    )
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                    return
+        except asyncio.CancelledError:
+            pass
+
+    async def _dispatch_exchange(self, exchange: str, ts: int, price: str, qty: str, is_sell: bool) -> None:
+        cb = self._on_exchange_trade.get(exchange)
+        if cb:
+            await cb({"T": ts, "p": price, "q": qty, "m": is_sell, "exchange": exchange})
+
     async def _run_bybit_stream(self) -> None:
         """Bybit BTCUSDT aggTrade -- leads Binance by 100-500ms."""
         backoff = 1
         seen_ids: set[str] = set()  # dedup Bybit trade IDs within session
         while True:
+            watchdog: asyncio.Task | None = None
             try:
                 seen_ids.clear()
                 async with self._session.ws_connect("wss://stream.bybit.com/v5/public/linear") as ws:
                     await ws.send_json({"op": "subscribe", "args": ["publicTrade.BTCUSDT"]})
                     logger.info("Bybit WS connected")
                     backoff = 1
+                    last_data_ts = [time.monotonic()]
+                    watchdog = asyncio.create_task(
+                        self._data_staleness_watchdog(ws, last_data_ts, 60.0, "Bybit")
+                    )
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             raw = orjson.loads(msg.data)
                             if raw.get("topic") == "publicTrade.BTCUSDT" and self._on_bybit_aggtrade:
+                                last_data_ts[0] = time.monotonic()
                                 for t in raw.get("data", []):
                                     tid = t.get("i", "")
                                     if tid and tid in seen_ids:
@@ -344,7 +398,6 @@ class BinanceWSClient:
                                     if tid:
                                         seen_ids.add(tid)
                                         if len(seen_ids) > 100_000:
-                                            # Prune old entries to avoid memory growth
                                             seen_ids = set(list(seen_ids)[-50_000:])
                                     await self._on_bybit_aggtrade({
                                         "T": t.get("T", 0),
@@ -355,82 +408,137 @@ class BinanceWSClient:
                         elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
                             break
             except asyncio.CancelledError:
+                if watchdog:
+                    watchdog.cancel()
                 break
             except Exception as e:
-                logger.error("Bybit WS error: %s", e)
+                logger.error("Bybit WS error: %r", e)
+            finally:
+                if watchdog:
+                    watchdog.cancel()
             logger.warning("Bybit WS disconnected, reconnect in %ds", backoff)
             await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30)
+            backoff = min(backoff * 2, 10)
 
-    # --- Cross-exchange streams (5 exchanges) ---
-
-    async def _dispatch_exchange(self, exchange: str, ts: int, price: str, qty: str, is_sell: bool) -> None:
-        cb = self._on_exchange_trade.get(exchange)
-        if cb:
-            await cb({"T": ts, "p": price, "q": qty, "m": is_sell, "exchange": exchange})
+    # --- Cross-exchange streams (3 exchanges: OKX, Bitget, Gate.io) ---
 
     async def _run_okx_stream(self) -> None:
         backoff = 1
         while True:
+            watchdog: asyncio.Task | None = None
             try:
                 async with self._session.ws_connect("wss://ws.okx.com:8443/ws/v5/public") as ws:
                     await ws.send_json({"op": "subscribe", "args": [{"channel": "trades", "instId": "BTC-USDT-SWAP"}]})
                     logger.info("OKX WS connected")
                     backoff = 1
+                    last_data_ts = [time.monotonic()]
+                    watchdog = asyncio.create_task(
+                        self._data_staleness_watchdog(ws, last_data_ts, 60.0, "OKX")
+                    )
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             raw = orjson.loads(msg.data)
-                            for t in raw.get("data", []):
+                            data = raw.get("data", [])
+                            if data:
+                                last_data_ts[0] = time.monotonic()
+                            for t in data:
                                 await self._dispatch_exchange(
                                     "okx", int(t.get("ts", 0)), t.get("px", "0"),
                                     t.get("sz", "0"), t.get("side") == "sell")
                         elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
                             break
             except asyncio.CancelledError:
+                if watchdog:
+                    watchdog.cancel()
                 break
             except Exception as e:
-                logger.error("OKX WS error: %s", e)
+                logger.error("OKX WS error: %r", e)
+            finally:
+                if watchdog:
+                    watchdog.cancel()
             await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30)
+            backoff = min(backoff * 2, 10)
 
     async def _run_bitget_stream(self) -> None:
         backoff = 1
         while True:
+            ping_task: asyncio.Task | None = None
+            watchdog: asyncio.Task | None = None
             try:
                 async with self._session.ws_connect("wss://ws.bitget.com/v2/ws/public") as ws:
                     await ws.send_json({"op": "subscribe", "args": [{"instType": "USDT-FUTURES", "channel": "trade", "instId": "BTCUSDT"}]})
                     logger.info("Bitget WS connected")
                     backoff = 1
+                    last_data_ts = [time.monotonic()]
+
+                    async def _bitget_ping() -> None:
+                        # Bitget v2 public: server closes idle >30s. Plain text "ping" -> "pong".
+                        try:
+                            while not ws.closed:
+                                await asyncio.sleep(20)
+                                if ws.closed:
+                                    break
+                                await ws.send_str("ping")
+                        except Exception:
+                            pass
+
+                    ping_task = asyncio.create_task(_bitget_ping())
+                    watchdog = asyncio.create_task(
+                        self._data_staleness_watchdog(ws, last_data_ts, 60.0, "Bitget")
+                    )
+
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
+                            # Plain "pong" reply, not JSON
+                            if msg.data == "pong":
+                                continue
                             raw = orjson.loads(msg.data)
-                            for t in raw.get("data", []):
+                            data = raw.get("data", [])
+                            if data:
+                                last_data_ts[0] = time.monotonic()
+                            for t in data:
                                 await self._dispatch_exchange(
                                     "bitget", int(t.get("ts", 0)), t.get("price", "0"),
                                     t.get("size", "0"), t.get("side") == "sell")
                         elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
                             break
             except asyncio.CancelledError:
+                if ping_task:
+                    ping_task.cancel()
+                if watchdog:
+                    watchdog.cancel()
                 break
             except Exception as e:
-                logger.error("Bitget WS error: %s", e)
+                logger.error("Bitget WS error: %r", e)
+            finally:
+                if ping_task:
+                    ping_task.cancel()
+                if watchdog:
+                    watchdog.cancel()
             await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30)
+            backoff = min(backoff * 2, 10)
 
     async def _run_gateio_stream(self) -> None:
-        import time as _time
         backoff = 1
         while True:
+            watchdog: asyncio.Task | None = None
             try:
                 async with self._session.ws_connect("wss://fx-ws.gateio.ws/v4/ws/usdt") as ws:
-                    await ws.send_json({"channel": "futures.trades", "event": "subscribe", "payload": ["BTC_USDT"], "time": int(_time.time())})
+                    await ws.send_json({"channel": "futures.trades", "event": "subscribe", "payload": ["BTC_USDT"], "time": int(time.time())})
                     logger.info("Gate.io WS connected")
                     backoff = 1
+                    last_data_ts = [time.monotonic()]
+                    watchdog = asyncio.create_task(
+                        self._data_staleness_watchdog(ws, last_data_ts, 60.0, "Gate.io")
+                    )
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             raw = orjson.loads(msg.data)
                             if raw.get("channel") == "futures.trades" and raw.get("event") == "update":
-                                for t in raw.get("result", []):
+                                result = raw.get("result", [])
+                                if result:
+                                    last_data_ts[0] = time.monotonic()
+                                for t in result:
                                     ts = int(float(t.get("create_time_ms", t.get("create_time", 0) * 1000)))
                                     await self._dispatch_exchange(
                                         "gateio", ts, str(t.get("price", "0")),
@@ -438,66 +546,17 @@ class BinanceWSClient:
                         elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
                             break
             except asyncio.CancelledError:
+                if watchdog:
+                    watchdog.cancel()
                 break
             except Exception as e:
-                logger.error("Gate.io WS error: %s", e)
+                logger.error("Gate.io WS error: %r", e)
+            finally:
+                if watchdog:
+                    watchdog.cancel()
             await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30)
+            backoff = min(backoff * 2, 10)
 
-    async def _run_htx_stream(self) -> None:
-        import gzip
-        backoff = 1
-        while True:
-            try:
-                async with self._session.ws_connect("wss://api.hbdm.com/linear-swap-ws") as ws:
-                    await ws.send_json({"sub": "market.BTC-USDT.trade.detail"})
-                    logger.info("HTX WS connected")
-                    backoff = 1
-                    async for msg in ws:
-                        if msg.type == aiohttp.WSMsgType.BINARY:
-                            raw = orjson.loads(gzip.decompress(msg.data))
-                            # Heartbeat
-                            if "ping" in raw:
-                                await ws.send_json({"pong": raw["ping"]})
-                                continue
-                            tick = raw.get("tick", {})
-                            for t in tick.get("data", []):
-                                await self._dispatch_exchange(
-                                    "htx", int(t.get("ts", 0)), str(t.get("price", 0)),
-                                    str(t.get("amount", 0)), t.get("direction") == "sell")
-                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
-                            break
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("HTX WS error: %s", e)
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30)
-
-    async def _run_deribit_stream(self) -> None:
-        backoff = 1
-        while True:
-            try:
-                async with self._session.ws_connect("wss://www.deribit.com/ws/api/v2") as ws:
-                    await ws.send_json({"method": "public/subscribe", "params": {"channels": ["trades.BTC-PERPETUAL.raw"]}, "jsonrpc": "2.0", "id": 1})
-                    logger.info("Deribit WS connected")
-                    backoff = 1
-                    async for msg in ws:
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            raw = orjson.loads(msg.data)
-                            params = raw.get("params", {})
-                            for t in params.get("data", []):
-                                await self._dispatch_exchange(
-                                    "deribit", int(t.get("timestamp", 0)), str(t.get("price", 0)),
-                                    str(t.get("amount", 0)), t.get("direction") == "sell")
-                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
-                            break
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("Deribit WS error: %s", e)
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30)
 
 
 class _StreamHandler:
@@ -531,7 +590,7 @@ class _StreamHandler:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("WS %s error: %s", self.name, e)
+                logger.error("WS %s error: %r", self.name, e)
 
             if not self._running:
                 break

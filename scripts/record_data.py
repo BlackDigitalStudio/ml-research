@@ -79,7 +79,7 @@ async def main() -> None:
         rec.record_eth_trade(data)
         counts["eth_trade"] += 1
 
-    # --- Cross-exchange trades (5 exchanges) ---
+    # --- Cross-exchange trades (3 exchanges: OKX, Bitget, Gate.io) ---
     async def on_exchange_trade(data: dict) -> None:
         rec.record_exchange_trade(data)
         ex = data.get("exchange", "?")
@@ -109,7 +109,7 @@ async def main() -> None:
     ws.on_aggtrade(on_trade)
     ws.on_bybit_aggtrade(on_bybit_trade)
     ws.on_secondary_aggtrade(on_eth_trade)
-    for ex in ("okx", "bitget", "gateio", "htx", "deribit"):
+    for ex in ("okx", "bitget", "gateio"):
         ws.on_exchange_trade(ex, on_exchange_trade)
     ws.on_markprice(on_markprice)
 

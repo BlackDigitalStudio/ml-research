@@ -10,6 +10,11 @@ WorkingDirectory=/home/scalper/scalper-bot
 ExecStart=/home/scalper/scalper-bot/venv/bin/python scripts/record_data.py
 Restart=always
 RestartSec=5
+# Hard memory cap. If exceeded, systemd kills + restarts cleanly *before*
+# the global OOM-killer wipes the process. With the new append-mode writer
+# steady state should be well under 500 MB.
+MemoryMax=1500M
+MemoryHigh=1200M
 StandardOutput=append:/home/scalper/scalper-bot/logs/recorder_stdout.log
 StandardError=append:/home/scalper/scalper-bot/logs/recorder_stderr.log
 

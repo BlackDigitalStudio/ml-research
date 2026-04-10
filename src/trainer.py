@@ -204,6 +204,26 @@ class Trainer:
             deriv_ls = deriv_df["long_short_ratio"].values.astype(np.float64).copy()
             logger.info("Derivatives data loaded: %d", len(deriv_ts))
         del deriv_df
+
+        # Cross-exchange trades for feature 30 (cross_exchange_momentum_500ms).
+        # Each value: (timestamps_ms_int64, signed_qty_float64) where signed_qty
+        # is positive for buyer-initiated and negative for seller-initiated.
+        cross_ex_data: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for ex in ("bybit", "okx", "bitget", "gateio"):
+            ex_df = self._load_parquet_dir(
+                f"{ex}_trades", hours,
+                dedup_cols=["timestamp", "price", "quantity"],
+            )
+            if ex_df is None or len(ex_df) == 0:
+                continue
+            ex_ts = ex_df["timestamp"].values.astype(np.int64).copy()
+            ex_qty = ex_df["quantity"].values.astype(np.float64).copy()
+            # Recorder writes "is_seller" for these dirs (True = seller-initiated).
+            ex_is_seller = ex_df["is_seller"].values.astype(bool).copy()
+            ex_signed = np.where(ex_is_seller, -ex_qty, ex_qty)
+            cross_ex_data[ex] = (ex_ts, ex_signed)
+            logger.info("%s trades loaded: %d", ex, len(ex_ts))
+            del ex_df, ex_qty, ex_is_seller
         gc.collect()
 
         tick_buy_vol = np.zeros(n, dtype=np.float32)
@@ -261,6 +281,7 @@ class Trainer:
             eth_ts=eth_ts, eth_price=eth_price, eth_qty=eth_qty, eth_side=eth_side,
             funding_ts=funding_ts, funding_rate_arr=funding_rate,
             deriv_ts=deriv_ts, deriv_oi=deriv_oi, deriv_ls=deriv_ls,
+            cross_ex_data=cross_ex_data,
         )
 
         # Free large parse arrays (LOB + features are done)
@@ -268,6 +289,7 @@ class Trainer:
         del tick_buy_vol, tick_sell_vol, trade_ts, trade_qty, trade_side, depth_ts
         del eth_ts, eth_price, eth_qty, eth_side
         del funding_ts, funding_rate, deriv_ts, deriv_oi, deriv_ls
+        del cross_ex_data
         import gc; gc.collect()
 
         # === Labels (vectorized) ===
@@ -318,8 +340,9 @@ class Trainer:
         eth_ts=None, eth_price=None, eth_qty=None, eth_side=None,
         funding_ts=None, funding_rate_arr=None,
         deriv_ts=None, deriv_oi=None, deriv_ls=None,
+        cross_ex_data: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
     ) -> np.ndarray:
-        """Compute all 25 features for all sample indices at once."""
+        """Compute all 31 features for all sample indices at once."""
         from src.features import NUM_FEATURES
         ns = len(indices)
         feat = np.zeros((ns, NUM_FEATURES), dtype=np.float32)
@@ -623,6 +646,24 @@ class Trainer:
             short = feat[m_div, 26]
             long_ = feat[m_div, 28]
             feat[m_div, 29] = np.where(short * long_ < 0, short - long_, 0.0).astype(np.float32)
+
+        # [30] Cross-exchange momentum (500ms): count of exchanges
+        # (Bybit, OKX, Bitget, Gate.io) whose net signed volume in the last
+        # 500ms strictly exceeds zero. Range: 0..4. Computed only over
+        # exchanges that have data in this window — missing feeds contribute 0.
+        if cross_ex_data:
+            ex_count = np.zeros(ns, dtype=np.float32)
+            for ex_name, (ex_ts, ex_signed) in cross_ex_data.items():
+                if len(ex_ts) == 0:
+                    continue
+                # Cumulative signed volume — O(n) once, O(1) lookup per sample
+                cum = np.zeros(len(ex_ts) + 1, dtype=np.float64)
+                cum[1:] = np.cumsum(ex_signed)
+                right = np.searchsorted(ex_ts, sample_ts, side="right")
+                left = np.searchsorted(ex_ts, sample_ts - 500, side="left")
+                net = cum[right] - cum[left]  # (ns,)
+                ex_count += (net > 0).astype(np.float32)
+            feat[:, 30] = ex_count
 
         return feat
 

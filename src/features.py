@@ -21,6 +21,11 @@ SPOOF_LIFETIME_SEC = 2.5
 SPOOF_SIZE_THRESHOLD = 1.0  # 1 BTC (was 100 ETH)
 HURST_WINDOW = 3000  # ~5 min of 100ms ticks
 
+# Cross-exchange momentum: count exchanges (Bybit + 3 cross-exchange)
+# whose net signed volume in the last CROSS_EX_WINDOW_MS is positive (net-buy).
+CROSS_EXCHANGES = ("bybit", "okx", "bitget", "gateio")
+CROSS_EX_WINDOW_MS = 500
+
 # Feature vector keys (ordered, used for normalization and model input)
 # Now primary instrument = BTCUSDT, secondary = ETHUSDT
 FEATURE_KEYS = [
@@ -47,7 +52,9 @@ FEATURE_KEYS = [
     "cancel_rate_diff",
     # Multi-timeframe OFI (26-29) — divergence signals reversal
     "ofi_1s", "ofi_5s", "ofi_30s", "ofi_divergence",
-    # Cross-exchange momentum (30) — net-buy count across 6 exchanges in 500ms
+    # Cross-exchange momentum (30) — net-buy count across 4 exchanges
+    # (Bybit, OKX, Bitget, Gate.io) in last 500ms. Implementation deferred
+    # until after first backtest; currently always 0.0.
     "cross_exchange_momentum_500ms",
 ]
 
@@ -116,6 +123,13 @@ class FeatureEngine:
         self._bybit_trades: deque[dict] = deque(maxlen=3000)
         self.bybit_momentum: float = 0.0  # last 1s price change on Bybit
 
+        # Cross-exchange momentum (feature 30): per-exchange ring of recent
+        # signed-volume samples. Tuple = (timestamp_ms, signed_qty) where
+        # signed_qty > 0 = buyer-initiated, < 0 = seller-initiated.
+        self._cross_exchange_trades: dict[str, deque[tuple[int, float]]] = {
+            ex: deque(maxlen=2000) for ex in CROSS_EXCHANGES
+        }
+
         # Derivatives data (set by ws_client polling)
         self._ws = None  # set via set_ws_client()
 
@@ -143,13 +157,40 @@ class FeatureEngine:
         self.mark_price = float(data.get("p", 0))
 
     def on_bybit_aggtrade(self, data: dict) -> None:
-        """Bybit BTCUSDT trade — leads Binance by 100-500ms."""
+        """Bybit BTCUSDT trade — leads Binance by 100-500ms.
+
+        Feeds two structures:
+          1. `_bybit_trades` — used by `bybit_momentum` (price-change signal)
+          2. `_cross_exchange_trades["bybit"]` — used by feature 30
+             (cross-exchange net-buy momentum)
+        """
+        ts = int(data.get("T", time.time() * 1000))
+        qty = float(data.get("q", 0))
+        is_seller = bool(data.get("m", False))
         self._bybit_trades.append({
-            "T": int(data.get("T", time.time() * 1000)),
+            "T": ts,
             "p": float(data.get("p", 0)),
-            "q": float(data.get("q", 0)),
-            "m": data.get("m", False),
+            "q": qty,
+            "m": is_seller,
         })
+        signed = -qty if is_seller else qty
+        self._cross_exchange_trades["bybit"].append((ts, signed))
+
+    def on_exchange_trade(self, data: dict) -> None:
+        """Cross-exchange trade from OKX/Bitget/Gate.io for feature 30.
+
+        Data shape (from ws_client._dispatch_exchange):
+            {"T": ts_ms, "p": price, "q": qty, "m": is_sell, "exchange": name}
+        """
+        ex = data.get("exchange", "")
+        buf = self._cross_exchange_trades.get(ex)
+        if buf is None:
+            return
+        ts = int(data.get("T", time.time() * 1000))
+        qty = float(data.get("q", 0))
+        is_seller = bool(data.get("m", False))
+        signed = -qty if is_seller else qty
+        buf.append((ts, signed))
 
     def on_secondary_aggtrade(self, data: dict) -> None:
         ts = data.get("T", int(time.time() * 1000))
@@ -237,6 +278,9 @@ class FeatureEngine:
         ofi_short = raw["ofi_1s"]
         ofi_long = raw["ofi_30s"]
         raw["ofi_divergence"] = ofi_short - ofi_long if (ofi_short * ofi_long < 0) else 0.0
+
+        # === Cross-exchange momentum (feature 30) ===
+        raw["cross_exchange_momentum_500ms"] = self._calc_cross_exchange_momentum(now_ms)
 
         # === Volatility regime ===
         self._vol_history.append(raw["volatility_1s"])
@@ -695,6 +739,26 @@ class FeatureEngine:
                 break
             total += ofi_val
         return total
+
+    def _calc_cross_exchange_momentum(self, now_ms: int) -> float:
+        """Count of cross-exchange feeds whose net signed volume in the last
+        CROSS_EX_WINDOW_MS is strictly positive (more buys than sells).
+
+        Range: 0 (all 4 exchanges net-selling/flat) to 4 (all net-buying).
+        Drops stale entries from each exchange's deque as a side effect.
+        """
+        cutoff = now_ms - CROSS_EX_WINDOW_MS
+        net_buy_count = 0
+        for buf in self._cross_exchange_trades.values():
+            # Drop entries older than the window
+            while buf and buf[0][0] < cutoff:
+                buf.popleft()
+            net = 0.0
+            for _, signed_qty in buf:
+                net += signed_qty
+            if net > 0:
+                net_buy_count += 1
+        return float(net_buy_count)
 
     # === LOB tensor for CNN ===
 
