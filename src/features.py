@@ -53,8 +53,9 @@ FEATURE_KEYS = [
     # Multi-timeframe OFI (26-29) — divergence signals reversal
     "ofi_1s", "ofi_5s", "ofi_30s", "ofi_divergence",
     # Cross-exchange momentum (30) — net-buy count across 4 exchanges
-    # (Bybit, OKX, Bitget, Gate.io) in last 500ms. Implementation deferred
-    # until after first backtest; currently always 0.0.
+    # (Bybit, OKX, Bitget, Gate.io) in last 500ms. Range 0..4.
+    # See _calc_cross_exchange_momentum; equivalent training-time
+    # computation lives in trainer._calc_features_batch.
     "cross_exchange_momentum_500ms",
 ]
 

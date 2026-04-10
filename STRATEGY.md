@@ -192,7 +192,7 @@ All data is saved to hourly Parquet files with Snappy compression, 72-hour reten
 | `data/derivatives/` | Open interest + L/S ratio | REST poll 15s | Features 17-19 |
 | `data/bot_trades/` | Executed bot trades | Trading engine | Performance tracking |
 
-**Training-runtime consistency:** 29 of 31 features computed from recorded data in training. Feature 19 (liquidation_proximity) returns 0 when L/S ratio is balanced (0.8-1.2). Feature 30 (cross_exchange_momentum) reserved — implementation after first backtest.
+**Training-runtime consistency:** All 31 features computed from recorded data in training. Feature 19 (liquidation_proximity) returns 0 when L/S ratio is balanced (0.8-1.2). Feature 30 (cross_exchange_momentum) implemented end-to-end in commit `cab3d7e` (2026-04-10) — realtime via `FeatureEngine._calc_cross_exchange_momentum`, training via `trainer._calc_features_batch` with per-exchange cumsum + searchsorted; both paths verified to produce identical values on identical inputs.
 
 ---
 
@@ -200,7 +200,7 @@ All data is saved to hourly Parquet files with Snappy compression, 72-hour reten
 
 ### Signal Generation
 1. CNN encoder produces 64-dim embedding from LOB tensor
-2. FeatureEngine computes 30 hand-crafted features
+2. FeatureEngine computes 31 hand-crafted features
 3. Ensemble predicts: UP / DOWN / FLAT with confidence and vote count
 4. Entry requires ALL of:
    - Prediction = UP or DOWN (not FLAT)
