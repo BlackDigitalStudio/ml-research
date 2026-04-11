@@ -7,7 +7,13 @@ from collections import deque
 from enum import Enum
 from typing import Any
 
+import numpy as np
+
+from src import filters
 from src.config import Config
+from src.live_sim import (
+    LiveSimConfig, SimDirection, TradeOutcome, simulate_trade,
+)
 from src.notifier import Notifier
 from src.recorder import Recorder
 from src.risk import RiskManager
@@ -15,6 +21,23 @@ from src.signal import Signal, Direction
 from src.ws_client import BinanceWSClient
 
 logger = logging.getLogger(__name__)
+
+# --- Sim-parallel diagnostic (Point 4 in handoff_current.md) ------------
+#
+# Every live trade gets a second, independent run through
+# `src.live_sim.simulate_trade` on the same forward mid path the real
+# executor observed. At finalize time we compare simulated net PnL vs
+# realised net PnL; a persistent divergence means the simulator (and
+# therefore the training labels) is drifting from reality and next
+# session's build_samples should be re-run.
+#
+# Mid path is stored in an in-executor ring buffer (see
+# `_MID_RING_SIZE`) rather than modifying `order_book.py` — that file is
+# on the do-not-touch list. The ring is fed by the main loop via
+# `Executor.record_mid_tick` every time a new book snapshot arrives.
+_MID_RING_SIZE = 1500     # ≥ SIM_HORIZON (1300) + small headroom
+_SIM_DIVERGENCE_WINDOW = 10   # rolling window of |sim - real| pct-points
+_SIM_DIVERGENCE_ALERT = 0.05  # warn when the average exceeds 0.05%-pt
 
 
 class State(Enum):
@@ -91,6 +114,24 @@ class Executor:
         # Adverse selection (Item 16)
         self._entry_submit_time: float = 0.0
 
+        # --- Sim-parallel diagnostic state (Point 4) ------------------
+        # Ring buffer of the most recent mid prices fed by the main loop
+        # via `record_mid_tick`. New entries append right, old entries
+        # drop off the left. `_mid_ring_fill_idx` at fill time snapshots
+        # where the trade started so the sim reads the matching forward
+        # slice when `_finalize_trade` runs.
+        self._mid_ring: deque[float] = deque(maxlen=_MID_RING_SIZE)
+        self._mid_ring_fill_idx: int = -1
+        # Snapshot of the LiveSimConfig at fill time so the diagnostic
+        # comparison uses the same tp/sl/timeout the executor actually
+        # placed orders against.
+        self._sim_cfg: LiveSimConfig | None = None
+        # Rolling divergence tracker: |sim_net_pnl - real_net_pnl| per
+        # trade, in percent-of-entry. A persistent average > threshold
+        # triggers a warning (not an automatic action — the executor
+        # never gates behaviour on the simulator output).
+        self._sim_divergence_hist: deque[float] = deque(maxlen=_SIM_DIVERGENCE_WINDOW)
+
     @property
     def fill_rate(self) -> float:
         """Fill rate of last 20 entry attempts (0.0 - 1.0)."""
@@ -116,6 +157,24 @@ class Executor:
     def set_order_book(self, ob) -> None:
         """Set order book reference for mid-price access."""
         self._ob = ob
+
+    def record_mid_tick(self, mid_price: float) -> None:
+        """Feed a new mid-price observation into the sim-parallel ring buffer.
+
+        Called from the main loop every depth snapshot (100 ms cadence).
+        Cheap — a single deque append. The ring is sized to
+        `_MID_RING_SIZE` (= SIM_HORIZON + headroom) so we always have
+        enough forward-and-backward context for a diagnostic
+        `simulate_trade` call.
+
+        This is the control-inversion we picked over touching
+        `src/order_book.py` (on the do-not-touch list per
+        `project_trading_bot.md` §1). Executor owns the buffer, executor
+        writes and reads it — no cross-module coupling.
+        """
+        if mid_price <= 0:
+            return
+        self._mid_ring.append(float(mid_price))
 
     def update_volatility(self, avg_vol: float, current_vol: float) -> None:
         """Update volatility tracking (called from main loop)."""
@@ -327,6 +386,33 @@ class Executor:
         fill_price = float(data.get("ap", self._entry_price))  # avg price
         self._entry_price = fill_price
 
+        # --- Sim-parallel diagnostic (Point 4) -------------------------
+        # Snapshot the ring buffer index and a LiveSimConfig that mirrors
+        # the TP/SL/timeout the executor is about to act on. At
+        # finalize time `_run_sim_diagnostic` replays the same trade
+        # through `live_sim.simulate_trade` and logs divergence.
+        self._mid_ring_fill_idx = len(self._mid_ring)
+        # Derive per-trade adaptive TP/SL the same way signal.py already
+        # did at entry time; pull the current volatility ratio from the
+        # order book mid history if available, else fall back to the
+        # config base so the diagnostic still runs.
+        vol_ratio = 1.0
+        if self._current_volatility > 0 and self._avg_volatility > 0:
+            vol_ratio = self._current_volatility / max(self._avg_volatility, 1e-10)
+        tp_pct, sl_pct = filters.adaptive_tp_sl(
+            vol_ratio, self._cfg.take_profit_pct, self._cfg.stop_loss_pct,
+        )
+        timeout_sec = filters.dynamic_timeout_sec(
+            self._avg_volatility, self._current_volatility,
+            self._cfg.position_timeout_sec,
+        )
+        self._sim_cfg = LiveSimConfig(
+            tp_pct=tp_pct, sl_pct=sl_pct,
+            timeout_ticks=int(round(timeout_sec * 10.0)),
+            commission_win_pct=self._cfg.commission_win_pct,
+            commission_loss_pct=self._cfg.commission_loss_pct,
+        )
+
         # --- Adverse selection check (Item 16) ---
         fill_ms = (time.monotonic() - self._entry_submit_time) * 1000
         if fill_ms < 100:
@@ -537,7 +623,75 @@ class Executor:
             exit_price, self._size, pnl=net_pnl,
         )
 
+        # --- Sim-parallel diagnostic comparison (Point 4) --------------
+        # Log sim vs real, update the rolling divergence window. Diagnostic
+        # only — never gates execution.
+        self._run_sim_diagnostic(net_pnl, notional, reason)
+
         self._reset()
+
+    def _run_sim_diagnostic(
+        self, real_net_pnl_usd: float, notional_usd: float, real_reason: str,
+    ) -> None:
+        """Replay the just-closed trade through `live_sim.simulate_trade`.
+
+        Compares the simulator's net PnL (%) to the realised net PnL (%),
+        logs both, and tracks the rolling window of |difference| so we can
+        raise a warning when the simulator drifts from reality for more
+        than `_SIM_DIVERGENCE_WINDOW` consecutive trades. Runs purely from
+        the in-executor ring buffer, never touching `order_book.py`.
+        """
+        if self._sim_cfg is None or self._mid_ring_fill_idx < 0:
+            # No snapshot captured — trade started before the diagnostic
+            # was wired up (happens exactly once, on startup).
+            return
+        try:
+            fwd_start = self._mid_ring_fill_idx
+            fwd = list(self._mid_ring)[fwd_start:]
+            if len(fwd) < 2:
+                return
+            mid_path = np.asarray(fwd, dtype=np.float64)
+
+            direction = (
+                SimDirection.LONG
+                if self._direction == Direction.LONG
+                else SimDirection.SHORT
+            )
+            sim_out = simulate_trade(
+                direction,
+                entry_px=self._entry_price,
+                mid_path=mid_path,
+                config=self._sim_cfg,
+                fill_latency_ms=self.last_api_latency_ms or 150.0,
+            )
+            real_net_pnl_pct = (
+                (real_net_pnl_usd / notional_usd * 100.0)
+                if notional_usd > 0 else 0.0
+            )
+            diff = sim_out.net_pnl_pct - real_net_pnl_pct
+            self._sim_divergence_hist.append(abs(diff))
+            logger.info(
+                "Sim vs live: sim=%+.3f%% real=%+.3f%% diff=%+.4f%%pp "
+                "reason_sim=%s reason_live=%s duration_sim=%d",
+                sim_out.net_pnl_pct, real_net_pnl_pct, diff,
+                sim_out.exit_reason, real_reason, sim_out.duration_ticks,
+            )
+            if (
+                len(self._sim_divergence_hist) == _SIM_DIVERGENCE_WINDOW
+                and (sum(self._sim_divergence_hist) / _SIM_DIVERGENCE_WINDOW)
+                > _SIM_DIVERGENCE_ALERT
+            ):
+                logger.warning(
+                    "Sim divergence > %.2f%%pp averaged over last %d trades "
+                    "— live_sim is drifting from executor reality, labels "
+                    "should be rebuilt.",
+                    _SIM_DIVERGENCE_ALERT, _SIM_DIVERGENCE_WINDOW,
+                )
+        except Exception as e:
+            logger.warning("Sim-parallel diagnostic failed: %s", e)
+        finally:
+            self._sim_cfg = None
+            self._mid_ring_fill_idx = -1
 
     async def _cancel_order(self, order_id: str) -> None:
         if not order_id:

@@ -79,6 +79,11 @@ async def main() -> None:
     # Wire recorder to OrderBook snapshots (not raw WS diffs)
     def on_ob_snapshot(snap) -> None:
         recorder.record_depth(snap)
+        # Sim-parallel diagnostic (Point 4): feed the latest mid into
+        # the executor's in-memory ring buffer so every live trade can
+        # be replayed through `src.live_sim.simulate_trade` at close
+        # time. Cheap — one deque append.
+        executor.record_mid_tick(snap.mid_price)
 
     ob.on_snapshot(on_ob_snapshot)
 
