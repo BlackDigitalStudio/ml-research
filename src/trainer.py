@@ -30,7 +30,20 @@ logger = logging.getLogger(__name__)
 
 BOOK_DEPTH = 20
 WINDOW_SIZE = 50       # 5 seconds of snapshots (50 x 100ms)
-HORIZON = 600          # look 60 seconds ahead (600 x 100ms)
+HORIZON = 600          # legacy triple-barrier horizon (60 s) — still
+                       # imported by `tests/test_triple_barrier.py` as a
+                       # stable reference. The forward-sim label path uses
+                       # SIM_HORIZON below instead.
+SIM_HORIZON = 1300     # forward ticks handed to `live_sim.simulate_trade`
+                       # per sample. Budget breakdown:
+                       #   - 1200 max dynamic timeout (120 s @ 100 ms)
+                       #   - 20 limit-close window (2 s @ 100 ms)
+                       #   - 80 safety margin for rounding
+                       # `simulate_trade` clamps gracefully to the path
+                       # length, so shorter slices degrade to timeout_market.
+CACHE_SCHEMA_VERSION = "v2"  # bumped on the label rewrite to invalidate
+                             # all old `samples_*h_*` files — v1 labels
+                             # used fixed 0.20/0.10/60 s with no filters.
 
 
 def _malloc_trim() -> None:
@@ -163,17 +176,26 @@ class Trainer:
 
     def build_samples_cached(
         self, hours: int = 24, force_rebuild: bool = False,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Cached wrapper around build_samples.
 
-        Cache key combines `hours` with the mtime of the newest depth parquet
-        file — any new data or a different window size invalidates the cache.
-        X_lob is stored as a .npy file loaded via mmap (same semantics as the
-        uncached path); X_feat/y/mid are small and fully loaded.
+        Cache key = `{version}_{hours}h_{newest_mtime}`. Bumping
+        `CACHE_SCHEMA_VERSION` forces a rebuild; any old-version file in the
+        cache dir is evicted on next miss. V2 schema adds `target_pnl` for
+        the regression head — live_sim forward-simulation labels make it
+        free to compute and the ensemble regression head needs it.
 
-        Set `force_rebuild=True` to ignore the cache (still writes new entry).
+        X_lob is stored as a .npy file loaded via mmap (same semantics as
+        the uncached path); X_feat/y/mid/target_pnl are small and fully
+        loaded.
 
-        Returns the same (X_lob, X_feat, y, mid_prices) 4-tuple.
+        Returns a 5-tuple:
+            X_lob        : (N, 3, 20, 50) float32 mmap
+            X_feat       : (N, 34)        float32
+            y            : (N,)           int64 {UP=0, DOWN=1, FLAT=2}
+            mid_prices   : (N,)           float64 — mid at the sample tick
+            target_pnl   : (N,)           float32 — net PnL % from live_sim,
+                                                    used by regression head.
         """
         cache_dir = self._data_dir / "_cache"
         cache_dir.mkdir(exist_ok=True)
@@ -183,42 +205,87 @@ class Trainer:
         # still work, it just won't be portable across initial runs.
         depth_files = sorted((self._data_dir / "depth").glob("*.parquet"))
         newest_mtime = int(max((f.stat().st_mtime for f in depth_files), default=0))
-        key = f"{hours}h_{newest_mtime}"
+        key = f"{CACHE_SCHEMA_VERSION}_{hours}h_{newest_mtime}"
 
         lob_path = cache_dir / f"samples_{key}_X_lob.npy"
         feat_path = cache_dir / f"samples_{key}_X_feat.npy"
         y_path = cache_dir / f"samples_{key}_y.npy"
         mid_path = cache_dir / f"samples_{key}_mid.npy"
+        pnl_path = cache_dir / f"samples_{key}_pnl.npy"
 
-        if not force_rebuild and all(
-            p.exists() for p in (lob_path, feat_path, y_path, mid_path)
-        ):
+        all_paths = (lob_path, feat_path, y_path, mid_path, pnl_path)
+
+        if not force_rebuild and all(p.exists() for p in all_paths):
             logger.info("Sample cache HIT: %s", key)
             X_lob = np.load(str(lob_path), mmap_mode="r")
             X_feat = np.load(str(feat_path))
             y = np.load(str(y_path))
             mid = np.load(str(mid_path))
-            return X_lob, X_feat, y, mid
+            target_pnl = np.load(str(pnl_path))
+            return X_lob, X_feat, y, mid, target_pnl
 
         logger.info("Sample cache MISS (key=%s) — rebuilding", key)
-        # Evict stale entries for the same `hours` but different mtimes to
-        # keep the cache from growing unbounded across sessions.
-        for old in cache_dir.glob(f"samples_{hours}h_*"):
+        # Evict ALL stale entries for this `hours` bucket — both old v1
+        # files (no version prefix) and stale v2 files for a previous mtime.
+        # Globbing with a superset pattern keeps the cache from growing
+        # unbounded across sessions.
+        evicted = 0
+        for old in cache_dir.glob(f"samples_*{hours}h_*"):
             old.unlink()
+            evicted += 1
+        if evicted:
+            logger.info("Evicted %d stale cache files", evicted)
 
-        X_lob, X_feat, y, mid = self.build_samples(hours=hours, lob_output_path=lob_path)
+        X_lob, X_feat, y, mid, target_pnl = self.build_samples(
+            hours=hours, lob_output_path=lob_path,
+        )
         np.save(str(feat_path), X_feat)
         np.save(str(y_path), y)
         np.save(str(mid_path), mid)
-        return X_lob, X_feat, y, mid
+        np.save(str(pnl_path), target_pnl)
+        return X_lob, X_feat, y, mid, target_pnl
 
     def build_samples(
         self, hours: int = 24, lob_output_path: Path | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Build (X_lob, X_features, y, mid_prices) from raw data.
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Build (X_lob, X_features, y, mid_prices, target_pnl) from raw data.
 
-        Loads data, parses into numpy, frees DataFrames immediately to save RAM.
-        X_lob is written to disk (mmap) — never fully held in memory.
+        Loads data, parses into numpy, frees DataFrames immediately to save
+        RAM. X_lob is written to disk (mmap) — never fully held in memory.
+
+        **Label construction** is the forward-simulation path described in
+        `handoff_current.md`:
+
+        1. Global filters (`src.filters`) — time-of-day, funding blackout,
+           spread, volatility band, liquidity depth, spoof score, hurst
+           regime — applied as a vectorised mask. Samples that fail any are
+           dropped from the training set (SKIP semantics per design
+           decision 2 in the handoff).
+        2. Per-direction imbalance gates — a sample keeps a direction iff
+           `imbalance_ratio` passes the LONG (>0.15) or SHORT (<-0.15)
+           threshold. Samples with neither direction viable are dropped.
+        3. For each surviving direction per sample:
+           - Adaptive TP/SL from `volatility_ratio` via `filters.adaptive_tp_sl`.
+           - Dynamic timeout from `volatility_ratio` via
+             `filters.dynamic_timeout_ticks_from_vol_ratio`.
+           - Entry price = best_bid (LONG) or best_ask (SHORT) at the sample
+             tick — NOT mid, matching executor behaviour.
+           - `live_sim.simulate_trade(direction, entry_px, mid_path, cfg,
+             fill_latency_ms=150.0)` on the forward mid path.
+           `fill_latency_ms=150.0` is the "no fast-fill" approximation: fast
+           fill is an execution artefact orthogonal to the forward price.
+        4. Label = direction with the highest net PnL (ties to LONG); if
+           both directions are net-negative → FLAT. `target_pnl` stores the
+           continuous net PnL % used by the regression head.
+
+        Static approximations at label time (documented per handoff design
+        decision 3):
+            * dynamic confidence threshold ≡ `config.confidence_threshold`
+              (base 0.58, no runtime tuning)
+            * recent-WR pause ≡ no pause (no trade history at label time)
+            * fill-rate gate ≡ always 1.0 (no execution history)
+            * vol-3σ spike filter ≡ no rejection (`volatility_3sigma` feature
+              is not computed during build_samples)
 
         If `lob_output_path` is given, X_lob is persisted to that path (used
         by `build_samples_cached`); otherwise it goes to the default
@@ -226,9 +293,10 @@ class Trainer:
 
         Returns:
             X_lob: (N, 3, 20, 50) — CNN input tensors (mmap'd from disk)
-            X_features: (N, 25) — hand-crafted features
+            X_features: (N, NUM_FEATURES) — hand-crafted features
             y: (N,) — labels {0=UP, 1=DOWN, 2=FLAT}
             mid_prices: (N,) — mid price at each sample point (for backtest)
+            target_pnl: (N,) — continuous net PnL %, regression target
         """
         import gc
 
@@ -356,7 +424,11 @@ class Trainer:
         np.add.at(tick_sell_vol, t_idx[trade_side], trade_qty[trade_side].astype(np.float32))
 
         # === Sample indices with auto-step for memory ===
-        total = n - WINDOW_SIZE - HORIZON
+        # Each sample needs WINDOW_SIZE ticks of LOB history and SIM_HORIZON
+        # ticks of forward data for the live-sim label path. Trim `total`
+        # by SIM_HORIZON so `sample_starts[-1] + WINDOW_SIZE + SIM_HORIZON`
+        # stays within `n`.
+        total = n - WINDOW_SIZE - SIM_HORIZON
         # X_lob is ~12 KB per sample; cap at ~1.5 GB
         max_samples = 130_000
         step = max(2, 2 * ((total + max_samples - 1) // max_samples)) if total > max_samples * 2 else 2
@@ -367,8 +439,10 @@ class Trainer:
         if step > 2:
             logger.info("Auto step=%d for memory (%d rows → %d samples)", step, n, num_samples)
 
-        logger.info("Building %d samples (vectorized, window=%d, horizon=%d)...",
-                     num_samples, WINDOW_SIZE, HORIZON)
+        logger.info(
+            "Building %d samples (vectorized, window=%d, sim_horizon=%d)...",
+            num_samples, WINDOW_SIZE, SIM_HORIZON,
+        )
 
         # === LOB tensors — write to disk via mmap (avoids OOM) ===
         lob_path = lob_output_path if lob_output_path is not None else self._data_dir / "_tmp_X_lob.npy"
@@ -406,78 +480,261 @@ class Trainer:
             cross_ex_data=cross_ex_data,
         )
 
-        # Free large parse arrays (LOB + features are done)
+        # === Labels — forward-simulation via `src.live_sim` ===
+        # The old triple-barrier path used fixed TP/SL and no filters; it
+        # is retained only in `tests/test_triple_barrier.py` as a reference
+        # for the legacy expression. The production label path below
+        # mirrors every Tier-1 executor divergence and runs `simulate_trade`
+        # for LONG and SHORT per sample. See the build_samples docstring
+        # for the design rationale.
+        from src import filters
+        from src.live_sim import (
+            LiveSimConfig,
+            SimDirection,
+            label_from_outcomes,
+            simulate_trade,
+        )
+
+        sample_mids = mid_prices[end_indices].copy()
+        sample_bids = bid_prices[end_indices, 0].astype(np.float64, copy=True)
+        sample_asks = ask_prices[end_indices, 0].astype(np.float64, copy=True)
+        sample_ts_ms = depth_ts[end_indices].astype(np.int64, copy=True)
+
+        # Pre-compute top-5 liquidity per sample for the vectorised
+        # liquidity filter below.
+        top5_bid_sample = bid_vols[end_indices, :5].sum(axis=1).astype(np.float64)
+        top5_ask_sample = ask_vols[end_indices, :5].sum(axis=1).astype(np.float64)
+
+        # === Global filter mask (vectorised) ===================================
+        # Every predicate mirrors the exact constant from `src/filters.py` —
+        # keeping the duplication explicit rather than looping over per-sample
+        # python predicates is ~100× faster at 130k samples.
+        mask = np.ones(num_samples, dtype=bool)
+
+        # Time-of-day: Asia night skip [04, 07) UTC.
+        sec_of_day = (sample_ts_ms // 1000) % (24 * 3600)
+        hour_utc = sec_of_day // 3600
+        mask &= ~(
+            (hour_utc >= filters.ASIA_NIGHT_START_UTC)
+            & (hour_utc < filters.ASIA_NIGHT_END_UTC)
+        )
+
+        # Funding blackout ±FUNDING_GUARD_MIN around 00/08/16 UTC, wrapping
+        # over midnight. `min_of_day` is in the [0, 1440) interval.
+        min_of_day = (sample_ts_ms // 60_000) % (24 * 60)
+        funding_ok = np.ones(num_samples, dtype=bool)
+        for h in filters.FUNDING_HOURS_UTC:
+            center = h * 60
+            delta = np.abs(min_of_day - center)
+            delta = np.minimum(delta, 24 * 60 - delta)
+            funding_ok &= delta > filters.FUNDING_GUARD_MIN
+        mask &= funding_ok
+
+        # Spread / vol_band / liquidity / spoof / hurst regime all come
+        # straight out of X_feat at the sample index. Feature indices are
+        # stable (see src/features.py:FEATURE_KEYS).
+        spread_arr = X_feat[:, 3]
+        mask &= spread_arr <= filters.MAX_SPREAD_USD
+
+        vol_ratio_arr = X_feat[:, 21]
+        mask &= (vol_ratio_arr > filters.VOL_BAND_LOW) & (
+            vol_ratio_arr < filters.VOL_BAND_HIGH
+        )
+
+        mask &= top5_bid_sample >= filters.MIN_TOP5_BTC_LIQUIDITY
+        mask &= top5_ask_sample >= filters.MIN_TOP5_BTC_LIQUIDITY
+
+        spoof_arr = X_feat[:, 20]
+        mask &= spoof_arr <= filters.SPOOF_SCORE_MAX
+
+        # Hurst regime with the static-confidence approximation from
+        # design decision 3: confidence == base_threshold → the "+0.05
+        # bonus" branch never fires, so H < 0.45 samples always reject.
+        hurst_arr = X_feat[:, 23]
+        mask &= hurst_arr >= filters.HURST_MEAN_REVERTING_MAX
+
+        # Per-direction imbalance gates. If neither direction is viable,
+        # the sample is dropped (SKIP). If one direction is viable we still
+        # keep the sample and only simulate that direction.
+        imb_arr = X_feat[:, 1]
+        long_allowed = imb_arr > filters.IMBALANCE_LONG_MIN
+        short_allowed = imb_arr < filters.IMBALANCE_SHORT_MAX
+        mask &= long_allowed | short_allowed
+
+        # Drop samples with degenerate book state (crossed or zero mid).
+        mask &= sample_mids > 0
+        mask &= sample_bids > 0
+        mask &= sample_asks > 0
+        mask &= sample_asks > sample_bids
+
+        kept_indices = np.where(mask)[0]
+        n_kept = len(kept_indices)
+        logger.info(
+            "Global filter: kept %d / %d samples (%.1f%%)",
+            n_kept, num_samples, 100 * n_kept / max(num_samples, 1),
+        )
+        if n_kept == 0:
+            raise ValueError(
+                "No samples survived filtering — check feature values, "
+                "filter constants in src/filters.py, and whether the data "
+                "window overlaps the Asia-night / funding blackouts."
+            )
+
+        # === Per-sample forward-simulation ===================================
+        # LiveSimConfig defaults come from config.env so the training target
+        # matches what the live executor will realise. Per-sample fields
+        # (tp_pct, sl_pct, timeout_ticks) are derived from `vol_ratio` via
+        # `filters.*`.
+        base_tp = float(self._cfg.take_profit_pct)
+        base_sl = float(self._cfg.stop_loss_pct)
+        base_timeout_sec = float(self._cfg.position_timeout_sec)
+        comm_win = float(self._cfg.commission_win_pct)
+        comm_loss = float(self._cfg.commission_loss_pct)
+        # Label-time fill latency — fast-fill is an execution artefact
+        # orthogonal to the forward price path. 150 ms keeps us out of
+        # both the <50 ms instant-close and <100 ms SL-tightening branches.
+        LABEL_FILL_LATENCY_MS = 150.0
+
+        y_full = np.full(num_samples, FLAT, dtype=np.int64)
+        pnl_full = np.zeros(num_samples, dtype=np.float32)
+
+        reason_counter: dict[str, int] = {}
+        t_sim_start = time.monotonic()
+        for k in kept_indices:
+            vol_ratio = float(vol_ratio_arr[k])
+            tp_pct, sl_pct = filters.adaptive_tp_sl(vol_ratio, base_tp, base_sl)
+            # Dynamic timeout: base * (avg/current) = base / vol_ratio, clamped.
+            # `filters.dynamic_timeout_sec` takes (avg, current, base) — pass
+            # avg=1.0 and current=vol_ratio so the formula reduces to
+            # `base/vol_ratio` with identical clamping behaviour.
+            timeout_sec = filters.dynamic_timeout_sec(
+                avg_volatility=1.0,
+                current_volatility=max(vol_ratio, 1e-9),
+                base_timeout_sec=base_timeout_sec,
+            )
+            timeout_ticks = int(round(timeout_sec * 10.0))  # 100 ms per tick
+
+            cfg = LiveSimConfig(
+                tp_pct=tp_pct,
+                sl_pct=sl_pct,
+                timeout_ticks=timeout_ticks,
+                commission_win_pct=comm_win,
+                commission_loss_pct=comm_loss,
+            )
+
+            start = int(end_indices[k]) + 1
+            end = start + SIM_HORIZON
+            mid_path = mid_prices[start:end]
+
+            long_out = None
+            short_out = None
+            if long_allowed[k]:
+                long_out = simulate_trade(
+                    SimDirection.LONG,
+                    float(sample_bids[k]),
+                    mid_path,
+                    cfg,
+                    fill_latency_ms=LABEL_FILL_LATENCY_MS,
+                )
+                reason_counter[f"LONG:{long_out.exit_reason}"] = (
+                    reason_counter.get(f"LONG:{long_out.exit_reason}", 0) + 1
+                )
+            if short_allowed[k]:
+                short_out = simulate_trade(
+                    SimDirection.SHORT,
+                    float(sample_asks[k]),
+                    mid_path,
+                    cfg,
+                    fill_latency_ms=LABEL_FILL_LATENCY_MS,
+                )
+                reason_counter[f"SHORT:{short_out.exit_reason}"] = (
+                    reason_counter.get(f"SHORT:{short_out.exit_reason}", 0) + 1
+                )
+
+            if long_out is not None and short_out is not None:
+                lbl, pnl = label_from_outcomes(long_out, short_out)
+            elif long_out is not None:
+                if long_out.net_pnl_pct > 0:
+                    lbl = UP
+                else:
+                    lbl = FLAT
+                pnl = long_out.net_pnl_pct
+            else:  # short_out is not None
+                if short_out.net_pnl_pct > 0:
+                    lbl = DOWN
+                else:
+                    lbl = FLAT
+                pnl = short_out.net_pnl_pct
+
+            y_full[k] = lbl
+            pnl_full[k] = pnl
+
+        sim_elapsed = time.monotonic() - t_sim_start
+        logger.info(
+            "live_sim label construction: %d samples in %.1fs (%.0f samples/sec)",
+            n_kept, sim_elapsed, n_kept / max(sim_elapsed, 1e-9),
+        )
+
+        # === Free parse arrays and compact X_lob ==============================
         del bid_vols, ask_vols, bid_prices, ask_prices
         del tick_buy_vol, tick_sell_vol
         del trade_ts, trade_price, trade_qty, trade_side, depth_ts
         del eth_ts, eth_price, eth_qty, eth_side
         del funding_ts, funding_rate, deriv_ts, deriv_oi, deriv_ls
         del cross_ex_data
-        import gc; gc.collect()
+        import gc
+        gc.collect()
         _malloc_trim()
 
-        # === Labels — triple-barrier method (vectorized) ===
-        # For each sample at time t, look at the future window [t, t+HORIZON):
-        #   - LONG would win if price first reaches +TP_PCT before -SL_PCT
-        #   - SHORT would win if price first reaches -TP_PCT before +SL_PCT
-        # If neither side wins → FLAT.
-        future_starts = sample_starts + WINDOW_SIZE
-        future_win = np.lib.stride_tricks.sliding_window_view(mid_prices, HORIZON)
-        future_mids = future_win[future_starts]              # (N, HORIZON)
-        current_mids = mid_prices[future_starts - 1]         # (N,)
+        # Apply the mask to every per-sample array. X_lob is still the full
+        # mmap — we read it through fancy indexing which allocates a fresh
+        # numpy array, then write it back to the same .npy file and reopen
+        # read-only. Peak extra memory ≈ 1× compact size (0.5-1 GB); the
+        # 7.7 GiB box has plenty of headroom.
+        X_lob_compact = np.asarray(X_lob[kept_indices]).astype(
+            np.float32, copy=False,
+        )
+        lob_actual_path = lob_output_path if lob_output_path is not None else self._data_dir / "_tmp_X_lob.npy"
+        del X_lob  # release the old full-length mmap before overwriting
+        np.save(str(lob_actual_path), X_lob_compact)
+        del X_lob_compact
+        gc.collect()
+        _malloc_trim()
+        X_lob = np.load(str(lob_actual_path), mmap_mode="r")
 
-        safe = np.where(current_mids > 0, current_mids, 1.0)
-        # Signed relative return per future tick, in percent — (N, HORIZON)
-        rel = (future_mids - current_mids[:, None]) / safe[:, None] * 100
+        X_feat = X_feat[mask]
+        y = y_full[mask]
+        target_pnl = pnl_full[mask]
+        sample_mids = sample_mids[mask]
 
-        # LONG: TP at +TP_PCT, SL at -SL_PCT. argmax returns the FIRST True
-        # index (or 0 if all False) — guard with `.any(axis=1)` and use HORIZON
-        # as a "never hit" sentinel so a never-hitting barrier loses any race.
-        long_tp_hit = rel >= TP_PCT
-        long_sl_hit = rel <= -SL_PCT
-        long_tp_first = np.where(long_tp_hit.any(axis=1),
-                                 long_tp_hit.argmax(axis=1), HORIZON)
-        long_sl_first = np.where(long_sl_hit.any(axis=1),
-                                 long_sl_hit.argmax(axis=1), HORIZON)
-
-        # SHORT: TP at -TP_PCT, SL at +SL_PCT
-        short_tp_hit = rel <= -TP_PCT
-        short_sl_hit = rel >= SL_PCT
-        short_tp_first = np.where(short_tp_hit.any(axis=1),
-                                  short_tp_hit.argmax(axis=1), HORIZON)
-        short_sl_first = np.where(short_sl_hit.any(axis=1),
-                                  short_sl_hit.argmax(axis=1), HORIZON)
-
-        long_wins = long_tp_first < long_sl_first
-        short_wins = short_tp_first < short_sl_first
-
-        y = np.full(num_samples, FLAT, dtype=np.int64)
-        y[long_wins & ~short_wins] = UP
-        y[short_wins & ~long_wins] = DOWN
-        # Both directions theoretically profitable in the same window (volatile
-        # whipsaw): pick whichever TP fires first — i.e. the faster profit. Tie
-        # goes to LONG which keeps the labels deterministic.
-        both = long_wins & short_wins
-        y[both & (long_tp_first <= short_tp_first)] = UP
-        y[both & (long_tp_first >  short_tp_first)] = DOWN
-
-        # Mid prices at sample points (for backtest alignment)
-        sample_mids = current_mids.copy()
-
-        # Filter zero mid prices
-        valid = current_mids > 0
-        if not valid.all():
-            X_lob, X_feat, y, sample_mids = X_lob[valid], X_feat[valid], y[valid], sample_mids[valid]
-
-        counts = {UP: int((y == UP).sum()), DOWN: int((y == DOWN).sum()), FLAT: int((y == FLAT).sum())}
+        # Log label + exit-reason distribution.
+        counts = {
+            UP: int((y == UP).sum()),
+            DOWN: int((y == DOWN).sum()),
+            FLAT: int((y == FLAT).sum()),
+        }
         logger.info(
-            "Triple-barrier labels (TP=%.2f%% SL=%.2f%%): UP=%d (%.1f%%) DOWN=%d (%.1f%%) FLAT=%d (%.1f%%)",
-            TP_PCT, SL_PCT,
+            "Live-sim labels: UP=%d (%.1f%%) DOWN=%d (%.1f%%) FLAT=%d (%.1f%%)",
             counts[UP], counts[UP] / len(y) * 100,
             counts[DOWN], counts[DOWN] / len(y) * 100,
             counts[FLAT], counts[FLAT] / len(y) * 100,
         )
-        return X_lob, X_feat, y, sample_mids
+        mean_target = float(target_pnl.mean())
+        median_target = float(np.median(target_pnl))
+        pos = int((target_pnl > 0).sum())
+        logger.info(
+            "target_pnl: mean=%.4f%% median=%.4f%% pos_frac=%.1f%%",
+            mean_target, median_target, 100 * pos / max(len(target_pnl), 1),
+        )
+        # Top-5 exit reasons — quick sanity check that labels aren't
+        # dominated by `timeout_market` (which would imply the forward slice
+        # is too short or the dynamic timeout is broken).
+        top_reasons = sorted(
+            reason_counter.items(), key=lambda kv: kv[1], reverse=True,
+        )[:6]
+        logger.info("Top live_sim exit reasons: %s", top_reasons)
+
+        return X_lob, X_feat, y, sample_mids, target_pnl
 
     def _calc_features_batch(
         self,
@@ -1071,7 +1328,8 @@ class Trainer:
         y: np.ndarray,
         val_split: float = 0.2,
         n_jobs: int = 1,
-    ) -> tuple[list[xgb.Booster], object, object, list[int], list]:
+        target_pnl: np.ndarray | None = None,
+    ) -> tuple[list[xgb.Booster], object, object, list[int], list, object]:
         from sklearn.isotonic import IsotonicRegression
         from sklearn.utils.class_weight import compute_sample_weight
 
@@ -1208,9 +1466,69 @@ class Trainer:
         ensemble_pred = ensemble_votes.argmax(axis=1)
         ens_acc = accuracy_score(y_val, ensemble_pred)
         self._log_trade_wr("Ensemble (5-model majority)", y_val, ensemble_pred, ens_acc)
+        # `labels=[UP,DOWN,FLAT]` + `zero_division=0` keeps
+        # classification_report from crashing when the val set is
+        # degenerate (e.g. only 2 of the 3 classes appear). Previously this
+        # surfaced as `ValueError: Number of classes, 2, does not match size
+        # of target_names, 3` — see handoff_current.md "Known unresolved
+        # issues".
         logger.info("\n%s", classification_report(
-            y_val, ensemble_pred, target_names=["UP", "DOWN", "FLAT"],
+            y_val, ensemble_pred,
+            labels=[UP, DOWN, FLAT],
+            target_names=["UP", "DOWN", "FLAT"],
+            zero_division=0,
         ))
+
+        # --- Regression head (Point 3, handoff design decision 1) ------
+        # Train a dedicated LightGBM regressor on the continuous
+        # `target_pnl` column. The classification ensemble stays the main
+        # trading signal; the regression head gives the bot a
+        # magnitude-aware auxiliary estimate that can be used for sizing
+        # or as a ranking criterion in future revisions. We train it on
+        # the same time-gap-aware split as the classification head so the
+        # val metric is an apples-to-apples sanity check.
+        regressor = None
+        if target_pnl is not None:
+            import lightgbm as lgb
+            pnl_train = target_pnl[:train_end]
+            pnl_val = target_pnl[split:]
+            logger.info(
+                "Training regression head on target_pnl: %d train, %d val "
+                "(mean=%.4f%% median=%.4f%%)",
+                len(pnl_train), len(pnl_val),
+                float(pnl_train.mean()), float(np.median(pnl_train)),
+            )
+            reg_train = lgb.Dataset(X_train, label=pnl_train)
+            reg_val_ds = lgb.Dataset(X_val, label=pnl_val, reference=reg_train)
+            reg_params = {
+                "objective": "regression",
+                "metric": "l2",
+                "max_depth": 6,
+                "learning_rate": 0.05,
+                "min_child_samples": 50,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "verbosity": -1,
+                "num_threads": threads,
+            }
+            regressor = lgb.train(
+                reg_params,
+                reg_train,
+                num_boost_round=500,
+                valid_sets=[reg_val_ds],
+                callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)],
+            )
+            reg_val_pred = regressor.predict(X_val)
+            # Rank correlation between predicted PnL and realised PnL on
+            # val is the closest thing to "does the regressor rank trades
+            # usefully". A coefficient ≥ 0.1 is a weak-but-real signal.
+            from scipy.stats import spearmanr
+            rho, _ = spearmanr(reg_val_pred, pnl_val)
+            mae = float(np.mean(np.abs(reg_val_pred - pnl_val)))
+            logger.info(
+                "Regression head val: MAE=%.4f%% Spearman=%.3f",
+                mae, rho if rho is not None else float("nan"),
+            )
 
         # --- Lever 4: isotonic calibration of ensemble probabilities ---
         # Use the chronological tail of train as a calibration set so the val
@@ -1223,7 +1541,7 @@ class Trainer:
             X_val=X_val, y_val=y_val,
         )
 
-        return xgb_models, lgb_model, logreg, top5_global, calibrators
+        return xgb_models, lgb_model, logreg, top5_global, calibrators, regressor
 
     def _fit_calibrators(
         self,
@@ -1354,6 +1672,7 @@ class Trainer:
         logreg: object,
         top5_features: list[int],
         calibrators: list | None = None,
+        regressor: object | None = None,
     ) -> dict[str, str]:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
         paths: dict[str, str] = {}
@@ -1407,6 +1726,18 @@ class Trainer:
             logger.info("Saved calibrators: %s -> %s", cal_latest.name, cal_path.name)
             paths["calibrators"] = str(cal_path)
 
+        # Regression head (Point 3, handoff design decision 1). LightGBM
+        # model saved via its text serialiser so it's compatible with the
+        # classifier model files already living in models/.
+        if regressor is not None:
+            reg_path = self._model_dir / f"regressor_{ts}.txt"
+            regressor.save_model(str(reg_path))
+            reg_latest = self._model_dir / "regressor_latest.txt"
+            reg_latest.unlink(missing_ok=True)
+            reg_latest.symlink_to(reg_path.name)
+            logger.info("Saved regressor: %s -> %s", reg_latest.name, reg_path.name)
+            paths["regressor"] = str(reg_path)
+
         return paths
 
     # ---- Full pipeline ----
@@ -1433,7 +1764,7 @@ class Trainer:
         """
         t0 = time.monotonic()
 
-        X_lob, X_feat, y, _mids = self.build_samples_cached(
+        X_lob, X_feat, y, _mids, target_pnl = self.build_samples_cached(
             hours=hours, force_rebuild=force_rebuild,
         )
 
@@ -1448,11 +1779,14 @@ class Trainer:
 
         # Extract embeddings and train ensemble
         embeddings = self.extract_embeddings(encoder, X_lob)
-        xgb_models, lgb_model, logreg, top5_features, calibrators = self.train_ensemble(
-            embeddings, X_feat, y, n_jobs=n_jobs,
+        (
+            xgb_models, lgb_model, logreg, top5_features, calibrators, regressor,
+        ) = self.train_ensemble(
+            embeddings, X_feat, y, n_jobs=n_jobs, target_pnl=target_pnl,
         )
         ensemble_paths = self.save_ensemble(
-            xgb_models, lgb_model, logreg, top5_features, calibrators=calibrators,
+            xgb_models, lgb_model, logreg, top5_features,
+            calibrators=calibrators, regressor=regressor,
         )
 
         elapsed = time.monotonic() - t0

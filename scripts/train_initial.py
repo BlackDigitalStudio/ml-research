@@ -97,7 +97,7 @@ def main() -> None:
 
     trainer = Trainer(cfg)
 
-    try:  # noqa: E501 — train_full handles build_samples 4-tuple internally
+    try:  # noqa: E501 — train_full handles build_samples 5-tuple internally
         result = trainer.train_full(
             hours=args.data_hours,
             n_jobs=args.n_jobs,

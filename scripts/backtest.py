@@ -68,19 +68,39 @@ import pandas as pd   # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src import filters                                # noqa: E402
 from src.config import load_config                     # noqa: E402
+from src.live_sim import (                              # noqa: E402
+    LiveSimConfig, SimDirection, simulate_trade,
+)
 from src.model import LOBEncoder, UP, DOWN, FLAT        # noqa: E402
-from src.trainer import Trainer, WINDOW_SIZE, HORIZON   # noqa: E402
+from src.trainer import (                               # noqa: E402
+    Trainer, WINDOW_SIZE, HORIZON, SIM_HORIZON,
+)
 
 logger = logging.getLogger("backtest")
 
+# Post-only rejection rate is the execution artefact backtest still
+# simulates — it gets dropped into live_sim as a pre-entry filter so the
+# downstream metrics include 10% rejected entries. This is the one place
+# we deliberately diverge from live_sim's deterministic outputs (live_sim
+# itself does NOT model post-only rejection so labels stay stable).
 POST_ONLY_REJECT_RATE = 0.10
-EXECUTION_DELAY_TICKS = 1  # 100ms = 1 tick
-STOP_LOSS_PCT = 0.10       # 0.1% of price
-TAKE_PROFIT_PCT = 0.20     # 0.2% of price (2:1 ratio)
-COMMISSION_WIN_PCT = 0.04  # maker + maker
-COMMISSION_LOSS_PCT = 0.07 # maker + taker (stop-market)
-POSITION_TIMEOUT_TICKS = 600  # 60 seconds
+EXECUTION_DELAY_TICKS = 1       # 100 ms = 1 tick
+BASE_TP_PCT = 0.20              # base TP/SL used for per-sample adaptive scaling
+BASE_SL_PCT = 0.10
+BASE_TIMEOUT_SEC = 60.0
+COMMISSION_WIN_PCT = 0.04       # maker + maker (all-maker exit)
+COMMISSION_LOSS_PCT = 0.07      # maker + taker (SL / market exit)
+# Deploy-gate thresholds — pulled from `handoff_current.md` "Trader
+# priorities". Change here drives the `DEPLOY` block at the end.
+DEPLOY_GATES = {
+    "tp_wr_min": 0.52,
+    "profit_factor_min": 1.10,
+    "max_consec_losses_max": 10,
+    "trades_per_day_min": 2.0,
+    "max_drawdown_pct_max": 20.0,
+}
 
 
 @dataclass
@@ -93,6 +113,7 @@ class Trade:
     net_pnl: float
     reason: str
     duration_ticks: int
+    gross_pnl_pct: float = 0.0
 
 
 @dataclass
@@ -174,6 +195,93 @@ class BacktestResult:
         losses = [t.net_pnl for t in self.trades if t.net_pnl < 0]
         return np.mean(losses) if losses else 0
 
+    # ---- Trading-metric block (for DEPLOY verdict) ---------------------
+
+    @property
+    def tp_hit_rate(self) -> float:
+        """% of trades closed at full TP (maps to trader-facing `TP-WR`)."""
+        if not self.trades:
+            return 0.0
+        tps = sum(1 for t in self.trades if t.reason == "tp_hit")
+        return tps / len(self.trades)
+
+    @property
+    def sl_hit_rate(self) -> float:
+        if not self.trades:
+            return 0.0
+        sls = sum(1 for t in self.trades if "sl" in t.reason)
+        return sls / len(self.trades)
+
+    @property
+    def trades_per_day(self) -> float:
+        """Trades / (total backtest wall-time in days).
+
+        Uses the bar-count approximation: each mid-price tick is 100 ms, so
+        the session duration in days = `n_ticks / 864000`. The backtest
+        caller sets `result.session_ticks` before printing metrics.
+        """
+        ticks = getattr(self, "session_ticks", 0)
+        if ticks <= 0:
+            return 0.0
+        days = ticks / 864_000.0  # 10 ticks/sec × 86 400 sec/day
+        return len(self.trades) / max(days, 1e-9)
+
+    @property
+    def max_drawdown_pct(self) -> float:
+        if not self.equity_curve:
+            return 0.0
+        peak = self.equity_curve[0]
+        max_dd = 0.0
+        for eq in self.equity_curve:
+            if eq > peak:
+                peak = eq
+            dd = (peak - eq) / peak * 100 if peak > 0 else 0.0
+            if dd > max_dd:
+                max_dd = dd
+        return max_dd
+
+
+def _trading_signal_mask(
+    predictions: np.ndarray,
+    confidences: np.ndarray,
+    X_feat: np.ndarray,
+    sample_ts_ms: np.ndarray | None,
+    confidence_threshold: float,
+) -> np.ndarray:
+    """Vectorised Tier-2 filter check matching `src/filters.py`.
+
+    Returns a boolean mask of samples where a non-FLAT trade would be taken
+    by the live signal generator (minus the stateful filters that the
+    backtest cannot replay). Used by `run_backtest` to decide which samples
+    become trades.
+    """
+    mask = predictions != FLAT
+    mask &= confidences >= confidence_threshold
+    mask &= X_feat[:, 3] <= filters.MAX_SPREAD_USD           # spread
+    vol_ratio = X_feat[:, 21]
+    mask &= (vol_ratio > filters.VOL_BAND_LOW) & (vol_ratio < filters.VOL_BAND_HIGH)
+    mask &= X_feat[:, 20] <= filters.SPOOF_SCORE_MAX         # spoof
+    mask &= X_feat[:, 23] >= filters.HURST_MEAN_REVERTING_MAX  # hurst (static conf)
+
+    imb = X_feat[:, 1]
+    long_ok = (predictions == UP) & (imb > filters.IMBALANCE_LONG_MIN)
+    short_ok = (predictions == DOWN) & (imb < filters.IMBALANCE_SHORT_MAX)
+    mask &= long_ok | short_ok
+
+    if sample_ts_ms is not None and len(sample_ts_ms) == len(predictions):
+        sec_of_day = (sample_ts_ms // 1000) % (24 * 3600)
+        hour_utc = sec_of_day // 3600
+        mask &= ~((hour_utc >= filters.ASIA_NIGHT_START_UTC) & (hour_utc < filters.ASIA_NIGHT_END_UTC))
+        min_of_day = (sample_ts_ms // 60_000) % (24 * 60)
+        funding_ok = np.ones(len(predictions), dtype=bool)
+        for h in filters.FUNDING_HOURS_UTC:
+            center = h * 60
+            delta = np.abs(min_of_day - center)
+            delta = np.minimum(delta, 24 * 60 - delta)
+            funding_ok &= delta > filters.FUNDING_GUARD_MIN
+        mask &= funding_ok
+    return mask
+
 
 def run_backtest(
     mid_prices: np.ndarray,
@@ -181,135 +289,193 @@ def run_backtest(
     confidences: np.ndarray,
     imbalances: np.ndarray,
     spreads: np.ndarray,
+    X_feat: np.ndarray | None = None,
+    sample_ts_ms: np.ndarray | None = None,
     confidence_threshold: float = 0.58,
     initial_equity: float = 50.0,
     leverage: int = 20,
     position_size_pct: int = 95,
+    seed: int = 42,
 ) -> BacktestResult:
+    """Walk the test window, delegate trade realization to `live_sim`.
+
+    Every Tier-1 divergence (partial / trailing / timeout limit→market /
+    fast-fill / adaptive TP/SL / dynamic timeout / bid-ask entry) is handled
+    by `live_sim.simulate_trade`. The backtest layer only decides WHEN to
+    enter (matching the live `SignalGenerator` filter stack) and tracks
+    equity across trades. Post-only rejection is still simulated here as
+    an execution artefact because `live_sim` deliberately omits it.
+    """
     result = BacktestResult()
     equity = initial_equity
     result.equity_curve.append(equity)
 
+    rng = np.random.default_rng(seed)
     n = len(predictions)
+    result.session_ticks = n
+
+    if X_feat is None:
+        # Backwards compatibility: reconstruct a minimal X_feat from the
+        # legacy (imbalances, spreads) arguments. Vol_ratio / spoof / hurst
+        # default to permissive values so the filter mask reduces to the
+        # original 0.03 spread + imbalance gate.
+        stub = np.zeros((n, 34), dtype=np.float32)
+        stub[:, 1] = imbalances
+        stub[:, 3] = spreads
+        stub[:, 20] = 0.0           # spoof score
+        stub[:, 21] = 1.0           # vol_ratio → inside band
+        stub[:, 23] = 0.5           # hurst → pass regime gate
+        X_feat = stub
+
+    entry_mask = _trading_signal_mask(
+        predictions, confidences, X_feat, sample_ts_ms, confidence_threshold,
+    )
+
+    # Iterate forward. When a trade opens we skip ahead by the trade's
+    # duration before evaluating the next entry so trades don't overlap.
     i = 0
-    in_position = False
-    direction = ""
-    entry_price = 0.0
-    entry_tick = 0
-    position_size = 0.0
-
     while i < n:
-        if not in_position:
-            pred = predictions[i]
-            conf = confidences[i]
-            imb = imbalances[i]
-            spread = spreads[i]
-
-            # Entry filters
-            if pred == FLAT or conf < confidence_threshold:
-                i += 1
-                continue
-            if spread > 0.03:
-                i += 1
-                continue
-
-            if pred == UP and imb > 0.15:
-                direction = "LONG"
-            elif pred == DOWN and imb < -0.15:
-                direction = "SHORT"
-            else:
-                i += 1
-                continue
-
-            # Post-Only rejection simulation
-            if np.random.random() < POST_ONLY_REJECT_RATE:
-                i += 1
-                continue
-
-            # Execution delay
-            entry_idx = min(i + EXECUTION_DELAY_TICKS, n - 1)
-            entry_price = mid_prices[entry_idx]
-            entry_tick = entry_idx
-            # Dynamic position size from current equity
-            notional = equity * leverage * position_size_pct / 100
-            position_size = notional / entry_price
-            position_size = round(position_size, 3)
-            in_position = True
-            i = entry_idx + 1
-            continue
-
-        # In position — check exit (%-based TP/SL)
-        current_price = mid_prices[i]
-        ticks_held = i - entry_tick
-
-        tp_dist = entry_price * TAKE_PROFIT_PCT / 100
-        sl_dist = entry_price * STOP_LOSS_PCT / 100
-
-        if direction == "LONG":
-            pnl_raw = (current_price - entry_price) * position_size
-            hit_tp = current_price >= entry_price + tp_dist
-            hit_sl = current_price <= entry_price - sl_dist
-        else:
-            pnl_raw = (entry_price - current_price) * position_size
-            hit_tp = current_price <= entry_price - tp_dist
-            hit_sl = current_price >= entry_price + sl_dist
-
-        reason = ""
-        if hit_tp:
-            reason = "take_profit"
-        elif hit_sl:
-            reason = "stop_loss"
-        elif ticks_held >= POSITION_TIMEOUT_TICKS:
-            reason = "timeout"
-
-        if reason:
-            # Different commission for win vs loss
-            notional_val = entry_price * position_size
-            if reason == "stop_loss":
-                fees = notional_val * COMMISSION_LOSS_PCT / 100
-            else:
-                fees = notional_val * COMMISSION_WIN_PCT / 100
-            net = pnl_raw - fees
-            equity += net
-            result.equity_curve.append(equity)
-
-            result.trades.append(Trade(
-                direction=direction,
-                entry_price=entry_price,
-                exit_price=current_price,
-                pnl=pnl_raw,
-                fees=fees,
-                net_pnl=net,
-                reason=reason,
-                duration_ticks=ticks_held,
-            ))
-
-            in_position = False
+        if not entry_mask[i]:
             i += 1
             continue
 
-        i += 1
+        pred = int(predictions[i])
+        vol_ratio = float(X_feat[i, 21])
+        tp_pct, sl_pct = filters.adaptive_tp_sl(vol_ratio, BASE_TP_PCT, BASE_SL_PCT)
+        timeout_sec = filters.dynamic_timeout_sec(
+            avg_volatility=1.0,
+            current_volatility=max(vol_ratio, 1e-9),
+            base_timeout_sec=BASE_TIMEOUT_SEC,
+        )
+        timeout_ticks = int(round(timeout_sec * 10.0))
+
+        cfg = LiveSimConfig(
+            tp_pct=tp_pct, sl_pct=sl_pct, timeout_ticks=timeout_ticks,
+            commission_win_pct=COMMISSION_WIN_PCT,
+            commission_loss_pct=COMMISSION_LOSS_PCT,
+        )
+
+        # Post-only rejection — if the entry order is rejected we lose
+        # the tick and look for the next signal. Keeps the 10% failure
+        # rate the old backtest modelled without bending live_sim.
+        if rng.random() < POST_ONLY_REJECT_RATE:
+            i += 1
+            continue
+
+        # Execution delay — enter 1 tick after the signal.
+        entry_idx = min(i + EXECUTION_DELAY_TICKS, n - 1)
+        entry_px = float(mid_prices[entry_idx])
+        if entry_px <= 0:
+            i += 1
+            continue
+
+        fwd_start = entry_idx + 1
+        fwd_end = min(fwd_start + SIM_HORIZON, n)
+        mid_path = mid_prices[fwd_start:fwd_end]
+        if len(mid_path) < 2:
+            break
+
+        direction = SimDirection.LONG if pred == UP else SimDirection.SHORT
+        outcome = simulate_trade(
+            direction, entry_px, mid_path, cfg,
+            fill_latency_ms=150.0,
+        )
+
+        # Sizing + equity accounting ----------------------------------
+        notional = equity * leverage * position_size_pct / 100
+        size_btc = round(notional / entry_px, 3)
+        if size_btc * entry_px < 100.0:
+            # Below Binance min notional — skip.
+            i = entry_idx + 1
+            continue
+
+        # Net PnL in USD from the per-sample net_pnl_pct. gross & fees are
+        # recomputed so the Trade record can still feed the existing
+        # `avg_win`/`avg_loss`/`profit_factor` aggregates.
+        net_pnl_usd = size_btc * entry_px * outcome.net_pnl_pct / 100
+        gross_pnl_usd = size_btc * entry_px * outcome.gross_pnl_pct / 100
+        fees_usd = gross_pnl_usd - net_pnl_usd
+
+        equity += net_pnl_usd
+        result.equity_curve.append(equity)
+        result.trades.append(
+            Trade(
+                direction="LONG" if direction == SimDirection.LONG else "SHORT",
+                entry_price=entry_px,
+                exit_price=entry_px * (1 + outcome.gross_pnl_pct / 100 * (1 if direction == SimDirection.LONG else -1)),
+                pnl=gross_pnl_usd,
+                fees=fees_usd,
+                net_pnl=net_pnl_usd,
+                reason=outcome.exit_reason,
+                duration_ticks=outcome.duration_ticks,
+                gross_pnl_pct=outcome.gross_pnl_pct,
+            )
+        )
+
+        # Skip past the trade so we don't re-enter mid-position.
+        i = entry_idx + 1 + max(outcome.duration_ticks, 1)
 
     return result
 
 
 def print_results(result: BacktestResult, label: str = "BACKTEST RESULTS") -> None:
-    print(f"\n{'='*50}")
+    print(f"\n{'='*60}")
     print(f"  {label}")
-    print(f"{'='*50}")
+    print(f"{'='*60}")
     print(f"  Total trades:          {result.total_trades}")
-    print(f"  Wins:                  {result.wins}")
-    print(f"  Losses:                {result.losses}")
-    print(f"  Win rate:              {result.win_rate:.1%}")
+    print(f"  Wins (net > 0):        {result.wins}")
+    print(f"  Losses (net <= 0):     {result.losses}")
+    print(f"  Net-WR (net > 0):      {result.win_rate:.1%}")
+    print(f"  TP-WR (full TP hit):   {result.tp_hit_rate:.1%}")
+    print(f"  SL-WR (any SL hit):    {result.sl_hit_rate:.1%}")
     print(f"  Profit factor:         {result.profit_factor:.2f}")
     print(f"  Total P&L:             ${result.total_pnl:.2f}")
     print(f"  Avg win:               ${result.avg_win:.4f}")
     print(f"  Avg loss:              ${result.avg_loss:.4f}")
-    print(f"  Max drawdown:          ${result.max_drawdown:.2f}")
+    print(f"  Max drawdown ($):      ${result.max_drawdown:.2f}")
+    print(f"  Max drawdown (%):      {result.max_drawdown_pct:.2f}%")
     print(f"  Max consec losses:     {result.max_consecutive_losses}")
+    print(f"  Trades / day:          {result.trades_per_day:.2f}")
     print(f"  Sharpe (daily):        {result.sharpe_daily:.2f}")
     print(f"  Final equity:          ${result.equity_curve[-1]:.2f}")
-    print(f"{'='*50}\n")
+
+    # --- Exit reason distribution --------------------------------------
+    # Quick sanity check that the bot isn't permanently stuck in one
+    # branch. A well-balanced run should see a mix of tp_hit / sl_hit /
+    # trailing_* / timeout_*.
+    reason_counts: dict[str, int] = {}
+    for t in result.trades:
+        reason_counts[t.reason] = reason_counts.get(t.reason, 0) + 1
+    if reason_counts:
+        print(f"  Exit reason distribution:")
+        total = len(result.trades)
+        for r, c in sorted(reason_counts.items(), key=lambda kv: kv[1], reverse=True):
+            print(f"    {r:<30s} {c:5d}  ({c/total*100:5.1f}%)")
+
+    # --- Deploy verdict ------------------------------------------------
+    # Gate criteria come from handoff_current.md → "Trader priorities".
+    # The verdict is advisory only — a trader still has to eyeball the
+    # equity curve and reason distribution before going live.
+    print(f"  Deploy gates ({list(DEPLOY_GATES.keys())}):")
+    checks = {
+        "tp_wr_min": (result.tp_hit_rate, DEPLOY_GATES["tp_wr_min"], ">="),
+        "profit_factor_min": (result.profit_factor, DEPLOY_GATES["profit_factor_min"], ">="),
+        "max_consec_losses_max": (result.max_consecutive_losses, DEPLOY_GATES["max_consec_losses_max"], "<="),
+        "trades_per_day_min": (result.trades_per_day, DEPLOY_GATES["trades_per_day_min"], ">="),
+        "max_drawdown_pct_max": (result.max_drawdown_pct, DEPLOY_GATES["max_drawdown_pct_max"], "<="),
+    }
+    all_pass = True
+    for name, (actual, target, op) in checks.items():
+        if op == ">=":
+            ok = actual >= target
+        else:
+            ok = actual <= target
+        marker = "PASS" if ok else "FAIL"
+        print(f"    [{marker}] {name:<25s} actual={actual:.3f} {op} target={target}")
+        all_pass = all_pass and ok
+    verdict = "DEPLOY" if all_pass else "DO NOT DEPLOY"
+    print(f"  VERDICT: {verdict}")
+    print(f"{'='*60}\n")
 
 
 def save_results(result: BacktestResult, cfg, suffix: str = "") -> None:
@@ -339,6 +505,7 @@ def run_with_model(
     X_feat: np.ndarray,
     mid_prices: np.ndarray,
     confidence: float,
+    sample_ts_ms: np.ndarray | None = None,
 ) -> BacktestResult:
     """Run backtest using a pre-trained model from disk."""
     from src.model import HybridModel
@@ -358,7 +525,7 @@ def run_with_model(
 
     return _run_bt(
         mid_prices, np.array(predictions), np.array(confidences),
-        X_feat, confidence,
+        X_feat, confidence, sample_ts_ms,
     )
 
 
@@ -368,9 +535,11 @@ def run_walk_forward(
     X_feat: np.ndarray,
     y: np.ndarray,
     mid_prices: np.ndarray,
+    target_pnl: np.ndarray,
     confidence: float,
     train_ratio: float = 0.8,
     n_jobs: int = 1,
+    sample_ts_ms: np.ndarray | None = None,
 ) -> BacktestResult:
     """Walk-forward: train on first train_ratio, backtest on the rest."""
     n = len(X_lob)
@@ -379,7 +548,9 @@ def run_walk_forward(
     X_lob_train, X_lob_test = X_lob[:split], X_lob[split:]
     X_feat_train, X_feat_test = X_feat[:split], X_feat[split:]
     y_train, y_test = y[:split], y[split:]
+    pnl_train = target_pnl[:split]
     mid_test = mid_prices[split:]
+    ts_test = sample_ts_ms[split:] if sample_ts_ms is not None else None
 
     print(f"\n  Walk-forward split: train={split}, test={n - split}")
     print(f"  Test labels: UP={int((y_test==UP).sum())} DOWN={int((y_test==DOWN).sum())} FLAT={int((y_test==FLAT).sum())}")
@@ -393,8 +564,10 @@ def run_walk_forward(
     del X_lob_train, X_lob_test
 
     logger.info("Training ensemble on %d samples...", split)
-    xgb_models, lgb_model, logreg, top5_features, calibrators = trainer.train_ensemble(
-        emb_train, X_feat_train, y_train, n_jobs=n_jobs,
+    (
+        xgb_models, lgb_model, logreg, top5_features, calibrators, _regressor,
+    ) = trainer.train_ensemble(
+        emb_train, X_feat_train, y_train, n_jobs=n_jobs, target_pnl=pnl_train,
     )
 
     # Predict on test set using ensemble majority vote + calibrated confidence
@@ -432,11 +605,18 @@ def run_walk_forward(
     from sklearn.metrics import accuracy_score, classification_report
     acc = accuracy_score(y_test, predictions)
     print(f"\n  Test accuracy: {acc:.4f}")
+    # `labels=` + `zero_division=0` — matches the trainer.train_ensemble fix
+    # so degenerate val sets no longer crash the walk-forward run.
     print(classification_report(
-        y_test, predictions, target_names=["UP", "DOWN", "FLAT"],
+        y_test, predictions,
+        labels=[UP, DOWN, FLAT],
+        target_names=["UP", "DOWN", "FLAT"],
+        zero_division=0,
     ))
 
-    return _run_bt(mid_test, predictions, confidences, X_feat_test, confidence)
+    return _run_bt(
+        mid_test, predictions, confidences, X_feat_test, confidence, ts_test,
+    )
 
 
 def _run_bt(
@@ -445,6 +625,7 @@ def _run_bt(
     confidences: np.ndarray,
     X_feat: np.ndarray,
     confidence: float,
+    sample_ts_ms: np.ndarray | None = None,
 ) -> BacktestResult:
     """Common backtest runner. mid_prices already aligned with predictions."""
     n = min(len(mid_prices), len(predictions))
@@ -454,6 +635,8 @@ def _run_bt(
         confidences=confidences[:n],
         imbalances=X_feat[:n, 1],
         spreads=X_feat[:n, 3],
+        X_feat=X_feat[:n],
+        sample_ts_ms=sample_ts_ms[:n] if sample_ts_ms is not None else None,
         confidence_threshold=confidence,
     )
 
@@ -483,17 +666,25 @@ def main() -> None:
     trainer = Trainer(cfg)
 
     # build_samples_cached loads data internally and frees DataFrames to save RAM.
-    # Cache key is (hours, newest_depth_mtime) — any new data or different
-    # window invalidates it. --force-rebuild bypasses the cache.
-    X_lob, X_feat, y, mid_prices = trainer.build_samples_cached(
+    # Cache key is (schema_version, hours, newest_depth_mtime) — any new
+    # data, bumped schema, or different window invalidates it.
+    # --force-rebuild bypasses the cache.
+    X_lob, X_feat, y, mid_prices, target_pnl = trainer.build_samples_cached(
         hours=args.data_hours, force_rebuild=args.force_rebuild,
     )
 
+    # Cached samples already passed the global filter mask (including
+    # time-of-day and funding blackout) during build_samples, so the
+    # backtest layer skips those re-checks and passes `sample_ts_ms=None`.
+    # Any non-FLAT prediction on a kept sample is time-valid by construction.
+    result = None
     if args.mode == "model":
-        result = run_with_model(trainer, X_lob, X_feat, mid_prices, args.confidence)
+        result = run_with_model(
+            trainer, X_lob, X_feat, mid_prices, args.confidence,
+        )
     else:
         result = run_walk_forward(
-            trainer, X_lob, X_feat, y, mid_prices,
+            trainer, X_lob, X_feat, y, mid_prices, target_pnl,
             args.confidence, args.train_ratio, n_jobs=args.n_jobs,
         )
 

@@ -132,7 +132,7 @@ from src.trainer import Trainer
 
 cfg = load_config("config.env")
 trainer = Trainer(cfg)
-X_lob, X_feat, y, _mids = trainer.build_samples(hours=24)
+X_lob, X_feat, y, _mids, _target_pnl = trainer.build_samples(hours=24)
 
 print(f"  Samples: {len(y)}")
 print(f"  Classes: UP={int((y==0).sum())} DOWN={int((y==1).sum())} FLAT={int((y==2).sum())}")
