@@ -116,10 +116,16 @@ class RiskManager:
         if self._ws.last_message_time > 0 and ws_age > 3.0:
             return False, "ws_stale"
 
-        # Low liquidity
+        # Low liquidity. The previous threshold (50 BTC) was inherited
+        # from the ETH configuration and rejected every BTC sample —
+        # real BTCUSDT top-5 bid median is ~4.8 BTC. 1.0 is half the
+        # `filters.MIN_TOP5_BTC_LIQUIDITY` signal-filter value, acting
+        # as an emergency circuit-breaker one level below the normal
+        # entry gate. Bundled into the label/live-sync rewrite for
+        # parity with the ETH→BTC migration cleanup.
         if self._ob.current is not None:
             bid_depth = float(self._ob.current.bids[:5, 1].sum())
-            if bid_depth < 50:
+            if bid_depth < 1.0:
                 return False, "low_liquidity"
 
         return True, "ok"

@@ -6,52 +6,49 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 
+from src import filters
 from src.config import Config
 from src.features import FeatureEngine
 from src.model import HybridModel, UP, DOWN, FLAT
 
 logger = logging.getLogger(__name__)
 
-# Adaptive TP/SL bounds as percentage of price (prevent extremes)
-MIN_TP_PCT = 0.10   # 0.10%
-MAX_TP_PCT = 0.60   # 0.60%
-MIN_SL_PCT = 0.05   # 0.05%
-MAX_SL_PCT = 0.30   # 0.30%
+# Lever 3 — entry filter tightening. The numeric constants live in
+# `src/filters.py` (the shared filter module consumed by signal.py,
+# trainer.py and backtest.py). We re-export the ones legacy tests still
+# import by name, but the canonical source of truth is `filters`.
+#
+# DO NOT change these constants without also changing `src/filters.py`
+# — `tests/test_signal_filters.py` is a parity guard between the two.
 
-# Lever 3 — entry filter tightening. Each constant maps directly to a filter
-# in `SignalGenerator.generate`. Keeping them at module scope makes A/B
-# experiments cheap and the rationale auditable in one place.
+# Adaptive TP/SL bounds (percentage of price)
+MIN_TP_PCT = filters.MIN_TP_PCT
+MAX_TP_PCT = filters.MAX_TP_PCT
+MIN_SL_PCT = filters.MIN_SL_PCT
+MAX_SL_PCT = filters.MAX_SL_PCT
 
-# 3.1 Time-of-day skip: Asia night (UTC) — thin liquidity, spoofing prevalent.
-ASIA_NIGHT_START_UTC = 4
-ASIA_NIGHT_END_UTC = 7    # half-open interval [start, end)
+# 3.1 Asia-night skip.
+ASIA_NIGHT_START_UTC = filters.ASIA_NIGHT_START_UTC
+ASIA_NIGHT_END_UTC = filters.ASIA_NIGHT_END_UTC
 
-# 3.2 Liquidity depth gate: require thicker top-5 than the existing 50 BTC
-# emergency circuit breaker before opening a position.
-MIN_TOP5_BTC_LIQUIDITY = 100.0
+# 3.2 Liquidity depth gate.
+MIN_TOP5_BTC_LIQUIDITY = filters.MIN_TOP5_BTC_LIQUIDITY
 
-# 3.3 Volatility band: below 0.7 the market is dead (model output is noise),
-# above 2.5 it is news-driven (model can't predict). Sweet spot is moderate
-# turbulence where microstructure signals work.
-VOL_BAND_LOW = 0.7
-VOL_BAND_HIGH = 2.5
+# 3.3 Volatility band.
+VOL_BAND_LOW = filters.VOL_BAND_LOW
+VOL_BAND_HIGH = filters.VOL_BAND_HIGH
 
-# 3.4 Recent performance gate: if the rolling 10-trade winrate falls below
-# RECENT_WR_FLOOR, pause entries for RECENT_WR_PAUSE_SEC. Catches regime
-# shifts in real time, before the 4-hour retraining cycle notices.
+# 3.4 Recent-WR pause — STATEFUL, stays in signal.py (trainer approximates
+# "no pause" at label time per handoff_current.md design decision 3).
 RECENT_WR_FLOOR = 0.40
 RECENT_WR_PAUSE_SEC = 600  # 10 minutes
 
-# 3.5 Funding proximity: extend existing ±2 min to ±3 min around settlement
-# (00:00, 08:00, 16:00 UTC). Funding settlement is the worst time to be in
-# a position because of mark-price spikes and predatory liquidations.
-FUNDING_GUARD_MIN = 3
-FUNDING_HOURS_UTC = (0, 8, 16)
+# 3.5 Funding proximity guard.
+FUNDING_GUARD_MIN = filters.FUNDING_GUARD_MIN
+FUNDING_HOURS_UTC = filters.FUNDING_HOURS_UTC
 
-# 3.6 Spread tightening: drop from $0.03 (3 ticks) to $0.02 (2 ticks). The
-# old value was a calibration constant from the data-collection phase; live
-# economics need a tighter floor since the entry maker fee is fixed.
-MAX_SPREAD_USD = 0.02
+# 3.6 Spread ceiling.
+MAX_SPREAD_USD = filters.MAX_SPREAD_USD
 
 
 class Direction(Enum):
@@ -95,16 +92,12 @@ class SignalGenerator:
     def _is_funding_window(self, now_utc: datetime) -> bool:
         """True if `now_utc` is within ±FUNDING_GUARD_MIN of any funding hour.
 
-        Funding settles at 00:00, 08:00, 16:00 UTC on Binance Futures. The
-        window is symmetric, e.g. for 08:00 the guard is [07:57, 08:03].
+        Thin wrapper around `filters.passes_funding_blackout` so existing
+        unit tests (`tests/test_signal_filters.py`) that test this method
+        by name keep passing after the refactor.
         """
-        for h in FUNDING_HOURS_UTC:
-            delta_min = abs((now_utc.hour - h) * 60 + now_utc.minute)
-            # Wrap around midnight (e.g. 23:58 ↔ 00:00).
-            delta_min = min(delta_min, 24 * 60 - delta_min)
-            if delta_min <= FUNDING_GUARD_MIN:
-                return True
-        return False
+        ts_ms = now_utc.timestamp() * 1000.0
+        return not filters.passes_funding_blackout(ts_ms)
 
     def generate(self, balance: float) -> Signal:
         fe = self._features
@@ -123,14 +116,15 @@ class SignalGenerator:
         # === Lever 3 — pre-prediction filters (cheap, time-only) ===
         # Run these first so we don't pay the CNN+ensemble cost when we know
         # the entry will be filtered out anyway.
-        now_utc = datetime.now(timezone.utc)
-        if ASIA_NIGHT_START_UTC <= now_utc.hour < ASIA_NIGHT_END_UTC:
+        now_ms = time.time() * 1000.0
+        if not filters.passes_time_of_day(now_ms):
             return Signal.NONE
-        if self._is_funding_window(now_utc):
+        if not filters.passes_funding_blackout(now_ms):
             return Signal.NONE
 
-        # Recent-WR pause: if the rolling 10-trade WR fell below the floor,
-        # we paused for RECENT_WR_PAUSE_SEC and refuse signals until then.
+        # Recent-WR pause: STATEFUL, not in shared filters. If the rolling
+        # 10-trade WR fell below the floor, we paused for RECENT_WR_PAUSE_SEC
+        # and refuse signals until then.
         now_mono = time.monotonic()
         if now_mono < self._recent_wr_pause_until:
             return Signal.NONE
@@ -146,7 +140,7 @@ class SignalGenerator:
 
         prediction, confidence = self._model.predict(lob_tensor, fe.features)
 
-        # --- Dynamic threshold (self-tuning or base) ---
+        # --- Dynamic threshold (self-tuning or base) — STATEFUL ---
         threshold = self._cfg.confidence_threshold
         if self._executor is not None:
             threshold = self._executor.dynamic_threshold
@@ -156,17 +150,17 @@ class SignalGenerator:
             return Signal.NONE
 
         spread = raw.get("spread", 999)
-        if spread > MAX_SPREAD_USD:
+        if not filters.passes_spread(spread):
             return Signal.NONE
 
         vol = raw.get("volatility_1s", 0)
         vol_3s = raw.get("volatility_3sigma", vol * 3)
-        if vol > vol_3s:
+        if not filters.passes_vol_spike(vol, vol_3s):
             return Signal.NONE
 
         # Lever 3.3 — volatility band gate
         vol_ratio = raw.get("volatility_ratio", 1.0)
-        if not (VOL_BAND_LOW < vol_ratio < VOL_BAND_HIGH):
+        if not filters.passes_vol_band(vol_ratio):
             return Signal.NONE
 
         # Lever 3.2 — liquidity depth gate. raw["depth_ratio_l5"] is a ratio,
@@ -176,16 +170,17 @@ class SignalGenerator:
             return Signal.NONE
         top5_bid_btc = float(ob_snap.bids[:5, 1].sum())
         top5_ask_btc = float(ob_snap.asks[:5, 1].sum())
-        if top5_bid_btc < MIN_TOP5_BTC_LIQUIDITY or top5_ask_btc < MIN_TOP5_BTC_LIQUIDITY:
+        if not filters.passes_liquidity(top5_bid_btc, top5_ask_btc):
             return Signal.NONE
 
         # Spoof filter
         spoof = raw.get("spoof_score", 0)
-        if spoof > 0.5:
+        if not filters.passes_spoof(spoof):
             logger.debug("Spoof detected (%.2f), skipping signal", spoof)
             return Signal.NONE
 
-        # Fill rate filter: if too few orders filling, market is too fast
+        # Fill rate filter: STATEFUL — too few orders filling ⇒ market is
+        # too fast. Not in shared filters (label time assumes fill_rate=1.0).
         if self._executor is not None and self._executor.fill_rate < 0.25:
             logger.debug("Low fill rate (%.0f%%), pausing entries", self._executor.fill_rate * 100)
             return Signal.NONE
@@ -201,11 +196,12 @@ class SignalGenerator:
         if size <= 0:
             return Signal.NONE
 
-        # In mean-reversion regime (H < 0.45), skip momentum signals
-        if hurst < 0.45 and prediction in (UP, DOWN):
-            # Only take signals with very high confidence in mean-reversion
-            if confidence < threshold + 0.05:
-                return Signal.NONE
+        # In mean-reversion regime (H < 0.45), skip momentum signals unless
+        # confidence clears a higher bar.
+        if prediction in (UP, DOWN) and not filters.passes_hurst_regime(
+            hurst, confidence, threshold,
+        ):
+            return Signal.NONE
 
         # Adaptive TP/SL (percentage-based, scaled by volatility)
         tp_pct, sl_pct = self._adaptive_tp_sl(raw)
@@ -216,7 +212,7 @@ class SignalGenerator:
         # Sweep boost: recent sweep in signal direction = stronger conviction
         sweep = raw.get("sweep_intensity", 0)
 
-        if prediction == UP and imbalance > 0.15:
+        if prediction == UP and filters.passes_imbalance_long(imbalance):
             adj_confidence = confidence
             if liq_prox > 0.005:
                 adj_confidence = min(confidence + 0.05, 1.0)
@@ -235,7 +231,7 @@ class SignalGenerator:
                 confidence=adj_confidence,
             )
 
-        if prediction == DOWN and imbalance < -0.15:
+        if prediction == DOWN and filters.passes_imbalance_short(imbalance):
             adj_confidence = confidence
             if liq_prox < -0.005:
                 adj_confidence = min(confidence + 0.05, 1.0)
@@ -258,18 +254,15 @@ class SignalGenerator:
     def _adaptive_tp_sl(self, raw: dict) -> tuple[float, float]:
         """Scale TP/SL percentage by current volatility.
 
-        Returns (tp_pct, sl_pct) as percentages of price.
+        Delegates to `filters.adaptive_tp_sl` so trainer / backtest /
+        live-signal all share the same math. The existing signature is
+        kept so downstream tests that call it by name still work.
         """
-        vol_ratio = raw.get("volatility_ratio", 1.0)
-        vol_ratio = max(0.5, min(vol_ratio, 3.0))
-
-        tp_pct = self._cfg.take_profit_pct * vol_ratio
-        sl_pct = self._cfg.stop_loss_pct * vol_ratio
-
-        tp_pct = max(MIN_TP_PCT, min(tp_pct, MAX_TP_PCT))
-        sl_pct = max(MIN_SL_PCT, min(sl_pct, MAX_SL_PCT))
-
-        return tp_pct, sl_pct
+        return filters.adaptive_tp_sl(
+            vol_ratio=raw.get("volatility_ratio", 1.0),
+            base_tp_pct=self._cfg.take_profit_pct,
+            base_sl_pct=self._cfg.stop_loss_pct,
+        )
 
     def _calc_size(
         self, balance: float, hurst: float = 0.5,
