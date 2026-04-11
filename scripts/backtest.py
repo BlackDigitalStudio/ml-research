@@ -6,24 +6,52 @@ Simulates:
 - Maker commission 0.036% round-trip
 
 Usage:
-    python scripts/backtest.py --data-hours 24 --commission 0.00036
+    python scripts/backtest.py --data-hours 72 --mode walk-forward --n-jobs 1
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Walk-forward backtest")
+    parser.add_argument("--data-hours", type=int, default=24)
+    parser.add_argument("--confidence", type=float, default=0.58)
+    parser.add_argument("--train-ratio", type=float, default=0.8,
+                        help="Fraction of data for training in walk-forward mode (default 0.8)")
+    parser.add_argument("--mode", choices=["walk-forward", "model"], default="walk-forward",
+                        help="walk-forward: train+test in one run; model: use pre-trained model from disk")
+    parser.add_argument(
+        "--n-jobs", type=int, default=1,
+        help="Threads per library. 1 (default) isolates training to 1 core "
+             "(safe on the 2-vCPU prod server). -1 uses all cores for "
+             "faster dev iteration — only when the live bot is off.",
+    )
+    return parser.parse_args()
+
+
+# Parse and apply thread env BEFORE importing numpy/torch/xgboost. NumPy
+# MKL reads OMP_NUM_THREADS at import time and caches the value.
+_args = _parse_args()
+if _args.n_jobs > 0:
+    os.environ["OMP_NUM_THREADS"] = str(_args.n_jobs)
+    os.environ["MKL_NUM_THREADS"] = str(_args.n_jobs)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(_args.n_jobs)
+    os.environ["NUMEXPR_NUM_THREADS"] = str(_args.n_jobs)
+
+import numpy as np    # noqa: E402 — must follow env setup
+import pandas as pd   # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.config import load_config
-from src.model import LOBEncoder, UP, DOWN, FLAT
-from src.trainer import Trainer, WINDOW_SIZE, HORIZON
+from src.config import load_config                     # noqa: E402
+from src.model import LOBEncoder, UP, DOWN, FLAT        # noqa: E402
+from src.trainer import Trainer, WINDOW_SIZE, HORIZON   # noqa: E402
 
 logger = logging.getLogger("backtest")
 
@@ -323,6 +351,7 @@ def run_walk_forward(
     mid_prices: np.ndarray,
     confidence: float,
     train_ratio: float = 0.8,
+    n_jobs: int = 1,
 ) -> BacktestResult:
     """Walk-forward: train on first train_ratio, backtest on the rest."""
     n = len(X_lob)
@@ -337,7 +366,7 @@ def run_walk_forward(
     print(f"  Test labels: UP={int((y_test==UP).sum())} DOWN={int((y_test==DOWN).sum())} FLAT={int((y_test==FLAT).sum())}")
 
     # Free train LOB early — CNN training copies to torch tensors
-    encoder = trainer.train_cnn(X_lob_train, y_train)
+    encoder = trainer.train_cnn(X_lob_train, y_train, n_jobs=n_jobs)
 
     logger.info("Extracting embeddings...")
     emb_train = trainer.extract_embeddings(encoder, X_lob_train)
@@ -345,16 +374,16 @@ def run_walk_forward(
     del X_lob_train, X_lob_test
 
     logger.info("Training ensemble on %d samples...", split)
-    xgb_models, lgb_model, logreg, top5_features = trainer.train_ensemble(
-        emb_train, X_feat_train, y_train,
+    xgb_models, lgb_model, logreg, top5_features, calibrators = trainer.train_ensemble(
+        emb_train, X_feat_train, y_train, n_jobs=n_jobs,
     )
 
-    # Predict on test set using ensemble majority vote
+    # Predict on test set using ensemble majority vote + calibrated confidence
     import xgboost as xgb_lib
     X_test_combined = np.hstack([emb_test, X_feat_test])
     n_test = len(X_test_combined)
 
-    # Collect votes from all 5 models
+    # Collect proba from all 5 models for majority vote
     all_proba = []
     for xgb_m in xgb_models:
         p = xgb_m.predict(xgb_lib.DMatrix(X_test_combined))
@@ -370,20 +399,16 @@ def run_walk_forward(
 
     # Majority vote
     ensemble_votes = np.zeros((n_test, 3), dtype=np.int32)
-    ensemble_conf_sum = np.zeros((n_test, 3), dtype=np.float64)
     for p in all_proba:
         classes = p.argmax(axis=1)
         ensemble_votes[np.arange(n_test), classes] += 1
-        ensemble_conf_sum[np.arange(n_test), classes] += p.max(axis=1)
 
     predictions = ensemble_votes.argmax(axis=1)
-    # Mean confidence of majority voters
-    majority_counts = ensemble_votes[np.arange(n_test), predictions]
-    confidences = np.where(
-        majority_counts > 0,
-        ensemble_conf_sum[np.arange(n_test), predictions] / majority_counts,
-        0.0,
-    )
+
+    # Calibrated mean-proba confidence (matches HybridModel.predict at runtime)
+    mean_proba = np.mean(all_proba, axis=0)  # (n_test, 3)
+    cal_proba = trainer._apply_calibrators(calibrators, mean_proba)
+    confidences = cal_proba[np.arange(n_test), predictions]
 
     from sklearn.metrics import accuracy_score, classification_report
     acc = accuracy_score(y_test, predictions)
@@ -415,14 +440,7 @@ def _run_bt(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Walk-forward backtest")
-    parser.add_argument("--data-hours", type=int, default=24)
-    parser.add_argument("--confidence", type=float, default=0.58)
-    parser.add_argument("--train-ratio", type=float, default=0.8,
-                        help="Fraction of data for training in walk-forward mode (default 0.8)")
-    parser.add_argument("--mode", choices=["walk-forward", "model"], default="walk-forward",
-                        help="walk-forward: train+test in one run; model: use pre-trained model from disk")
-    args = parser.parse_args()
+    args = _args  # parsed at import time so env vars could be set before numpy
 
     cfg = load_config("config.env")
 
@@ -434,7 +452,9 @@ def main() -> None:
 
     print(f"\n{'='*50}")
     print(f"  Walk-Forward Backtest — {args.mode} mode")
-    print(f"  Data: last {args.data_hours} hours")
+    print(f"  Data:       last {args.data_hours} hours")
+    print(f"  Threads:    n_jobs={args.n_jobs}  "
+          f"(OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'unset')})")
     print(f"  Commission: win={COMMISSION_WIN_PCT}% loss={COMMISSION_LOSS_PCT}%")
     print(f"  Post-Only rejection: {POST_ONLY_REJECT_RATE * 100:.0f}%")
     if args.mode == "walk-forward":
@@ -451,7 +471,7 @@ def main() -> None:
     else:
         result = run_walk_forward(
             trainer, X_lob, X_feat, y, mid_prices,
-            args.confidence, args.train_ratio,
+            args.confidence, args.train_ratio, n_jobs=args.n_jobs,
         )
 
     print_results(result, f"BACKTEST RESULTS ({args.mode})")

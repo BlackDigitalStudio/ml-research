@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 
 from src.config import Config
@@ -15,6 +17,41 @@ MIN_TP_PCT = 0.10   # 0.10%
 MAX_TP_PCT = 0.60   # 0.60%
 MIN_SL_PCT = 0.05   # 0.05%
 MAX_SL_PCT = 0.30   # 0.30%
+
+# Lever 3 — entry filter tightening. Each constant maps directly to a filter
+# in `SignalGenerator.generate`. Keeping them at module scope makes A/B
+# experiments cheap and the rationale auditable in one place.
+
+# 3.1 Time-of-day skip: Asia night (UTC) — thin liquidity, spoofing prevalent.
+ASIA_NIGHT_START_UTC = 4
+ASIA_NIGHT_END_UTC = 7    # half-open interval [start, end)
+
+# 3.2 Liquidity depth gate: require thicker top-5 than the existing 50 BTC
+# emergency circuit breaker before opening a position.
+MIN_TOP5_BTC_LIQUIDITY = 100.0
+
+# 3.3 Volatility band: below 0.7 the market is dead (model output is noise),
+# above 2.5 it is news-driven (model can't predict). Sweet spot is moderate
+# turbulence where microstructure signals work.
+VOL_BAND_LOW = 0.7
+VOL_BAND_HIGH = 2.5
+
+# 3.4 Recent performance gate: if the rolling 10-trade winrate falls below
+# RECENT_WR_FLOOR, pause entries for RECENT_WR_PAUSE_SEC. Catches regime
+# shifts in real time, before the 4-hour retraining cycle notices.
+RECENT_WR_FLOOR = 0.40
+RECENT_WR_PAUSE_SEC = 600  # 10 minutes
+
+# 3.5 Funding proximity: extend existing ±2 min to ±3 min around settlement
+# (00:00, 08:00, 16:00 UTC). Funding settlement is the worst time to be in
+# a position because of mark-price spikes and predatory liquidations.
+FUNDING_GUARD_MIN = 3
+FUNDING_HOURS_UTC = (0, 8, 16)
+
+# 3.6 Spread tightening: drop from $0.03 (3 ticks) to $0.02 (2 ticks). The
+# old value was a calibration constant from the data-collection phase; live
+# economics need a tighter floor since the entry maker fee is fixed.
+MAX_SPREAD_USD = 0.02
 
 
 class Direction(Enum):
@@ -47,10 +84,27 @@ class SignalGenerator:
         self._model = model
         self._features = features
         self._executor = None  # set via set_executor()
+        # State for the recent-WR pause gate (Lever 3.4): once triggered, the
+        # pause lasts RECENT_WR_PAUSE_SEC and is not re-evaluated until then.
+        self._recent_wr_pause_until: float = 0.0
 
     def set_executor(self, executor) -> None:
         """Set reference to executor for dynamic threshold and fill rate."""
         self._executor = executor
+
+    def _is_funding_window(self, now_utc: datetime) -> bool:
+        """True if `now_utc` is within ±FUNDING_GUARD_MIN of any funding hour.
+
+        Funding settles at 00:00, 08:00, 16:00 UTC on Binance Futures. The
+        window is symmetric, e.g. for 08:00 the guard is [07:57, 08:03].
+        """
+        for h in FUNDING_HOURS_UTC:
+            delta_min = abs((now_utc.hour - h) * 60 + now_utc.minute)
+            # Wrap around midnight (e.g. 23:58 ↔ 00:00).
+            delta_min = min(delta_min, 24 * 60 - delta_min)
+            if delta_min <= FUNDING_GUARD_MIN:
+                return True
+        return False
 
     def generate(self, balance: float) -> Signal:
         fe = self._features
@@ -66,6 +120,30 @@ class SignalGenerator:
         if not self._model.is_loaded:
             return Signal.NONE
 
+        # === Lever 3 — pre-prediction filters (cheap, time-only) ===
+        # Run these first so we don't pay the CNN+ensemble cost when we know
+        # the entry will be filtered out anyway.
+        now_utc = datetime.now(timezone.utc)
+        if ASIA_NIGHT_START_UTC <= now_utc.hour < ASIA_NIGHT_END_UTC:
+            return Signal.NONE
+        if self._is_funding_window(now_utc):
+            return Signal.NONE
+
+        # Recent-WR pause: if the rolling 10-trade WR fell below the floor,
+        # we paused for RECENT_WR_PAUSE_SEC and refuse signals until then.
+        now_mono = time.monotonic()
+        if now_mono < self._recent_wr_pause_until:
+            return Signal.NONE
+        if self._executor is not None:
+            wr = self._executor.recent_wr
+            if wr is not None and wr < RECENT_WR_FLOOR:
+                self._recent_wr_pause_until = now_mono + RECENT_WR_PAUSE_SEC
+                logger.warning(
+                    "Recent 10-trade WR=%.0f%% < %.0f%% floor — pausing entries for %d sec",
+                    wr * 100, RECENT_WR_FLOOR * 100, RECENT_WR_PAUSE_SEC,
+                )
+                return Signal.NONE
+
         prediction, confidence = self._model.predict(lob_tensor, fe.features)
 
         # --- Dynamic threshold (self-tuning or base) ---
@@ -78,12 +156,27 @@ class SignalGenerator:
             return Signal.NONE
 
         spread = raw.get("spread", 999)
-        if spread > 0.03:
+        if spread > MAX_SPREAD_USD:
             return Signal.NONE
 
         vol = raw.get("volatility_1s", 0)
         vol_3s = raw.get("volatility_3sigma", vol * 3)
         if vol > vol_3s:
+            return Signal.NONE
+
+        # Lever 3.3 — volatility band gate
+        vol_ratio = raw.get("volatility_ratio", 1.0)
+        if not (VOL_BAND_LOW < vol_ratio < VOL_BAND_HIGH):
+            return Signal.NONE
+
+        # Lever 3.2 — liquidity depth gate. raw["depth_ratio_l5"] is a ratio,
+        # so we go straight to the order book for absolute volumes.
+        ob_snap = fe._ob.current
+        if ob_snap is None:
+            return Signal.NONE
+        top5_bid_btc = float(ob_snap.bids[:5, 1].sum())
+        top5_ask_btc = float(ob_snap.asks[:5, 1].sum())
+        if top5_bid_btc < MIN_TOP5_BTC_LIQUIDITY or top5_ask_btc < MIN_TOP5_BTC_LIQUIDITY:
             return Signal.NONE
 
         # Spoof filter

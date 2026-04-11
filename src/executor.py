@@ -98,6 +98,21 @@ class Executor:
             return 1.0
         return sum(self._fill_history) / len(self._fill_history)
 
+    @property
+    def recent_wr(self) -> float | None:
+        """Win-rate of the last 10 closed trades.
+
+        Returns None if fewer than 10 trades have been seen, signalling that
+        callers should not gate on this metric yet (sample too small).
+        Lever 3.4 uses this to pause entries during sudden regime shifts that
+        the 4-hour retraining cycle would otherwise miss.
+        """
+        if len(self._recent_trades_pnl) < 10:
+            return None
+        last10 = list(self._recent_trades_pnl)[-10:]
+        wins = sum(1 for p in last10 if p > 0)
+        return wins / 10.0
+
     def set_order_book(self, ob) -> None:
         """Set order book reference for mid-price access."""
         self._ob = ob

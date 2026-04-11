@@ -11,7 +11,7 @@ from src.order_book import OrderBook, Snapshot, BOOK_DEPTH
 
 logger = logging.getLogger(__name__)
 
-NUM_FEATURES = 31
+NUM_FEATURES = 34
 NORM_WINDOW = 300   # 30 sec at 100ms
 EMA_SPAN = 5
 TRADE_WINDOW_SEC = 5
@@ -20,6 +20,7 @@ VWAP_WINDOW_SEC = 60
 SPOOF_LIFETIME_SEC = 2.5
 SPOOF_SIZE_THRESHOLD = 1.0  # 1 BTC (was 100 ETH)
 HURST_WINDOW = 3000  # ~5 min of 100ms ticks
+QUEUE_DECAY_ALPHA = 0.1  # EMA smoothing for queue-pressure feature (Lever 5a)
 
 # Cross-exchange momentum: count exchanges (Bybit + 3 cross-exchange)
 # whose net signed volume in the last CROSS_EX_WINDOW_MS is positive (net-buy).
@@ -57,6 +58,15 @@ FEATURE_KEYS = [
     # See _calc_cross_exchange_momentum; equivalent training-time
     # computation lives in trainer._calc_features_batch.
     "cross_exchange_momentum_500ms",
+    # Microstructure (31-33) — Lever 5. Realtime in this file, training-time
+    # vectorised computation in trainer._calc_features_batch.
+    # 31: queue_pressure — EMA of (ask L1 decay - bid L1 decay). Asks
+    #     evaporating faster than bids = bullish pressure.
+    # 32: top3_asymmetry — (top3_bid/top20_bid) - (top3_ask/top20_ask). High
+    #     positive value = depth concentrated near best bid (front-run risk).
+    # 33: effective_spread_ratio — |last_trade_price - mid| / spread, EMA.
+    #     >0.5 = trades piercing the spread aggressively (urgency).
+    "queue_pressure", "top3_asymmetry", "effective_spread_ratio",
 ]
 
 assert len(FEATURE_KEYS) == NUM_FEATURES
@@ -131,6 +141,17 @@ class FeatureEngine:
             ex: deque(maxlen=2000) for ex in CROSS_EXCHANGES
         }
 
+        # Microstructure features (Lever 5).
+        # 31 — queue pressure: EMA of L1 decay rates. Track previous best
+        # bid/ask volumes and accumulate the *positive* drop (cancel/fill)
+        # from one tick to the next. Asks decaying faster than bids → bullish.
+        self._prev_best_bid_vol: float = 0.0
+        self._prev_best_ask_vol: float = 0.0
+        self._bid_decay_ema: float = 0.0
+        self._ask_decay_ema: float = 0.0
+        # 33 — effective-spread ratio: rolling EMA of |last_price - mid| / spread.
+        self._eff_spread_ema: float = 0.0
+
         # Derivatives data (set by ws_client polling)
         self._ws = None  # set via set_ws_client()
 
@@ -166,7 +187,13 @@ class FeatureEngine:
              (cross-exchange net-buy momentum)
         """
         ts = int(data.get("T", time.time() * 1000))
-        qty = float(data.get("q", 0))
+        # Defensive: some cross-exchange WS paths send a signed qty that
+        # double-codes the side (Gate.io is the known case — it ships the
+        # raw Gate.io `size` which is negative for sells while `is_seller`
+        # is also populated). `abs()` here means the side lives exclusively
+        # in the `is_seller` flag, preserving the invariant that feature 30
+        # sign matches the actual net-buy direction.
+        qty = abs(float(data.get("q", 0)))
         is_seller = bool(data.get("m", False))
         self._bybit_trades.append({
             "T": ts,
@@ -188,7 +215,11 @@ class FeatureEngine:
         if buf is None:
             return
         ts = int(data.get("T", time.time() * 1000))
-        qty = float(data.get("q", 0))
+        # See on_bybit_aggtrade: take abs() so the signed-qty invariant
+        # holds uniformly across all 4 cross-exchange feeds, shielding us
+        # from the Gate.io signed-size quirk and any future exchange with
+        # similar semantics.
+        qty = abs(float(data.get("q", 0)))
         is_seller = bool(data.get("m", False))
         signed = -qty if is_seller else qty
         buf.append((ts, signed))
@@ -282,6 +313,11 @@ class FeatureEngine:
 
         # === Cross-exchange momentum (feature 30) ===
         raw["cross_exchange_momentum_500ms"] = self._calc_cross_exchange_momentum(now_ms)
+
+        # === Microstructure features (Lever 5) ===
+        raw["queue_pressure"] = self._calc_queue_pressure(snap)
+        raw["top3_asymmetry"] = self._calc_top3_asymmetry(snap)
+        raw["effective_spread_ratio"] = self._calc_effective_spread_ratio(snap)
 
         # === Volatility regime ===
         self._vol_history.append(raw["volatility_1s"])
@@ -760,6 +796,59 @@ class FeatureEngine:
             if net > 0:
                 net_buy_count += 1
         return float(net_buy_count)
+
+    # === Microstructure (Lever 5) ===
+
+    def _calc_queue_pressure(self, snap: Snapshot) -> float:
+        """EMA of (ask L1 decay rate - bid L1 decay rate).
+
+        Decay = the *positive* tick-to-tick drop in best-level volume; that is
+        cancellations or fills. Asks evaporating faster than bids = sellers
+        retreating or buyers consuming = bullish pressure.
+        """
+        best_bid_vol = float(snap.bids[0, 1]) if len(snap.bids) > 0 else 0.0
+        best_ask_vol = float(snap.asks[0, 1]) if len(snap.asks) > 0 else 0.0
+        bid_decay = max(0.0, self._prev_best_bid_vol - best_bid_vol)
+        ask_decay = max(0.0, self._prev_best_ask_vol - best_ask_vol)
+        a = QUEUE_DECAY_ALPHA
+        self._bid_decay_ema = a * bid_decay + (1 - a) * self._bid_decay_ema
+        self._ask_decay_ema = a * ask_decay + (1 - a) * self._ask_decay_ema
+        self._prev_best_bid_vol = best_bid_vol
+        self._prev_best_ask_vol = best_ask_vol
+        return self._ask_decay_ema - self._bid_decay_ema
+
+    @staticmethod
+    def _calc_top3_asymmetry(snap: Snapshot) -> float:
+        """(top3_bid / top20_bid) - (top3_ask / top20_ask).
+
+        Measures concentration of depth at the best 3 levels relative to the
+        full visible book. Large positive = depth piled near best bid (front-
+        run / iceberg risk on the bid side); negative = ask side concentrated.
+        """
+        top3_bid = float(snap.bids[:3, 1].sum())
+        top20_bid = float(snap.bids[:, 1].sum())
+        top3_ask = float(snap.asks[:3, 1].sum())
+        top20_ask = float(snap.asks[:, 1].sum())
+        bid_share = top3_bid / (top20_bid + 1e-9)
+        ask_share = top3_ask / (top20_ask + 1e-9)
+        return bid_share - ask_share
+
+    def _calc_effective_spread_ratio(self, snap: Snapshot) -> float:
+        """EMA of |last_trade_price - mid| / spread.
+
+        Captures how aggressively recent prints pierce the spread. Stable
+        market maker flow keeps the ratio near 0 (trades hit the inside);
+        urgency / news prints push it >0.5.
+        """
+        if not self._trades:
+            return self._eff_spread_ema
+        last_price = float(self._trades[-1]["p"])
+        mid = snap.mid_price
+        spread = max(snap.spread, 1e-9)
+        ratio = abs(last_price - mid) / spread
+        a = QUEUE_DECAY_ALPHA
+        self._eff_spread_ema = a * ratio + (1 - a) * self._eff_spread_ema
+        return self._eff_spread_ema
 
     # === LOB tensor for CNN ===
 

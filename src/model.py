@@ -50,11 +50,17 @@ class HybridModel:
         self._lgb_model = None  # LightGBM
         self._logreg_model = None  # LogisticRegression
         self._logreg_features: list[int] = []  # top-5 feature indices
+        # Lever 4 — isotonic calibrators (one per class). May contain None
+        # entries if a class was degenerate at fit time. If the file is
+        # missing entirely we fall back to raw mean confidence at predict
+        # time so old model bundles still load.
+        self._calibrators: list = []
         self._encoder_mtime: float = 0.0
         self._xgb_mtimes: list[float] = [0.0, 0.0, 0.0]
         self._lgb_mtime: float = 0.0
         self._logreg_mtime: float = 0.0
         self._logreg_feat_mtime: float = 0.0
+        self._calibrators_mtime: float = 0.0
         self._loaded = False
         self._last_uncertainty: float = 0.0
 
@@ -139,6 +145,24 @@ class HybridModel:
             except Exception as e:
                 logger.error("Failed to load LogisticRegression: %s", e)
 
+        # Load isotonic calibrators (Lever 4) — optional for backwards
+        # compat: bundles trained before this commit have no calibrators
+        # file and the model falls back to raw mean confidence.
+        cal_path = self._model_dir / "calibrators_latest.pkl"
+        if cal_path.exists():
+            try:
+                self._calibrators = joblib.load(cal_path)
+                self._calibrators_mtime = cal_path.stat().st_mtime
+                n_active = sum(1 for c in self._calibrators if c is not None)
+                logger.info("Loaded calibrators from %s (%d/3 active)",
+                            cal_path.name, n_active)
+            except Exception as e:
+                logger.error("Failed to load calibrators: %s", e)
+                self._calibrators = []
+        else:
+            logger.info("No calibrators_latest.pkl — using raw mean confidence")
+            self._calibrators = []
+
         # Need at least 3 models to be useful
         self._loaded = loaded_count >= 3
         logger.info("Ensemble: %d/%d models loaded, ready=%s",
@@ -208,6 +232,17 @@ class HybridModel:
             except Exception as e:
                 logger.error("LogisticRegression hot-swap failed: %s", e)
 
+        # Check calibrators (Lever 4)
+        cal_path = self._model_dir / "calibrators_latest.pkl"
+        if cal_path.exists() and cal_path.stat().st_mtime > self._calibrators_mtime:
+            try:
+                self._calibrators = joblib.load(cal_path)
+                self._calibrators_mtime = cal_path.stat().st_mtime
+                logger.info("Hot-swapped calibrators")
+                reloaded = True
+            except Exception as e:
+                logger.error("Calibrator hot-swap failed: %s", e)
+
         if reloaded:
             self._loaded = self.n_models >= 3
 
@@ -229,10 +264,14 @@ class HybridModel:
         # Concatenate embedding + hand-crafted features
         combined = np.concatenate([embedding, hand_features]).reshape(1, -1)
 
-        # Collect votes from all loaded models
+        # Collect votes from all loaded models. We also accumulate the raw
+        # softmax probabilities so we can produce a calibrated mean later
+        # (Lever 4) — much more meaningful than the per-model max-prob.
         t1 = time.monotonic()
         votes: list[int] = []
         confidences: list[float] = []
+        proba_sum = np.zeros(3, dtype=np.float64)
+        proba_n = 0
 
         # XGBoost models
         for i, model in enumerate(self._xgb_models):
@@ -246,6 +285,8 @@ class HybridModel:
                 conf = float(proba[0][cls])
                 votes.append(cls)
                 confidences.append(conf)
+                proba_sum += proba[0]
+                proba_n += 1
             except Exception as e:
                 logger.warning("XGBoost %d predict failed: %s", i, e)
 
@@ -259,6 +300,8 @@ class HybridModel:
                 conf = float(proba[0][cls])
                 votes.append(cls)
                 confidences.append(conf)
+                proba_sum += proba[0]
+                proba_n += 1
             except Exception as e:
                 logger.warning("LightGBM predict failed: %s", e)
 
@@ -272,6 +315,8 @@ class HybridModel:
                 conf = float(proba[0][cls])
                 votes.append(cls)
                 confidences.append(conf)
+                proba_sum += proba[0]
+                proba_n += 1
             except Exception as e:
                 logger.warning("LogReg predict failed: %s", e)
 
@@ -281,7 +326,8 @@ class HybridModel:
             self._last_uncertainty = 0.0
             return FLAT, 0.0
 
-        # Uncertainty check
+        # Uncertainty check (per-model max-prob spread, kept as a quality
+        # gate independent of calibration)
         uncertainty = max(confidences) - min(confidences)
         self._last_uncertainty = uncertainty
         if uncertainty > 0.20:
@@ -306,15 +352,33 @@ class HybridModel:
             )
             return FLAT, 0.0
 
-        # Mean confidence of majority voters
-        majority_confs = [
-            confidences[i] for i, v in enumerate(votes) if v == majority_class
-        ]
-        mean_conf = float(np.mean(majority_confs))
+        # === Calibrated confidence (Lever 4) ===
+        # `mean_proba` is the averaged ensemble probability, the input the
+        # isotonic calibrators were fit on. After calibration we renormalise
+        # so we still return a proper probability for the threshold check.
+        mean_proba = proba_sum / max(proba_n, 1)
+        if self._calibrators:
+            cal = mean_proba.copy()
+            for cls in range(3):
+                ir = self._calibrators[cls] if cls < len(self._calibrators) else None
+                if ir is None:
+                    continue
+                cal[cls] = float(ir.predict([mean_proba[cls]])[0])
+            cal_sum = float(cal.sum())
+            if cal_sum > 1e-9:
+                cal = cal / cal_sum
+            confidence_out = float(cal[majority_class])
+        else:
+            # No calibrators — fall back to mean confidence of agreeing voters
+            # to preserve old-bundle compatibility.
+            majority_confs = [
+                confidences[i] for i, v in enumerate(votes) if v == majority_class
+            ]
+            confidence_out = float(np.mean(majority_confs))
 
         logger.debug(
-            "Predict: %s (%.2f, %d/%d agree, unc=%.3f) CNN=%.1fms ENS=%.1fms",
-            LABELS[majority_class], mean_conf, majority_count, len(votes),
+            "Predict: %s (cal=%.2f, %d/%d agree, unc=%.3f) CNN=%.1fms ENS=%.1fms",
+            LABELS[majority_class], confidence_out, majority_count, len(votes),
             uncertainty, cnn_ms, ensemble_ms,
         )
-        return majority_class, mean_conf
+        return majority_class, confidence_out
