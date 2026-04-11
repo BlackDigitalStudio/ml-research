@@ -1,7 +1,7 @@
 """Phase 1: Initial model training from recorded data.
 
 Usage:
-    python scripts/train_initial.py --data-hours 72 --n-jobs 1
+    python scripts/train_initial.py --data-hours 72 --n-jobs 2
 """
 from __future__ import annotations
 
@@ -10,6 +10,18 @@ import logging
 import os
 import sys
 from pathlib import Path
+
+# --- jemalloc bootstrap ---------------------------------------------------
+# Re-exec ourselves with LD_PRELOAD set so pandas-heavy build_samples uses
+# jemalloc instead of glibc malloc (20-40% RAM savings, no list-column
+# fragmentation). Guarded by an env var so the re-exec happens at most once.
+_JEMALLOC = Path("/usr/lib/x86_64-linux-gnu/libjemalloc.so.2")
+if _JEMALLOC.exists() and "SCALPER_JEMALLOC_ACTIVE" not in os.environ:
+    os.environ["LD_PRELOAD"] = str(_JEMALLOC)
+    os.environ["MALLOC_ARENA_MAX"] = "2"
+    os.environ["SCALPER_JEMALLOC_ACTIVE"] = "1"
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+# --- end jemalloc bootstrap -----------------------------------------------
 
 
 def _parse_early() -> argparse.Namespace:
@@ -20,8 +32,20 @@ def _parse_early() -> argparse.Namespace:
     parser.add_argument("--data-hours", type=int, default=24, help="Hours of data to use")
     parser.add_argument(
         "--n-jobs", type=int, default=1,
-        help="Threads per library. 1 (default) isolates training to 1 core "
-             "(safe on the 2-vCPU prod server). -1 uses all cores (dev only).",
+        help="Threads per library. 1 (default) isolates training to 1 core. "
+             "On the 3vCPU/8GB VPS, --n-jobs 2 is the recommended balance "
+             "(leaves 1 core for recorder). -1 uses all cores (dev only).",
+    )
+    parser.add_argument(
+        "--warm-start-encoder", type=Path, default=None,
+        help="Path to a previously saved encoder .pt file. CNN loads these "
+             "weights and runs only 5 fine-tune epochs instead of training "
+             "from scratch. Used for daily prod retrain cycles.",
+    )
+    parser.add_argument(
+        "--force-rebuild", action="store_true",
+        help="Ignore the sample cache and rebuild X_lob/X_feat/y from raw "
+             "parquet data. Use after code changes to features/labels.",
     )
     return parser.parse_args()
 
@@ -35,6 +59,12 @@ if _args.n_jobs > 0:
     os.environ["MKL_NUM_THREADS"] = str(_args.n_jobs)
     os.environ["OPENBLAS_NUM_THREADS"] = str(_args.n_jobs)
     os.environ["NUMEXPR_NUM_THREADS"] = str(_args.n_jobs)
+# Pin MKL/OMP thread pool sizes — dynamic scaling causes context-switching
+# overhead on a small core count and measurably slows matrix kernels.
+os.environ.setdefault("MKL_DYNAMIC", "FALSE")
+os.environ.setdefault("OMP_DYNAMIC", "FALSE")
+# CPU affinity for Intel OMP: tightly pack threads onto physical cores.
+os.environ.setdefault("KMP_AFFINITY", "granularity=fine,compact,1,0")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -68,7 +98,12 @@ def main() -> None:
     trainer = Trainer(cfg)
 
     try:  # noqa: E501 — train_full handles build_samples 4-tuple internally
-        result = trainer.train_full(hours=args.data_hours, n_jobs=args.n_jobs)
+        result = trainer.train_full(
+            hours=args.data_hours,
+            n_jobs=args.n_jobs,
+            warm_start_encoder=args.warm_start_encoder,
+            force_rebuild=args.force_rebuild,
+        )
         print(f"\n{'='*50}")
         print(f"  Training Complete!")
         print(f"  Samples:  {result['samples']}")

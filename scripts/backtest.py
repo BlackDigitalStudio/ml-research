@@ -6,7 +6,7 @@ Simulates:
 - Maker commission 0.036% round-trip
 
 Usage:
-    python scripts/backtest.py --data-hours 72 --mode walk-forward --n-jobs 1
+    python scripts/backtest.py --data-hours 72 --mode walk-forward --n-jobs 2
 """
 from __future__ import annotations
 
@@ -16,6 +16,17 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# --- jemalloc bootstrap ---------------------------------------------------
+# Re-exec with LD_PRELOAD set so pandas-heavy build_samples uses jemalloc
+# instead of glibc malloc. See scripts/train_initial.py for rationale.
+_JEMALLOC = Path("/usr/lib/x86_64-linux-gnu/libjemalloc.so.2")
+if _JEMALLOC.exists() and "SCALPER_JEMALLOC_ACTIVE" not in os.environ:
+    os.environ["LD_PRELOAD"] = str(_JEMALLOC)
+    os.environ["MALLOC_ARENA_MAX"] = "2"
+    os.environ["SCALPER_JEMALLOC_ACTIVE"] = "1"
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+# --- end jemalloc bootstrap -----------------------------------------------
 
 
 def _parse_args() -> argparse.Namespace:
@@ -28,9 +39,13 @@ def _parse_args() -> argparse.Namespace:
                         help="walk-forward: train+test in one run; model: use pre-trained model from disk")
     parser.add_argument(
         "--n-jobs", type=int, default=1,
-        help="Threads per library. 1 (default) isolates training to 1 core "
-             "(safe on the 2-vCPU prod server). -1 uses all cores for "
-             "faster dev iteration — only when the live bot is off.",
+        help="Threads per library. 1 (default) isolates training to 1 core. "
+             "On the 3vCPU/8GB VPS, --n-jobs 2 is the recommended balance "
+             "(leaves 1 core for recorder). -1 uses all cores (dev only).",
+    )
+    parser.add_argument(
+        "--force-rebuild", action="store_true",
+        help="Ignore the sample cache and rebuild from raw parquet data.",
     )
     return parser.parse_args()
 
@@ -43,6 +58,10 @@ if _args.n_jobs > 0:
     os.environ["MKL_NUM_THREADS"] = str(_args.n_jobs)
     os.environ["OPENBLAS_NUM_THREADS"] = str(_args.n_jobs)
     os.environ["NUMEXPR_NUM_THREADS"] = str(_args.n_jobs)
+# Pin thread pools — see train_initial.py for rationale.
+os.environ.setdefault("MKL_DYNAMIC", "FALSE")
+os.environ.setdefault("OMP_DYNAMIC", "FALSE")
+os.environ.setdefault("KMP_AFFINITY", "granularity=fine,compact,1,0")
 
 import numpy as np    # noqa: E402 — must follow env setup
 import pandas as pd   # noqa: E402
@@ -463,8 +482,12 @@ def main() -> None:
 
     trainer = Trainer(cfg)
 
-    # build_samples loads data internally and frees DataFrames to save RAM
-    X_lob, X_feat, y, mid_prices = trainer.build_samples(hours=args.data_hours)
+    # build_samples_cached loads data internally and frees DataFrames to save RAM.
+    # Cache key is (hours, newest_depth_mtime) — any new data or different
+    # window invalidates it. --force-rebuild bypasses the cache.
+    X_lob, X_feat, y, mid_prices = trainer.build_samples_cached(
+        hours=args.data_hours, force_rebuild=args.force_rebuild,
+    )
 
     if args.mode == "model":
         result = run_with_model(trainer, X_lob, X_feat, mid_prices, args.confidence)

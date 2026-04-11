@@ -7,14 +7,22 @@ Wants=network-online.target
 Type=simple
 User=scalper
 WorkingDirectory=/home/scalper/scalper-bot
+# jemalloc replaces glibc malloc — 20-40% RAM savings on pandas-heavy workloads
+# and eliminates the list-column fragmentation that needed _malloc_trim().
+# Takes effect on next natural restart; do NOT force a restart just for this.
+Environment="LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2"
+# Reduce glibc malloc arenas (still applies if LD_PRELOAD fails for some reason).
+Environment="MALLOC_ARENA_MAX=2"
 ExecStart=/home/scalper/scalper-bot/venv/bin/python scripts/record_data.py
 Restart=always
 RestartSec=5
 # Hard memory cap. If exceeded, systemd kills + restarts cleanly *before*
 # the global OOM-killer wipes the process. With the new append-mode writer
-# steady state should be well under 500 MB.
-MemoryMax=1500M
-MemoryHigh=1200M
+# steady state should be well under 500 MB. Raised to 2500M/2000M after
+# 2026-04-11 Vultr upgrade to 3vCPU/8GB — no reason to be stingy anymore,
+# but still a hard wall against runaway.
+MemoryMax=2500M
+MemoryHigh=2000M
 StandardOutput=append:/home/scalper/scalper-bot/logs/recorder_stdout.log
 StandardError=append:/home/scalper/scalper-bot/logs/recorder_stderr.log
 
