@@ -163,7 +163,11 @@ class BinanceWSClient:
             params = self._sign(params)
         url = f"{self._cfg.rest_base}{path}"
         t0 = time.monotonic()
-        async with self._session.get(url, params=params) as r:
+        # Explicit short timeout: aiohttp's default is 5 min, which is far too
+        # long when a keepalive connection goes stale — snapshot refetches then
+        # block the OrderBook resync_lock for minutes while depth data goes dark.
+        timeout = aiohttp.ClientTimeout(total=10, connect=3, sock_read=5)
+        async with self._session.get(url, params=params, timeout=timeout) as r:
             self.rate_limit_weight = int(r.headers.get("X-MBX-USED-WEIGHT-1M", "0"))
             if self.rate_limit_weight > 1000:
                 logger.warning("Rate limit approaching: %d/1200", self.rate_limit_weight)
