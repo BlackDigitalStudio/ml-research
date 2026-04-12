@@ -20,8 +20,14 @@ from pathlib import Path
 # --- jemalloc bootstrap ---------------------------------------------------
 # Re-exec with LD_PRELOAD set so pandas-heavy build_samples uses jemalloc
 # instead of glibc malloc. See scripts/train_initial.py for rationale.
+# Guarded to only run in CLI mode — importing this module (e.g. from pytest)
+# must not re-exec the interpreter or parse CLI args.
 _JEMALLOC = Path("/usr/lib/x86_64-linux-gnu/libjemalloc.so.2")
-if _JEMALLOC.exists() and "SCALPER_JEMALLOC_ACTIVE" not in os.environ:
+if (
+    __name__ == "__main__"
+    and _JEMALLOC.exists()
+    and "SCALPER_JEMALLOC_ACTIVE" not in os.environ
+):
     os.environ["LD_PRELOAD"] = str(_JEMALLOC)
     os.environ["MALLOC_ARENA_MAX"] = "2"
     os.environ["SCALPER_JEMALLOC_ACTIVE"] = "1"
@@ -52,16 +58,19 @@ def _parse_args() -> argparse.Namespace:
 
 # Parse and apply thread env BEFORE importing numpy/torch/xgboost. NumPy
 # MKL reads OMP_NUM_THREADS at import time and caches the value.
-_args = _parse_args()
-if _args.n_jobs > 0:
-    os.environ["OMP_NUM_THREADS"] = str(_args.n_jobs)
-    os.environ["MKL_NUM_THREADS"] = str(_args.n_jobs)
-    os.environ["OPENBLAS_NUM_THREADS"] = str(_args.n_jobs)
-    os.environ["NUMEXPR_NUM_THREADS"] = str(_args.n_jobs)
-# Pin thread pools — see train_initial.py for rationale.
-os.environ.setdefault("MKL_DYNAMIC", "FALSE")
-os.environ.setdefault("OMP_DYNAMIC", "FALSE")
-os.environ.setdefault("KMP_AFFINITY", "granularity=fine,compact,1,0")
+# Guarded to CLI mode so test imports don't call argparse on pytest's argv.
+_args: argparse.Namespace | None = None
+if __name__ == "__main__":
+    _args = _parse_args()
+    if _args.n_jobs > 0:
+        os.environ["OMP_NUM_THREADS"] = str(_args.n_jobs)
+        os.environ["MKL_NUM_THREADS"] = str(_args.n_jobs)
+        os.environ["OPENBLAS_NUM_THREADS"] = str(_args.n_jobs)
+        os.environ["NUMEXPR_NUM_THREADS"] = str(_args.n_jobs)
+    # Pin thread pools — see train_initial.py for rationale.
+    os.environ.setdefault("MKL_DYNAMIC", "FALSE")
+    os.environ.setdefault("OMP_DYNAMIC", "FALSE")
+    os.environ.setdefault("KMP_AFFINITY", "granularity=fine,compact,1,0")
 
 import numpy as np    # noqa: E402 — must follow env setup
 import pandas as pd   # noqa: E402
@@ -211,6 +220,74 @@ class BacktestResult:
             return 0.0
         sls = sum(1 for t in self.trades if "sl" in t.reason)
         return sls / len(self.trades)
+
+    # ---- Canonical business metrics (owner-defined, see memory
+    # ---- business_metrics_canonical.md). Categories 1-5 are mutually
+    # ---- exclusive and MUST sum to 1.0 across the 9 live_sim reasons.
+
+    # Business-metric categories (see memory/business_metrics_canonical.md).
+    # Taxonomy mirrors live_sim.TradeOutcome.REASONS — every reason must
+    # belong to exactly one bucket; the test enforces full coverage.
+    _FULL_TP_REASONS = ("tp_hit",)
+    _FULL_SL_REASONS = ("sl_hit", "fast_fill_adverse", "fast_fill_sl")
+    _TIMEOUT_REASONS = ("timeout_limit", "timeout_market", "no_forward_data")
+    _TRAILING_REASONS = (
+        "trailing_sl_1", "trailing_sl_2",
+        "partial_plus_trailing_sl_1", "partial_plus_trailing_sl_2",
+    )
+    _PARTIAL_TP_REASONS = ("partial_plus_tp",)
+
+    def _share_by_reasons(self, reasons: tuple[str, ...]) -> float:
+        if not self.trades:
+            return 0.0
+        n = sum(1 for t in self.trades if t.reason in reasons)
+        return n / len(self.trades)
+
+    @property
+    def full_tp_rate(self) -> float:
+        """% сделок закрытых на полный TP."""
+        return self._share_by_reasons(self._FULL_TP_REASONS)
+
+    @property
+    def full_sl_rate(self) -> float:
+        """% сделок закрытых на полный SL (включая fast-fill adverse и SL)."""
+        return self._share_by_reasons(self._FULL_SL_REASONS)
+
+    @property
+    def timeout_rate(self) -> float:
+        """% сделок закрытых по таймауту (limit, market, no_forward_data)."""
+        return self._share_by_reasons(self._TIMEOUT_REASONS)
+
+    @property
+    def trailing_stop_rate(self) -> float:
+        """% сделок закрытых по трейлинг-стопу (pure trailing + partial+trailing)."""
+        return self._share_by_reasons(self._TRAILING_REASONS)
+
+    @property
+    def partial_tp_only_rate(self) -> float:
+        """% сделок с частичным TP и полным закрытием остатка по TP."""
+        return self._share_by_reasons(self._PARTIAL_TP_REASONS)
+
+    @property
+    def initial_equity(self) -> float:
+        return self.equity_curve[0] if self.equity_curve else 0.0
+
+    @property
+    def gross_pnl_usd(self) -> float:
+        """P&L до вычета комиссий/спрэда, в $."""
+        return sum(t.pnl for t in self.trades)
+
+    @property
+    def gross_pnl_pct(self) -> float:
+        """P&L до вычета комиссий/спрэда, в % к стартовому балансу."""
+        eq0 = self.initial_equity
+        return self.gross_pnl_usd / eq0 * 100 if eq0 > 0 else 0.0
+
+    @property
+    def net_pnl_pct(self) -> float:
+        """P&L после комиссий и спрэда, в % к стартовому балансу."""
+        eq0 = self.initial_equity
+        return self.total_pnl / eq0 * 100 if eq0 > 0 else 0.0
 
     @property
     def trades_per_day(self) -> float:
@@ -428,6 +505,16 @@ def print_results(result: BacktestResult, label: str = "BACKTEST RESULTS") -> No
     print(f"  Net-WR (net > 0):      {result.win_rate:.1%}")
     print(f"  TP-WR (full TP hit):   {result.tp_hit_rate:.1%}")
     print(f"  SL-WR (any SL hit):    {result.sl_hit_rate:.1%}")
+    # --- Canonical business metrics (business_metrics_canonical.md) ----
+    print(f"  — Canonical metrics —")
+    print(f"  Full TP %:             {result.full_tp_rate:.1%}")
+    print(f"  Full SL %:             {result.full_sl_rate:.1%}")
+    print(f"  Timeout %:             {result.timeout_rate:.1%}")
+    print(f"  Trailing-stop %:       {result.trailing_stop_rate:.1%}")
+    print(f"  Partial-TP-only %:     {result.partial_tp_only_rate:.1%}")
+    print(f"  Gross P&L (pre-fees):  ${result.gross_pnl_usd:.2f}  ({result.gross_pnl_pct:+.2f}%)")
+    print(f"  Net P&L (post-fees):   ${result.total_pnl:.2f}  ({result.net_pnl_pct:+.2f}%)")
+    print(f"  — Other metrics —")
     print(f"  Profit factor:         {result.profit_factor:.2f}")
     print(f"  Total P&L:             ${result.total_pnl:.2f}")
     print(f"  Avg win:               ${result.avg_win:.4f}")
