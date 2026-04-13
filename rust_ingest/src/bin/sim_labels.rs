@@ -44,9 +44,9 @@ struct Args {
     commission_win_pct: f64,
     #[arg(long, default_value_t = 0.07)]
     commission_loss_pct: f64,
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     partial_enabled: bool,
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     trailing_enabled: bool,
     #[arg(long, default_value_t = 150.0)]
     fill_latency_ms: f64,

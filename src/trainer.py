@@ -490,8 +490,11 @@ class Trainer:
         # by SIM_HORIZON so `sample_starts[-1] + WINDOW_SIZE + SIM_HORIZON`
         # stays within `n`.
         total = n - WINDOW_SIZE - SIM_HORIZON
-        # X_lob is ~12 KB per sample; cap at ~1.5 GB
-        max_samples = 130_000
+        # X_lob is ~12 KB per sample; cap scales with available memory.
+        # 8 GB Tokyo VPS: 130k (~1.5 GB X_lob).
+        # 64 GB Contabo / 116 GB pod: 2M (~24 GB X_lob), still comfortable.
+        # Env override for flexibility.
+        max_samples = int(os.environ.get("SCALPER_MAX_SAMPLES", "2000000"))
         step = max(2, 2 * ((total + max_samples - 1) // max_samples)) if total > max_samples * 2 else 2
         sample_starts = np.arange(0, total, step)
         num_samples = len(sample_starts)
