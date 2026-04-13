@@ -373,6 +373,16 @@ def run_backtest(
     leverage: int = 20,
     position_size_pct: int = 95,
     seed: int = 42,
+    *,
+    # Grid-search overrides. If None → adaptive behavior (old path) with
+    # BASE_TP_PCT / BASE_SL_PCT / BASE_TIMEOUT_SEC. If set → literal values
+    # applied identically to every trade (no adaptation to vol_ratio).
+    tp_pct_override: float | None = None,
+    sl_pct_override: float | None = None,
+    timeout_sec_override: float | None = None,
+    partial_enabled: bool = True,
+    trailing_enabled: bool = True,
+    min_notional_usd: float = 100.0,
 ) -> BacktestResult:
     """Walk the test window, delegate trade realization to `live_sim`.
 
@@ -418,18 +428,29 @@ def run_backtest(
 
         pred = int(predictions[i])
         vol_ratio = float(X_feat[i, 21])
-        tp_pct, sl_pct = filters.adaptive_tp_sl(vol_ratio, BASE_TP_PCT, BASE_SL_PCT)
-        timeout_sec = filters.dynamic_timeout_sec(
-            avg_volatility=1.0,
-            current_volatility=max(vol_ratio, 1e-9),
-            base_timeout_sec=BASE_TIMEOUT_SEC,
-        )
+        # Override path: literal tp_pct/sl_pct/timeout_sec applied to every
+        # trade. Used by grid_search to fix one axis at a time. Default path:
+        # adaptive via filters (original behavior).
+        if tp_pct_override is not None:
+            tp_pct, sl_pct = tp_pct_override, sl_pct_override if sl_pct_override is not None else tp_pct_override * 0.5
+        else:
+            tp_pct, sl_pct = filters.adaptive_tp_sl(vol_ratio, BASE_TP_PCT, BASE_SL_PCT)
+        if timeout_sec_override is not None:
+            timeout_sec = timeout_sec_override
+        else:
+            timeout_sec = filters.dynamic_timeout_sec(
+                avg_volatility=1.0,
+                current_volatility=max(vol_ratio, 1e-9),
+                base_timeout_sec=BASE_TIMEOUT_SEC,
+            )
         timeout_ticks = int(round(timeout_sec * 10.0))
 
         cfg = LiveSimConfig(
             tp_pct=tp_pct, sl_pct=sl_pct, timeout_ticks=timeout_ticks,
             commission_win_pct=COMMISSION_WIN_PCT,
             commission_loss_pct=COMMISSION_LOSS_PCT,
+            partial_enabled=partial_enabled,
+            trailing_enabled=trailing_enabled,
         )
 
         # Post-only rejection — if the entry order is rejected we lose
@@ -461,7 +482,7 @@ def run_backtest(
         # Sizing + equity accounting ----------------------------------
         notional = equity * leverage * position_size_pct / 100
         size_btc = round(notional / entry_px, 3)
-        if size_btc * entry_px < 100.0:
+        if size_btc * entry_px < min_notional_usd:
             # Below Binance min notional — skip.
             i = entry_idx + 1
             continue

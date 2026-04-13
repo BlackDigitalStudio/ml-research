@@ -69,6 +69,12 @@ class LiveSimConfig:
     fast_fill_sl_multiplier: float = 0.5       # SL → 0.5 × sl_pct
     timeout_limit_ticks: int = 20              # 2 sec limit-close window
 
+    # Grid-search toggles — defaults preserve original behavior so existing
+    # tests and callers see no change. Setting either to False disables the
+    # corresponding feature in the monitoring loop.
+    partial_enabled: bool = True               # fire partial TP at partial_tp_progress
+    trailing_enabled: bool = True              # move SL on trailing progress thresholds
+
 
 @dataclass(frozen=True)
 class TradeOutcome:
@@ -317,19 +323,23 @@ def simulate_trade(
 
         # Order the progress checks largest-first so a single tick can
         # legally jump both steps (e.g. a 0.8×TP_dist spike past 50%).
-        if progress >= config.trailing_step2_progress and trailing_step < 2:
+        # Trailing SL moves are gated by config.trailing_enabled; partial TP
+        # fill is gated by config.partial_enabled. Both default True, so the
+        # original coupled strategy is preserved unless grid search flips them.
+        if config.trailing_enabled and progress >= config.trailing_step2_progress and trailing_step < 2:
             sl_offset = tp_dist * config.trailing_step2_sl_ratio
             sl_px = entry_px + sign * sl_offset
             trailing_step = 2
         elif progress >= config.trailing_step1_progress and trailing_step < 1:
-            if not partial_filled:
+            if config.partial_enabled and not partial_filled:
                 partial_px = px
                 partial_filled = True
-            min_offset = entry_px * (config.trailing_step1_sl_floor_pct / 100.0)
-            ratio_offset = tp_dist * config.trailing_step1_sl_ratio
-            sl_offset = max(min_offset, ratio_offset)
-            sl_px = entry_px + sign * sl_offset
-            trailing_step = 1
+            if config.trailing_enabled:
+                min_offset = entry_px * (config.trailing_step1_sl_floor_pct / 100.0)
+                ratio_offset = tp_dist * config.trailing_step1_sl_ratio
+                sl_offset = max(min_offset, ratio_offset)
+                sl_px = entry_px + sign * sl_offset
+                trailing_step = 1
 
     # ---- Timeout branch ----------------------------------------------
     # executor._position_timeout (lines 407-471): at the timeout mark we
