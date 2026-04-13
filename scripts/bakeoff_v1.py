@@ -62,6 +62,16 @@ def build_factory(arch: str):
             return ChronosClassifier(num_feat=num_feat, cfg=ChronosAdapterConfig(
                 model_name="amazon/chronos-bolt-tiny", freeze_encoder=True))
         return _f, "chronos_bolt_tiny"
+    # "patchtst_pretrained:PATH" — loads SSL-pretrained backbone
+    if arch.startswith("patchtst_pretrained:"):
+        weight_path = arch.split(":", 1)[1]
+        def _f(num_feat: int):
+            m = PatchTST(num_feat=num_feat, cfg=PatchTSTConfig())
+            report = m.load_pretrained_backbone(weight_path)
+            print(f"[factory] loaded SSL backbone from {weight_path}: "
+                  f"{report['n_loaded']} tensors transferred")
+            return m
+        return _f, "patchtst_pretrained"
     raise ValueError(f"unknown arch: {arch}")
 
 
