@@ -200,32 +200,38 @@ def parse_depth(csv_gz_path: Path, out_path: Path,
             f"snapshot count mismatch: rust said {n_snap}, file has {len(data)}"
         )
 
-    # Build arrow table with list<list<f64>> columns. Use arrow's ListArray
-    # from_arrays for efficiency — avoids per-row Python allocations.
+    # Build arrow table in the FLAT v3 schema (schema_version=3 attribute):
+    #   timestamp: int64
+    #   bid_prices: FixedSizeList<f64, 20>
+    #   bid_qtys:   FixedSizeList<f64, 20>
+    #   ask_prices: FixedSizeList<f64, 20>
+    #   ask_qtys:   FixedSizeList<f64, 20>
+    # Flat columns make trainer.load_depth_data zero-copy numpy.
     ts = pa.array(data["timestamp"], type=pa.int64())
+    n = len(data)
 
-    def _flat_to_list_list(flat: np.ndarray) -> pa.ListArray:
-        """(N, 40) f64 → list<list<f64>>: outer length 20, inner length 2."""
-        n = flat.shape[0]
-        # Inner: each inner list has 2 elements (price, qty).
-        # We have N × 20 inner lists, so N × 20 × 2 = N × 40 values.
-        values = pa.array(flat.reshape(-1), type=pa.float64())
-        inner_offsets = pa.array(
-            np.arange(0, n * 20 * 2 + 1, 2, dtype=np.int32),
-            type=pa.int32(),
-        )
-        inner_list = pa.ListArray.from_arrays(inner_offsets, values)
-        # Outer: each outer list has 20 inner lists.
-        outer_offsets = pa.array(
-            np.arange(0, n * 20 + 1, 20, dtype=np.int32),
-            type=pa.int32(),
-        )
-        return pa.ListArray.from_arrays(outer_offsets, inner_list)
+    # bids_flat / asks_flat are (n, 40) in [p0, q0, p1, q1, ...] layout.
+    # Reshape to (n, 20, 2) then split prices vs qtys along last axis.
+    bids = data["bids_flat"].reshape(n, 20, 2)
+    asks = data["asks_flat"].reshape(n, 20, 2)
 
-    bids_col = _flat_to_list_list(data["bids_flat"])
-    asks_col = _flat_to_list_list(data["asks_flat"])
+    def _fixed_list(arr_2d: np.ndarray) -> pa.FixedSizeListArray:
+        """(n, 20) float64 → FixedSizeList<f64, 20>."""
+        values = pa.array(arr_2d.reshape(-1), type=pa.float64())
+        return pa.FixedSizeListArray.from_arrays(values, list_size=20)
 
-    table = pa.table({"timestamp": ts, "bids": bids_col, "asks": asks_col})
+    bid_prices_col = _fixed_list(bids[:, :, 0])
+    bid_qtys_col = _fixed_list(bids[:, :, 1])
+    ask_prices_col = _fixed_list(asks[:, :, 0])
+    ask_qtys_col = _fixed_list(asks[:, :, 1])
+
+    table = pa.table({
+        "timestamp": ts,
+        "bid_prices": bid_prices_col,
+        "bid_qtys": bid_qtys_col,
+        "ask_prices": ask_prices_col,
+        "ask_qtys": ask_qtys_col,
+    })
     _write_parquet(table, out_path)
     tmp_bin.unlink(missing_ok=True)
 

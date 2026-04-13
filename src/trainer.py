@@ -757,6 +757,24 @@ class Trainer:
     ) -> np.ndarray:
         """Compute all NUM_FEATURES features for all sample indices at once."""
         from src.features import NUM_FEATURES
+
+        # --- Rust fast-path (opt-in via SCALPER_USE_RUST=1) ---
+        from src import rust_bridge
+        if rust_bridge.use_rust():
+            return rust_bridge.compute_features(
+                bid_vols=bid_vols, ask_vols=ask_vols,
+                bid_prices=bid_prices, ask_prices=ask_prices,
+                mid_prices=mid_prices,
+                trade_ts=trade_ts, trade_qty=trade_qty,
+                trade_side=trade_side, trade_price=trade_price,
+                depth_ts=depth_ts, indices=indices,
+                eth_ts=eth_ts, eth_price=eth_price,
+                eth_qty=eth_qty, eth_side=eth_side,
+                funding_ts=funding_ts, funding_rate_arr=funding_rate_arr,
+                deriv_ts=deriv_ts, deriv_oi=deriv_oi, deriv_ls=deriv_ls,
+                cross_ex_data=cross_ex_data,
+            )
+
         ns = len(indices)
         feat = np.zeros((ns, NUM_FEATURES), dtype=np.float32)
 

@@ -98,11 +98,13 @@ class ConfigRow:
 
     # Metrics filled after run_backtest
     trades: int = 0
+    win_rate_pct: float = 0.0            # net-PnL > 0 fraction × 100
     full_tp_pct: float = 0.0
     full_sl_pct: float = 0.0
     timeout_pct: float = 0.0
     trailing_pct: float = 0.0
     partial_tp_only_pct: float = 0.0
+    tp_to_sl_count_ratio: float = 0.0    # full_tp / full_sl (999 if zero SL, 0 if both zero)
     gross_usd: float = 0.0
     gross_pct: float = 0.0
     net_usd: float = 0.0
@@ -119,11 +121,18 @@ class ConfigRow:
 
 def _fill_metrics_from_result(row: ConfigRow, result: BacktestResult) -> None:
     row.trades = result.total_trades
+    row.win_rate_pct = result.win_rate * 100
     row.full_tp_pct = result.full_tp_rate * 100
     row.full_sl_pct = result.full_sl_rate * 100
     row.timeout_pct = result.timeout_rate * 100
     row.trailing_pct = result.trailing_stop_rate * 100
     row.partial_tp_only_pct = result.partial_tp_only_rate * 100
+    if result.full_sl_rate > 0:
+        row.tp_to_sl_count_ratio = result.full_tp_rate / result.full_sl_rate
+    elif result.full_tp_rate > 0:
+        row.tp_to_sl_count_ratio = 999.0
+    else:
+        row.tp_to_sl_count_ratio = 0.0
     row.gross_usd = result.gross_pnl_usd
     row.gross_pct = result.gross_pnl_pct
     row.net_usd = result.total_pnl
