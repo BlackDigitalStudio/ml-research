@@ -173,9 +173,22 @@ def train_generic(
     if best_state is not None:
         model.load_state_dict(best_state)
 
+    # Final val softmax — needed by the stacker downstream.
+    model.eval()
+    val_softs: list[torch.Tensor] = []
+    with torch.no_grad():
+        for xb, fb, _, _ in val_ld:
+            xb, fb = xb.to(device), fb.to(device)
+            logits, _ = model(xb, fb)
+            val_softs.append(torch.softmax(logits, dim=-1).cpu())
+    val_soft_np = torch.cat(val_softs, dim=0).numpy()
+
     return model, {
         "best_bal_acc": best_bal,
         "params_M": n_params / 1e6,
         "history": history,
         "tag": tag,
+        "val_softmax": val_soft_np,        # (n_val, 3) for stacking
+        "y_val": y[n_train + gap:].copy(), # alignment ref for stacker
+        "X_feat_val": X_feat[n_train + gap:].copy(),
     }

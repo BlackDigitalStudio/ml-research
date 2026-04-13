@@ -24,7 +24,12 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.models import PatchTST, PatchTSTConfig  # noqa: E402
+from src.models import (  # noqa: E402
+    PatchTST, PatchTSTConfig,
+    MambaClassifier, MambaModelConfig,
+    TCNClassifier, TCNConfig,
+    ChronosClassifier, ChronosAdapterConfig,
+)
 from src.models.train import train_generic  # noqa: E402
 from src.teacher import MultiStreamTransformer, TeacherConfig  # noqa: E402
 
@@ -39,6 +44,24 @@ def build_factory(arch: str):
         def _f(num_feat: int):
             return PatchTST(num_feat=num_feat, cfg=PatchTSTConfig())
         return _f, "patchtst"
+    if arch == "mamba":
+        def _f(num_feat: int):
+            return MambaClassifier(num_feat=num_feat, cfg=MambaModelConfig())
+        return _f, "mamba"
+    if arch == "tcn":
+        def _f(num_feat: int):
+            return TCNClassifier(num_feat=num_feat, cfg=TCNConfig())
+        return _f, "tcn"
+    if arch == "chronos_bolt_small":
+        def _f(num_feat: int):
+            return ChronosClassifier(num_feat=num_feat, cfg=ChronosAdapterConfig(
+                model_name="amazon/chronos-bolt-small", freeze_encoder=True))
+        return _f, "chronos_bolt_small"
+    if arch == "chronos_bolt_tiny":
+        def _f(num_feat: int):
+            return ChronosClassifier(num_feat=num_feat, cfg=ChronosAdapterConfig(
+                model_name="amazon/chronos-bolt-tiny", freeze_encoder=True))
+        return _f, "chronos_bolt_tiny"
     raise ValueError(f"unknown arch: {arch}")
 
 
@@ -65,6 +88,9 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     leaderboard = []
+    stacker_inputs = []  # list of (tag, val_softmax) for optional stacker fit
+    y_val_ref = None
+    X_feat_val_ref = None
     for arch in args.archs:
         factory, tag = build_factory(arch)
         print(f"\n==== {tag} ====")
@@ -76,6 +102,10 @@ def main() -> int:
         )
         dt = time.time() - t0
         torch.save(model.state_dict(), out_dir / f"{tag}.pt")
+        np.save(out_dir / f"{tag}_val_softmax.npy", metrics["val_softmax"])
+        stacker_inputs.append((tag, metrics["val_softmax"]))
+        y_val_ref = metrics["y_val"]
+        X_feat_val_ref = metrics["X_feat_val"]
         row = {
             "arch": tag,
             "best_bal_acc": metrics["best_bal_acc"],
@@ -87,9 +117,31 @@ def main() -> int:
         print(f"[bakeoff] {tag} done — bal_acc={row['best_bal_acc']:.4f} "
               f"params={row['params_M']:.2f}M time={dt:.0f}s")
 
+    # --- Stacker (level-2 meta-learner) ---
+    if len(stacker_inputs) >= 2:
+        from src.models import train_stacker
+        print(f"\n==== stacker ({len(stacker_inputs)} primaries) ====")
+        softs = [s for _, s in stacker_inputs]
+        stacker, s_metrics = train_stacker(softs, y_val_ref, X_feat=X_feat_val_ref)
+        import joblib
+        joblib.dump(stacker, out_dir / "stacker.joblib")
+        s_metrics["primaries"] = [t for t, _ in stacker_inputs]
+        print(f"[bakeoff] stacker — val_bal_acc={s_metrics['val_bal_acc']:.4f} "
+              f"val_acc={s_metrics['val_acc']:.4f}")
+        leaderboard.append({
+            "arch": "stacker",
+            "best_bal_acc": s_metrics["val_bal_acc"],
+            "params_M": float("nan"),
+            "train_seconds": 0.0,
+            "epochs_run": 0,
+            "primaries": s_metrics["primaries"],
+        })
+        with (out_dir / "stacker_metrics.json").open("w") as f:
+            json.dump(s_metrics, f, indent=2, default=float)
+
     leaderboard.sort(key=lambda r: -r["best_bal_acc"])
     with (out_dir / "leaderboard.json").open("w") as f:
-        json.dump({"rows": leaderboard, "args": vars(args)}, f, indent=2)
+        json.dump({"rows": leaderboard, "args": vars(args)}, f, indent=2, default=str)
 
     print("\n=== Leaderboard ===")
     for r in leaderboard:

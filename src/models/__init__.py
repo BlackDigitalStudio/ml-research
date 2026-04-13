@@ -8,5 +8,19 @@ This lets `train_teacher` drive any architecture interchangeably via a factory.
 from __future__ import annotations
 
 from .patchtst import PatchTST, PatchTSTConfig
+from .mamba import MambaClassifier, MambaModelConfig
+from .tcn import TCNClassifier, TCNConfig
+from .chronos_adapter import ChronosClassifier, ChronosAdapterConfig
+from .meta_label import (
+    MetaConfig, build_meta_dataset, train_meta, combine as meta_combine,
+)
+from .stacking import StackerConfig, train_stacker, predict_stacked, stack_inputs
 
-__all__ = ["PatchTST", "PatchTSTConfig"]
+__all__ = [
+    "PatchTST", "PatchTSTConfig",
+    "MambaClassifier", "MambaModelConfig",
+    "TCNClassifier", "TCNConfig",
+    "ChronosClassifier", "ChronosAdapterConfig",
+    "MetaConfig", "build_meta_dataset", "train_meta", "meta_combine",
+    "StackerConfig", "train_stacker", "predict_stacked", "stack_inputs",
+]

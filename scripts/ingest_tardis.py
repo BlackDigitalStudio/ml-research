@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -419,6 +420,8 @@ def main() -> None:
     p.add_argument("--skip-existing", action="store_true", default=True)
     p.add_argument("--force", action="store_true",
                    help="Rewrite existing parquet files")
+    p.add_argument("--workers", type=int, default=8,
+                   help="Concurrent download+parse workers (default 8)")
     args = p.parse_args()
 
     if args.all_free:
@@ -445,22 +448,42 @@ def main() -> None:
 
     t0 = time.time()
     n_ok = n_skip = n_err = 0
-    for day in days:
-        for src in sources:
-            try:
-                r = ingest_one(src, day, tmp_dir, data_dir,
-                                skip_existing=not args.force)
-                if r is None:
-                    n_skip += 1
-                elif r.get("skipped"):
-                    n_skip += 1
-                elif r.get("error"):
-                    n_err += 1
-                else:
-                    n_ok += 1
-            except Exception as e:
-                logger.exception("  %s @ %s — FAILED: %r", src.slug, day, e)
+
+    # Build the full (src, day) work queue. Skip-existing check stays inside
+    # ingest_one so concurrent runs don't clobber each other; the queue is
+    # cheap to build (no I/O).
+    work = [(src, day) for day in days for src in sources]
+    logger.info("  queued %d tasks across %d workers", len(work), args.workers)
+
+    def _run(item):
+        src, day = item
+        try:
+            r = ingest_one(src, day, tmp_dir, data_dir,
+                           skip_existing=not args.force)
+            return src, day, r, None
+        except Exception as e:
+            return src, day, None, e
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        for src, day, r, err in (f.result() for f in
+                                 as_completed(pool.submit(_run, w) for w in work)):
+            done += 1
+            if err is not None:
+                logger.error("  %s @ %s — FAILED: %r", src.slug, day, err)
                 n_err += 1
+            elif r is None or r.get("skipped"):
+                n_skip += 1
+            elif r.get("error"):
+                n_err += 1
+            else:
+                n_ok += 1
+            if done % 20 == 0:
+                elapsed = time.time() - t0
+                rate = done / elapsed
+                eta = (len(work) - done) / rate if rate > 0 else 0
+                logger.info("  progress: %d/%d (%.0fs ETA %.0fm)",
+                            done, len(work), elapsed, eta / 60)
 
     logger.info("=" * 60)
     logger.info("  done: %d ok, %d skipped, %d errors (%.1fm)",

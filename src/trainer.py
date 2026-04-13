@@ -106,6 +106,16 @@ class Trainer:
     # ---- Data loading ----
 
     def load_depth_data(self, hours: int = 24) -> pd.DataFrame:
+        """Load depth parquet files. Handles BOTH schemas:
+          - Recorder (legacy): list<list<f64>> nested, columns 'bids' and 'asks'
+          - Tardis (flat):     FixedSizeList<f64,20>, columns
+                               bid_prices/bid_qtys/ask_prices/ask_qtys
+
+        Output is uniform: a DataFrame with 'bids' and 'asks' columns
+        containing list-of-(price,qty)-tuples per row, regardless of source.
+        Tardis files are converted on the fly. Allows the directory to mix
+        both formats (recorder-history + Tardis-historical samples).
+        """
         depth_dir = self._data_dir / "depth"
         files = sorted(depth_dir.glob("*.parquet"))
         if not files:
@@ -115,15 +125,51 @@ class Trainer:
         files = files[-hours:]
         logger.info("Loading %d depth files...", len(files))
 
-        tables = []
-        for f in files:
-            tables.append(pq.read_table(f))
-
         import pyarrow as pa
-        combined = pa.concat_tables(tables)
-        df = combined.to_pandas()
+
+        legacy_tables = []
+        flat_dfs = []
+
+        for f in files:
+            t = pq.read_table(f)
+            names = set(t.schema.names)
+            if "bids" in names and "asks" in names:
+                # Legacy recorder schema — keep as pyarrow until concat.
+                legacy_tables.append(t)
+            elif {"bid_prices", "bid_qtys", "ask_prices", "ask_qtys"} <= names:
+                # Tardis flat schema — convert to bids/asks list-of-tuples.
+                t = t.combine_chunks()
+                ts = t["timestamp"].chunk(0).to_numpy(zero_copy_only=True).astype(np.int64)
+                bp = t["bid_prices"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20)
+                bq = t["bid_qtys"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20)
+                ap = t["ask_prices"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20)
+                aq = t["ask_qtys"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20)
+                # Vectorized list-of-tuples build via list comprehension.
+                # 845k rows × 20 levels ≈ 17M tuples; ~2 GB Python objects per
+                # day, painful but tractable. The Rust pipeline (SCALPER_USE_RUST=1)
+                # bypasses this when enabled.
+                bids = [[(bp[i, j], bq[i, j]) for j in range(20) if bp[i, j] > 0]
+                        for i in range(len(ts))]
+                asks = [[(ap[i, j], aq[i, j]) for j in range(20) if ap[i, j] > 0]
+                        for i in range(len(ts))]
+                flat_dfs.append(pd.DataFrame({"timestamp": ts, "bids": bids, "asks": asks}))
+            else:
+                raise ValueError(
+                    f"{f.name}: unknown depth schema (cols={sorted(names)})"
+                )
+
+        parts: list[pd.DataFrame] = []
+        if legacy_tables:
+            parts.append(pa.concat_tables(legacy_tables).to_pandas())
+        if flat_dfs:
+            parts.append(pd.concat(flat_dfs, ignore_index=True))
+
+        df = pd.concat(parts, ignore_index=True)
         df = df.sort_values("timestamp").reset_index(drop=True)
-        logger.info("Loaded %d depth snapshots (%.1f hours)", len(df), len(df) / 36000)
+        logger.info(
+            "Loaded %d depth snapshots (%.1f hours, legacy=%d files, flat=%d files)",
+            len(df), len(df) / 36000, len(legacy_tables), len(flat_dfs),
+        )
         return df
 
     def load_trade_data(self, hours: int = 24) -> pd.DataFrame:
