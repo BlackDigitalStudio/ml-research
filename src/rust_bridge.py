@@ -38,33 +38,84 @@ def use_rust() -> bool:
     return _FEATURE_BIN.exists() and _SIM_BIN.exists()
 
 
-def _write_depth_parquet(path: Path, depth_ts, bid_prices, bid_qtys, ask_prices, ask_qtys):
-    """Serialize depth arrays to the flat FixedSizeList schema the Rust reader expects."""
-    n = len(depth_ts)
+def _write_depth_parquet(path: Path, depth_ts, bid_prices, bid_qtys, ask_prices, ask_qtys,
+                          chunk_rows: int = 1_000_000):
+    """Serialize depth arrays to flat FixedSizeList schema (Rust reader format).
+
+    Uses ParquetWriter chunks to bound peak RAM at chunk_rows * 320 bytes
+    (~320 MB for chunk=1M). Without chunking, pyarrow Table builds the
+    entire table in RAM — 40 GB on full 76-day dataset → OOM with the
+    Rust binary running concurrently inside cgroup memory limits.
+    """
     fsl_type = pa.list_(pa.float64(), 20)
+    schema = pa.schema([
+        ("timestamp", pa.int64()),
+        ("bid_prices", fsl_type),
+        ("bid_qtys", fsl_type),
+        ("ask_prices", fsl_type),
+        ("ask_qtys", fsl_type),
+    ])
 
-    def _fsl(arr):
-        flat = arr.astype(np.float64, copy=False).reshape(-1)
-        return pa.FixedSizeListArray.from_arrays(pa.array(flat, type=pa.float64()), 20)
+    def _fsl_chunk(arr):
+        flat = np.ascontiguousarray(arr.astype(np.float64, copy=False)).reshape(-1)
+        return pa.FixedSizeListArray.from_arrays(
+            pa.array(flat, type=pa.float64()), 20
+        )
 
-    table = pa.table({
-        "timestamp": pa.array(depth_ts.astype(np.int64), type=pa.int64()),
-        "bid_prices": _fsl(bid_prices),
-        "bid_qtys":   _fsl(bid_qtys),
-        "ask_prices": _fsl(ask_prices),
-        "ask_qtys":   _fsl(ask_qtys),
-    })
-    pq.write_table(table, str(path), compression="snappy")
+    n = len(depth_ts)
+    with pq.ParquetWriter(str(path), schema, compression="snappy") as writer:
+        for start in range(0, n, chunk_rows):
+            end = min(start + chunk_rows, n)
+            tbl = pa.table({
+                "timestamp": pa.array(depth_ts[start:end].astype(np.int64, copy=False),
+                                       type=pa.int64()),
+                "bid_prices": _fsl_chunk(bid_prices[start:end]),
+                "bid_qtys": _fsl_chunk(bid_qtys[start:end]),
+                "ask_prices": _fsl_chunk(ask_prices[start:end]),
+                "ask_qtys": _fsl_chunk(ask_qtys[start:end]),
+            })
+            writer.write_table(tbl)
+            del tbl
 
 
-def _write_trades_parquet(path: Path, ts, price, qty, side_bool, side_col="is_buyer_maker"):
-    table = pa.table({
-        "timestamp": pa.array(ts.astype(np.int64), type=pa.int64()),
-        "price": pa.array(price.astype(np.float64), type=pa.float64()),
-        "quantity": pa.array(qty.astype(np.float64), type=pa.float64()),
-        side_col: pa.array(side_bool.astype(bool), type=pa.bool_()),
-    })
-    pq.write_table(table, str(path), compression="snappy")
+def _write_scalar_parquet(path: Path, ts, columns: dict[str, np.ndarray],
+                           chunk_rows: int = 5_000_000):
+    """Chunked write for funding/derivs (timestamp + N float64 columns)."""
+    cols = list(columns.keys())
+    schema = pa.schema([("timestamp", pa.int64())] + [(c, pa.float64()) for c in cols])
+    n = len(ts)
+    with pq.ParquetWriter(str(path), schema, compression="snappy") as writer:
+        for start in range(0, n, chunk_rows):
+            end = min(start + chunk_rows, n)
+            data = {"timestamp": pa.array(ts[start:end].astype(np.int64, copy=False),
+                                            type=pa.int64())}
+            for c in cols:
+                data[c] = pa.array(columns[c][start:end].astype(np.float64, copy=False),
+                                    type=pa.float64())
+            writer.write_table(pa.table(data))
+
+
+def _write_trades_parquet(path: Path, ts, price, qty, side_bool, side_col="is_buyer_maker",
+                           chunk_rows: int = 5_000_000):
+    """Chunked write — bounded RAM regardless of input size."""
+    schema = pa.schema([
+        ("timestamp", pa.int64()),
+        ("price", pa.float64()),
+        ("quantity", pa.float64()),
+        (side_col, pa.bool_()),
+    ])
+    n = len(ts)
+    with pq.ParquetWriter(str(path), schema, compression="snappy") as writer:
+        for start in range(0, n, chunk_rows):
+            end = min(start + chunk_rows, n)
+            tbl = pa.table({
+                "timestamp": pa.array(ts[start:end].astype(np.int64, copy=False), type=pa.int64()),
+                "price": pa.array(price[start:end].astype(np.float64, copy=False), type=pa.float64()),
+                "quantity": pa.array(qty[start:end].astype(np.float64, copy=False), type=pa.float64()),
+                side_col: pa.array(side_bool[start:end].astype(bool, copy=False), type=pa.bool_()),
+            })
+            writer.write_table(tbl)
+            del tbl
 
 
 def compute_features(
@@ -103,20 +154,16 @@ def compute_features(
 
         if funding_ts is not None and len(funding_ts) > 0:
             fp = td / "funding.parquet"
-            pq.write_table(pa.table({
-                "timestamp": pa.array(funding_ts.astype(np.int64), type=pa.int64()),
-                "funding_rate": pa.array(funding_rate_arr.astype(np.float64), type=pa.float64()),
-                "mark_price": pa.array(np.zeros(len(funding_ts)), type=pa.float64()),
-            }), str(fp))
+            _write_scalar_parquet(fp, funding_ts,
+                                   {"funding_rate": funding_rate_arr,
+                                    "mark_price": np.zeros(len(funding_ts))})
             cmd += ["--funding", str(fp)]
 
         if deriv_ts is not None and len(deriv_ts) > 0:
             dp = td / "derivs.parquet"
-            pq.write_table(pa.table({
-                "timestamp": pa.array(deriv_ts.astype(np.int64), type=pa.int64()),
-                "open_interest": pa.array(deriv_oi.astype(np.float64), type=pa.float64()),
-                "long_short_ratio": pa.array(deriv_ls.astype(np.float64), type=pa.float64()),
-            }), str(dp))
+            _write_scalar_parquet(dp, deriv_ts,
+                                   {"open_interest": deriv_oi,
+                                    "long_short_ratio": deriv_ls})
             cmd += ["--derivs", str(dp)]
 
         if eth_ts is not None and len(eth_ts) > 0:
@@ -131,21 +178,68 @@ def compute_features(
                 ex_ts, ex_signed = cross_ex_data[ex]
                 if len(ex_ts) == 0:
                     continue
-                # Write in recorder schema (is_seller, signed qty magnitude).
                 cp = td / f"{ex}.parquet"
-                # Reconstruct is_seller + qty: Rust re-applies gateio abs() itself.
                 qty = np.abs(ex_signed)
                 is_seller = ex_signed < 0
-                pq.write_table(pa.table({
-                    "timestamp": pa.array(ex_ts.astype(np.int64), type=pa.int64()),
-                    "price": pa.array(np.zeros(len(ex_ts)), type=pa.float64()),
-                    "quantity": pa.array(qty.astype(np.float64), type=pa.float64()),
-                    "is_seller": pa.array(is_seller, type=pa.bool_()),
-                }), str(cp))
+                _write_trades_parquet(cp, ex_ts,
+                                       np.zeros(len(ex_ts), dtype=np.float64),
+                                       qty, is_seller, side_col="is_seller")
                 cmd += [f"--{ex}", str(cp)]
 
         subprocess.run(cmd, check=True)
         return np.load(out_path)
+
+
+def compute_features_from_paths(
+    *,
+    indices: np.ndarray,
+    depth_path: Path | str,
+    trades_path: Path | str | None = None,
+    funding_path: Path | str | None = None,
+    derivs_path: Path | str | None = None,
+    eth_path: Path | str | None = None,
+    bybit_path: Path | str | None = None,
+    okx_path: Path | str | None = None,
+    bitget_path: Path | str | None = None,
+    gateio_path: Path | str | None = None,
+) -> np.ndarray:
+    """Path-based variant of compute_features. Skips array→parquet
+    serialization entirely — caller must have already saved each stream
+    as a flat-schema parquet that the Rust reader understands.
+
+    Use this when you have streams on disk and don't want the +40 GB
+    transient pyarrow allocation for big depth datasets.
+    """
+    if not _FEATURE_BIN.exists():
+        raise RuntimeError(f"Rust feature_builder not built: {_FEATURE_BIN}")
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        idx_path = td / "idx.npy"
+        np.save(idx_path, indices.astype(np.int64))
+        out_path = td / "feat.npy"
+
+        cmd = [str(_FEATURE_BIN),
+               "--depth", str(depth_path),
+               "--indices", str(idx_path),
+               "--out", str(out_path)]
+        for flag, p in [("--trades", trades_path), ("--funding", funding_path),
+                        ("--derivs", derivs_path), ("--eth", eth_path),
+                        ("--bybit", bybit_path), ("--okx", okx_path),
+                        ("--bitget", bitget_path), ("--gateio", gateio_path)]:
+            if p is not None:
+                cmd += [flag, str(p)]
+        subprocess.run(cmd, check=True)
+        return np.load(out_path)
+
+
+def save_flat_depth_parquet(
+    path: Path | str, ts, bid_prices, bid_qtys, ask_prices, ask_qtys,
+    chunk_rows: int = 1_000_000,
+) -> None:
+    """Public helper for callers that want to pre-stage depth as flat parquet."""
+    _write_depth_parquet(Path(path), ts, bid_prices, bid_qtys, ask_prices, ask_qtys,
+                          chunk_rows=chunk_rows)
 
 
 def simulate_labels(

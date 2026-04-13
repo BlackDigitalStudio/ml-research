@@ -105,72 +105,103 @@ class Trainer:
 
     # ---- Data loading ----
 
-    def load_depth_data(self, hours: int = 24) -> pd.DataFrame:
-        """Load depth parquet files. Handles BOTH schemas:
-          - Recorder (legacy): list<list<f64>> nested, columns 'bids' and 'asks'
-          - Tardis (flat):     FixedSizeList<f64,20>, columns
-                               bid_prices/bid_qtys/ask_prices/ask_qtys
+    def _load_depth_arrays(
+        self, hours: int = 24
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Memory-efficient depth loader. Returns numpy arrays directly,
+        bypassing pandas list-of-tuples (which blows up to ~80 GB for
+        76 days of Tardis data).
 
-        Output is uniform: a DataFrame with 'bids' and 'asks' columns
-        containing list-of-(price,qty)-tuples per row, regardless of source.
-        Tardis files are converted on the fly. Allows the directory to mix
-        both formats (recorder-history + Tardis-historical samples).
+        Returns 5-tuple:
+            timestamp    (N,)     int64
+            bid_prices   (N, 20)  float64  (zero-padded if fewer levels)
+            bid_qtys     (N, 20)  float32
+            ask_prices   (N, 20)  float64
+            ask_qtys     (N, 20)  float32
+
+        Handles BOTH schemas:
+          - Recorder (legacy): list<list<f64>> nested {'bids', 'asks'}
+          - Tardis (flat):     FixedSizeList<f64,20> {'bid_prices', etc.}
+
+        Mixed directory OK — files are detected by schema individually and
+        all merged into a single sorted output.
         """
         depth_dir = self._data_dir / "depth"
         files = sorted(depth_dir.glob("*.parquet"))
         if not files:
             raise FileNotFoundError(f"No depth files in {depth_dir}")
 
-        # Take last N hours of files
         files = files[-hours:]
-        logger.info("Loading %d depth files...", len(files))
+        logger.info("Loading %d depth files (arrays, mem-efficient)...", len(files))
 
-        import pyarrow as pa
-
-        legacy_tables = []
-        flat_dfs = []
+        # Per-file arrays accumulated then concatenated once.
+        ts_parts, bp_parts, bq_parts, ap_parts, aq_parts = [], [], [], [], []
+        n_legacy = n_flat = 0
 
         for f in files:
             t = pq.read_table(f)
             names = set(t.schema.names)
-            if "bids" in names and "asks" in names:
-                # Legacy recorder schema — keep as pyarrow until concat.
-                legacy_tables.append(t)
-            elif {"bid_prices", "bid_qtys", "ask_prices", "ask_qtys"} <= names:
-                # Tardis flat schema — convert to bids/asks list-of-tuples.
+            if {"bid_prices", "bid_qtys", "ask_prices", "ask_qtys"} <= names:
                 t = t.combine_chunks()
-                ts = t["timestamp"].chunk(0).to_numpy(zero_copy_only=True).astype(np.int64)
-                bp = t["bid_prices"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20)
-                bq = t["bid_qtys"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20)
-                ap = t["ask_prices"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20)
-                aq = t["ask_qtys"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20)
-                # Vectorized list-of-tuples build via list comprehension.
-                # 845k rows × 20 levels ≈ 17M tuples; ~2 GB Python objects per
-                # day, painful but tractable. The Rust pipeline (SCALPER_USE_RUST=1)
-                # bypasses this when enabled.
-                bids = [[(bp[i, j], bq[i, j]) for j in range(20) if bp[i, j] > 0]
-                        for i in range(len(ts))]
-                asks = [[(ap[i, j], aq[i, j]) for j in range(20) if ap[i, j] > 0]
-                        for i in range(len(ts))]
-                flat_dfs.append(pd.DataFrame({"timestamp": ts, "bids": bids, "asks": asks}))
+                ts_parts.append(t["timestamp"].chunk(0).to_numpy(zero_copy_only=True).astype(np.int64, copy=False))
+                bp_parts.append(t["bid_prices"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20).astype(np.float64, copy=False))
+                bq_parts.append(t["bid_qtys"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20).astype(np.float32, copy=False))
+                ap_parts.append(t["ask_prices"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20).astype(np.float64, copy=False))
+                aq_parts.append(t["ask_qtys"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20).astype(np.float32, copy=False))
+                n_flat += 1
+            elif {"bids", "asks"} <= names:
+                # Legacy nested — convert per-row in numpy. Pay one-time cost
+                # but materialize directly into target arrays (no Python tuples).
+                df = t.to_pandas()
+                m = len(df)
+                ts_parts.append(df["timestamp"].values.astype(np.int64, copy=False))
+                bp = np.zeros((m, 20), dtype=np.float64)
+                bq = np.zeros((m, 20), dtype=np.float32)
+                ap = np.zeros((m, 20), dtype=np.float64)
+                aq = np.zeros((m, 20), dtype=np.float32)
+                bids_raw = df["bids"].values
+                asks_raw = df["asks"].values
+                for i in range(m):
+                    for j, (p, q) in enumerate(bids_raw[i][:20]):
+                        bp[i, j], bq[i, j] = p, q
+                    for j, (p, q) in enumerate(asks_raw[i][:20]):
+                        ap[i, j], aq[i, j] = p, q
+                bp_parts.append(bp); bq_parts.append(bq)
+                ap_parts.append(ap); aq_parts.append(aq)
+                n_legacy += 1
             else:
-                raise ValueError(
-                    f"{f.name}: unknown depth schema (cols={sorted(names)})"
-                )
+                raise ValueError(f"{f.name}: unknown depth schema (cols={sorted(names)})")
 
-        parts: list[pd.DataFrame] = []
-        if legacy_tables:
-            parts.append(pa.concat_tables(legacy_tables).to_pandas())
-        if flat_dfs:
-            parts.append(pd.concat(flat_dfs, ignore_index=True))
-
-        df = pd.concat(parts, ignore_index=True)
-        df = df.sort_values("timestamp").reset_index(drop=True)
+        ts = np.concatenate(ts_parts)
+        bp = np.concatenate(bp_parts, axis=0)
+        bq = np.concatenate(bq_parts, axis=0)
+        ap = np.concatenate(ap_parts, axis=0)
+        aq = np.concatenate(aq_parts, axis=0)
+        # Sort by timestamp once across all loaded data.
+        order = np.argsort(ts, kind="stable")
+        if not np.array_equal(order, np.arange(len(ts))):
+            ts = ts[order]; bp = bp[order]; bq = bq[order]
+            ap = ap[order]; aq = aq[order]
         logger.info(
             "Loaded %d depth snapshots (%.1f hours, legacy=%d files, flat=%d files)",
-            len(df), len(df) / 36000, len(legacy_tables), len(flat_dfs),
+            len(ts), len(ts) / 36000, n_legacy, n_flat,
         )
-        return df
+        return ts, bp, bq, ap, aq
+
+    def load_depth_data(self, hours: int = 24) -> pd.DataFrame:
+        """Backward-compat DataFrame loader (used by check_data.py and similar
+        diagnostic scripts). For training, prefer `_load_depth_arrays` which
+        is ~10× more memory efficient on large datasets.
+        """
+        ts, bp, bq, ap, aq = self._load_depth_arrays(hours)
+        n = len(ts)
+        # Build legacy bids/asks list-of-tuples view (slow + RAM heavy on big
+        # data — only use this path for diagnostics).
+        bids = [[(bp[i, j], bq[i, j]) for j in range(20) if bp[i, j] > 0]
+                for i in range(n)]
+        asks = [[(ap[i, j], aq[i, j]) for j in range(20) if ap[i, j] > 0]
+                for i in range(n)]
+        return pd.DataFrame({"timestamp": ts, "bids": bids, "asks": asks})
 
     def load_trade_data(self, hours: int = 24) -> pd.DataFrame:
         trades_dir = self._data_dir / "trades"
@@ -346,33 +377,17 @@ class Trainer:
         """
         import gc
 
-        # === Load and parse depth (free DataFrame ASAP) ===
-        depth_df = self.load_depth_data(hours)
-        n = len(depth_df)
+        # === Load depth as numpy arrays directly (mem-efficient path) ===
+        # Old path went through pandas list-of-tuples, which OOMed on the full
+        # 76-day Tardis dataset (~80 GB Python objects). New path: arrays
+        # straight from arrow → ~30 GB peak even for full dataset.
+        depth_ts, bid_prices, bid_vols, ask_prices, ask_vols = self._load_depth_arrays(hours)
+        n = len(depth_ts)
         if n < WINDOW_SIZE + HORIZON + 1:
             raise ValueError(f"Not enough data: {n} rows, need {WINDOW_SIZE + HORIZON + 1}")
-
-        logger.info("Parsing order book data...")
-        bid_prices = np.zeros((n, BOOK_DEPTH), dtype=np.float64)
-        bid_vols = np.zeros((n, BOOK_DEPTH), dtype=np.float32)
-        ask_prices = np.zeros((n, BOOK_DEPTH), dtype=np.float64)
-        ask_vols = np.zeros((n, BOOK_DEPTH), dtype=np.float32)
-
-        bids_raw = depth_df["bids"].values
-        asks_raw = depth_df["asks"].values
-        for i in range(n):
-            for j, (p, q) in enumerate(bids_raw[i][:BOOK_DEPTH]):
-                bid_prices[i, j] = p
-                bid_vols[i, j] = q
-            for j, (p, q) in enumerate(asks_raw[i][:BOOK_DEPTH]):
-                ask_prices[i, j] = p
-                ask_vols[i, j] = q
-
         mid_prices = (bid_prices[:, 0] + ask_prices[:, 0]) / 2.0
-        depth_ts = depth_df["timestamp"].values.astype(np.int64).copy()
-        del depth_df, bids_raw, asks_raw  # free ~1 GB of Python objects
         gc.collect()
-        _malloc_trim()  # force glibc to return the list-column pages to OS
+        _malloc_trim()
 
         # Filter crossed books (bid >= ask = desync after reconnect)
         valid_book = bid_prices[:, 0] < ask_prices[:, 0]
@@ -646,78 +661,126 @@ class Trainer:
 
         reason_counter: dict[str, int] = {}
         t_sim_start = time.monotonic()
-        for k in kept_indices:
-            vol_ratio = float(vol_ratio_arr[k])
-            tp_pct, sl_pct = filters.adaptive_tp_sl(vol_ratio, base_tp, base_sl)
-            # Dynamic timeout: base * (avg/current) = base / vol_ratio, clamped.
-            # `filters.dynamic_timeout_sec` takes (avg, current, base) — pass
-            # avg=1.0 and current=vol_ratio so the formula reduces to
-            # `base/vol_ratio` with identical clamping behaviour.
-            timeout_sec = filters.dynamic_timeout_sec(
+
+        # Pre-compute per-sample (tp_pct, sl_pct, timeout_ticks) — vectorised.
+        # Even when Rust path runs we need these to feed the batch sim.
+        kept_vol = vol_ratio_arr[kept_indices].astype(np.float64)
+        kept_tp_arr = np.empty(n_kept, dtype=np.float64)
+        kept_sl_arr = np.empty(n_kept, dtype=np.float64)
+        kept_to_arr = np.empty(n_kept, dtype=np.int64)
+        for i, vr in enumerate(kept_vol):
+            tp, sl = filters.adaptive_tp_sl(float(vr), base_tp, base_sl)
+            ts_sec = filters.dynamic_timeout_sec(
                 avg_volatility=1.0,
-                current_volatility=max(vol_ratio, 1e-9),
+                current_volatility=max(float(vr), 1e-9),
                 base_timeout_sec=base_timeout_sec,
             )
-            timeout_ticks = int(round(timeout_sec * 10.0))  # 100 ms per tick
+            kept_tp_arr[i] = tp
+            kept_sl_arr[i] = sl
+            kept_to_arr[i] = int(round(ts_sec * 10.0))
 
-            cfg = LiveSimConfig(
-                tp_pct=tp_pct,
-                sl_pct=sl_pct,
-                timeout_ticks=timeout_ticks,
-                commission_win_pct=comm_win,
-                commission_loss_pct=comm_loss,
-            )
-
+        # Build per-kept-sample mid_paths (n_kept, SIM_HORIZON), zero-padded
+        # at the tail when the sample is too close to the end of the data.
+        kept_entry_long = sample_bids[kept_indices].astype(np.float64)
+        kept_entry_short = sample_asks[kept_indices].astype(np.float64)
+        kept_long_allowed = long_allowed[kept_indices]
+        kept_short_allowed = short_allowed[kept_indices]
+        n_mid = len(mid_prices)
+        mid_paths_arr = np.zeros((n_kept, SIM_HORIZON), dtype=np.float64)
+        for i, k in enumerate(kept_indices):
             start = int(end_indices[k]) + 1
-            end = start + SIM_HORIZON
-            mid_path = mid_prices[start:end]
+            avail = min(SIM_HORIZON, n_mid - start)
+            if avail > 0:
+                mid_paths_arr[i, :avail] = mid_prices[start:start + avail]
 
-            long_out = None
-            short_out = None
-            if long_allowed[k]:
-                long_out = simulate_trade(
-                    SimDirection.LONG,
-                    float(sample_bids[k]),
-                    mid_path,
-                    cfg,
+        # === Rust batch sim (50-100× over Python loop on big batches) ===
+        from src import rust_bridge
+        used_rust = False
+        if rust_bridge.use_rust():
+            try:
+                out = rust_bridge.simulate_labels(
+                    entry_long=kept_entry_long,
+                    entry_short=kept_entry_short,
+                    mid_paths=mid_paths_arr,
+                    tp_pct=kept_tp_arr,
+                    sl_pct=kept_sl_arr,
+                    timeout_ticks=kept_to_arr,
+                    commission_win_pct=comm_win,
+                    commission_loss_pct=comm_loss,
                     fill_latency_ms=LABEL_FILL_LATENCY_MS,
                 )
-                reason_counter[f"LONG:{long_out.exit_reason}"] = (
-                    reason_counter.get(f"LONG:{long_out.exit_reason}", 0) + 1
-                )
-            if short_allowed[k]:
-                short_out = simulate_trade(
-                    SimDirection.SHORT,
-                    float(sample_asks[k]),
-                    mid_path,
-                    cfg,
-                    fill_latency_ms=LABEL_FILL_LATENCY_MS,
-                )
-                reason_counter[f"SHORT:{short_out.exit_reason}"] = (
-                    reason_counter.get(f"SHORT:{short_out.exit_reason}", 0) + 1
-                )
+                # Post-process: respect long_allowed/short_allowed mask.
+                # Both allowed → use Rust's label. One-sided → manual.
+                both = kept_long_allowed & kept_short_allowed
+                only_l = kept_long_allowed & ~kept_short_allowed
+                only_s = ~kept_long_allowed & kept_short_allowed
+                # Both allowed
+                y_full[kept_indices[both]] = out["y"][both]
+                pnl_full[kept_indices[both]] = out["target_pnl"][both].astype(np.float32)
+                # Only LONG
+                pnl_l = out["pnl_long"][only_l]
+                y_full[kept_indices[only_l]] = np.where(pnl_l > 0, UP, FLAT)
+                pnl_full[kept_indices[only_l]] = pnl_l.astype(np.float32)
+                # Only SHORT
+                pnl_s = out["pnl_short"][only_s]
+                y_full[kept_indices[only_s]] = np.where(pnl_s > 0, DOWN, FLAT)
+                pnl_full[kept_indices[only_s]] = pnl_s.astype(np.float32)
 
-            if long_out is not None and short_out is not None:
-                lbl, pnl = label_from_outcomes(long_out, short_out)
-            elif long_out is not None:
-                if long_out.net_pnl_pct > 0:
-                    lbl = UP
-                else:
-                    lbl = FLAT
-                pnl = long_out.net_pnl_pct
-            else:  # short_out is not None
-                if short_out.net_pnl_pct > 0:
-                    lbl = DOWN
-                else:
-                    lbl = FLAT
-                pnl = short_out.net_pnl_pct
+                # Reason counter from Rust output (REASON ids match
+                # TradeOutcome.REASONS tuple ordering).
+                from src.live_sim import TradeOutcome
+                R = TradeOutcome.REASONS
+                rl = out["reason_long"]
+                rs = out["reason_short"]
+                for i in range(n_kept):
+                    if kept_long_allowed[i]:
+                        reason_counter[f"LONG:{R[rl[i]]}"] = reason_counter.get(f"LONG:{R[rl[i]]}", 0) + 1
+                    if kept_short_allowed[i]:
+                        reason_counter[f"SHORT:{R[rs[i]]}"] = reason_counter.get(f"SHORT:{R[rs[i]]}", 0) + 1
+                used_rust = True
+                logger.info("[rust_bridge] sim_labels processed %d samples", n_kept)
+            except Exception as e:
+                logger.warning("[rust_bridge] sim_labels failed (%r), falling back to Python loop", e)
 
-            y_full[k] = lbl
-            pnl_full[k] = pnl
+        if not used_rust:
+            # Python fallback — same logic, slower but always works.
+            for i, k in enumerate(kept_indices):
+                cfg = LiveSimConfig(
+                    tp_pct=float(kept_tp_arr[i]),
+                    sl_pct=float(kept_sl_arr[i]),
+                    timeout_ticks=int(kept_to_arr[i]),
+                    commission_win_pct=comm_win,
+                    commission_loss_pct=comm_loss,
+                )
+                start = int(end_indices[k]) + 1
+                end = start + SIM_HORIZON
+                mid_path = mid_prices[start:end]
+
+                long_out = short_out = None
+                if kept_long_allowed[i]:
+                    long_out = simulate_trade(SimDirection.LONG, float(kept_entry_long[i]),
+                                              mid_path, cfg, fill_latency_ms=LABEL_FILL_LATENCY_MS)
+                    reason_counter[f"LONG:{long_out.exit_reason}"] = reason_counter.get(f"LONG:{long_out.exit_reason}", 0) + 1
+                if kept_short_allowed[i]:
+                    short_out = simulate_trade(SimDirection.SHORT, float(kept_entry_short[i]),
+                                               mid_path, cfg, fill_latency_ms=LABEL_FILL_LATENCY_MS)
+                    reason_counter[f"SHORT:{short_out.exit_reason}"] = reason_counter.get(f"SHORT:{short_out.exit_reason}", 0) + 1
+
+                if long_out is not None and short_out is not None:
+                    lbl, pnl = label_from_outcomes(long_out, short_out)
+                elif long_out is not None:
+                    lbl = UP if long_out.net_pnl_pct > 0 else FLAT
+                    pnl = long_out.net_pnl_pct
+                else:
+                    lbl = DOWN if short_out.net_pnl_pct > 0 else FLAT
+                    pnl = short_out.net_pnl_pct
+                y_full[k] = lbl
+                pnl_full[k] = pnl
 
         sim_elapsed = time.monotonic() - t_sim_start
         logger.info(
-            "live_sim label construction: %d samples in %.1fs (%.0f samples/sec)",
+            "live_sim label construction (%s): %d samples in %.1fs (%.0f samples/sec)",
+            "rust" if used_rust else "python",
             n_kept, sim_elapsed, n_kept / max(sim_elapsed, 1e-9),
         )
 
