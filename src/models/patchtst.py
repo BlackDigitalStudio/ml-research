@@ -177,3 +177,26 @@ class PatchTST(nn.Module):
     # Convenience param count for logs.
     def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def load_pretrained_backbone(self, path: str) -> dict:
+        """Load weights from an SSL-pretrained `PatchTSTBackbone` into this
+        classifier's matching layers (revin, patch_embed, pos_emb, encoder).
+
+        Skips layers with shape mismatch — caller should ensure pretraining
+        config matches (d_model, n_layers, patch_len). Returns a report
+        with loaded/skipped tensor counts.
+        """
+        import torch
+        sd = torch.load(path, map_location="cpu", weights_only=True)
+        own = self.state_dict()
+        loaded = []
+        skipped = []
+        for k, v in sd.items():
+            if k in own and own[k].shape == v.shape:
+                own[k] = v
+                loaded.append(k)
+            else:
+                skipped.append((k, tuple(v.shape),
+                                tuple(own[k].shape) if k in own else None))
+        self.load_state_dict(own)
+        return {"loaded": loaded, "skipped": skipped, "n_loaded": len(loaded)}
