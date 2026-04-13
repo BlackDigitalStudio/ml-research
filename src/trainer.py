@@ -841,12 +841,37 @@ class Trainer:
         )
 
         # === Free parse arrays and compact X_lob ==============================
-        del bid_vols, ask_vols, bid_prices, ask_prices
-        del tick_buy_vol, tick_sell_vol
-        del trade_ts, trade_price, trade_qty, trade_side, depth_ts
-        del eth_ts, eth_price, eth_qty, eth_side
-        del funding_ts, funding_rate, deriv_ts, deriv_oi, deriv_ls
-        del cross_ex_data
+        # In the Rust path most of these are already deleted (see line ~566);
+        # wrap in try/except to tolerate already-freed names without losing
+        # the safety net for the Python fallback path.
+        try:
+            del bid_vols, ask_vols, bid_prices, ask_prices  # type: ignore[name-defined]
+        except NameError:
+            pass
+        try:
+            del tick_buy_vol, tick_sell_vol  # type: ignore[name-defined]
+        except NameError:
+            pass
+        try:
+            del trade_ts, trade_price, trade_qty, trade_side  # type: ignore[name-defined]
+        except NameError:
+            pass
+        try:
+            del depth_ts  # type: ignore[name-defined]
+        except NameError:
+            pass
+        try:
+            del eth_ts, eth_price, eth_qty, eth_side  # type: ignore[name-defined]
+        except NameError:
+            pass
+        try:
+            del funding_ts, funding_rate, deriv_ts, deriv_oi, deriv_ls  # type: ignore[name-defined]
+        except NameError:
+            pass
+        try:
+            del cross_ex_data  # type: ignore[name-defined]
+        except NameError:
+            pass
         import gc
         gc.collect()
         _malloc_trim()
