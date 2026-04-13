@@ -62,6 +62,16 @@ def build_factory(arch: str):
             return ChronosClassifier(num_feat=num_feat, cfg=ChronosAdapterConfig(
                 model_name="amazon/chronos-bolt-tiny", freeze_encoder=True))
         return _f, "chronos_bolt_tiny"
+    if arch == "chronos_bolt_mini":
+        def _f(num_feat: int):
+            return ChronosClassifier(num_feat=num_feat, cfg=ChronosAdapterConfig(
+                model_name="amazon/chronos-bolt-mini", freeze_encoder=True))
+        return _f, "chronos_bolt_mini"
+    if arch == "chronos_bolt_base":
+        def _f(num_feat: int):
+            return ChronosClassifier(num_feat=num_feat, cfg=ChronosAdapterConfig(
+                model_name="amazon/chronos-bolt-base", freeze_encoder=True))
+        return _f, "chronos_bolt_base"
     # "patchtst_pretrained:PATH" — loads SSL-pretrained backbone
     if arch.startswith("patchtst_pretrained:"):
         weight_path = arch.split(":", 1)[1]
