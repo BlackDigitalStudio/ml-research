@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.models import (  # noqa: E402
     PatchTST, PatchTSTConfig,
     MambaClassifier, MambaModelConfig,
+    HybridMambaAttnClassifier, HybridMambaAttnConfig,
     TCNClassifier, TCNConfig,
     ChronosClassifier, ChronosAdapterConfig,
 )
@@ -48,6 +49,11 @@ def build_factory(arch: str):
         def _f(num_feat: int):
             return MambaClassifier(num_feat=num_feat, cfg=MambaModelConfig())
         return _f, "mamba"
+    if arch == "hybrid_mamba_attn":
+        def _f(num_feat: int):
+            return HybridMambaAttnClassifier(num_feat=num_feat,
+                                              cfg=HybridMambaAttnConfig())
+        return _f, "hybrid_mamba_attn"
     if arch == "tcn":
         def _f(num_feat: int):
             return TCNClassifier(num_feat=num_feat, cfg=TCNConfig())
