@@ -531,15 +531,66 @@ class Trainer:
         X_lob = np.load(str(lob_path), mmap_mode="r")
 
         # === Features (vectorized) ===
-        X_feat = self._calc_features_batch(
-            bid_vols, ask_vols, bid_prices, ask_prices, mid_prices,
-            trade_ts, trade_qty, trade_side, depth_ts, end_indices,
-            trade_price=trade_price,
-            eth_ts=eth_ts, eth_price=eth_price, eth_qty=eth_qty, eth_side=eth_side,
-            funding_ts=funding_ts, funding_rate_arr=funding_rate,
-            deriv_ts=deriv_ts, deriv_oi=deriv_oi, deriv_ls=deriv_ls,
-            cross_ex_data=cross_ex_data,
-        )
+        # Memory-aware path: for the Rust path on big datasets we save streams
+        # to flat parquets, drop the heavy Python arrays, then call Rust on
+        # paths. Without this, Python (40 GB depth) + Rust subprocess (40 GB
+        # depth load) exceeds cgroup limits on full Tardis-scale runs.
+        from src import rust_bridge as _rb
+        if _rb.use_rust():
+            # Two-phase path: save streams to disk, drop big Python arrays,
+            # THEN invoke Rust binary. Without the explicit drop+gc, Python
+            # (40 GB depth) + Rust subprocess (40 GB depth load) jointly
+            # exceed the 116 GiB cgroup limit on full Tardis runs.
+            paths = self._save_streams_for_rust(
+                bid_vols=bid_vols, ask_vols=ask_vols,
+                bid_prices=bid_prices, ask_prices=ask_prices,
+                depth_ts=depth_ts,
+                trade_ts=trade_ts, trade_qty=trade_qty,
+                trade_side=trade_side, trade_price=trade_price,
+                eth_ts=eth_ts, eth_price=eth_price, eth_qty=eth_qty, eth_side=eth_side,
+                funding_ts=funding_ts, funding_rate=funding_rate,
+                deriv_ts=deriv_ts, deriv_oi=deriv_oi, deriv_ls=deriv_ls,
+                cross_ex_data=cross_ex_data,
+            )
+            # Stash everything downstream needs before dropping big arrays.
+            _stashed_sample_bids = bid_prices[end_indices, 0].astype(np.float64).copy()
+            _stashed_sample_asks = ask_prices[end_indices, 0].astype(np.float64).copy()
+            _stashed_sample_mids = mid_prices[end_indices].copy()
+            _stashed_top5_bid = bid_vols[end_indices, :5].sum(axis=1).astype(np.float64)
+            _stashed_top5_ask = ask_vols[end_indices, :5].sum(axis=1).astype(np.float64)
+            _stashed_sample_ts = depth_ts[end_indices].astype(np.int64).copy()
+            _stashed_mid_full = mid_prices.copy()       # for live_sim mid_path slicing
+            _stashed_depth_ts = depth_ts.copy()
+
+            # Drop heavy refs BEFORE Rust runs.
+            del bid_vols, ask_vols, bid_prices, ask_prices, mid_prices
+            if trade_ts is not None: del trade_ts, trade_qty, trade_side, trade_price
+            if eth_ts is not None: del eth_ts, eth_price, eth_qty, eth_side
+            if funding_ts is not None: del funding_ts, funding_rate
+            if deriv_ts is not None: del deriv_ts, deriv_oi, deriv_ls
+            cross_ex_data = None
+            gc.collect()
+            _malloc_trim()
+
+            X_feat = self._run_rust_features(paths, end_indices)
+
+            # Restore expected names for downstream code.
+            mid_prices = _stashed_mid_full
+            depth_ts = _stashed_depth_ts
+            # Pre-set the values that the section starting at "sample_mids = ..."
+            # would otherwise compute from the now-deleted arrays.
+            _rust_path_used = True
+        else:
+            _rust_path_used = False
+            X_feat = self._calc_features_batch(
+                bid_vols, ask_vols, bid_prices, ask_prices, mid_prices,
+                trade_ts, trade_qty, trade_side, depth_ts, end_indices,
+                trade_price=trade_price,
+                eth_ts=eth_ts, eth_price=eth_price, eth_qty=eth_qty, eth_side=eth_side,
+                funding_ts=funding_ts, funding_rate_arr=funding_rate,
+                deriv_ts=deriv_ts, deriv_oi=deriv_oi, deriv_ls=deriv_ls,
+                cross_ex_data=cross_ex_data,
+            )
 
         # === Labels — forward-simulation via `src.live_sim` ===
         # The old triple-barrier path used fixed TP/SL and no filters; it
@@ -556,15 +607,20 @@ class Trainer:
             simulate_trade,
         )
 
-        sample_mids = mid_prices[end_indices].copy()
-        sample_bids = bid_prices[end_indices, 0].astype(np.float64, copy=True)
-        sample_asks = ask_prices[end_indices, 0].astype(np.float64, copy=True)
-        sample_ts_ms = depth_ts[end_indices].astype(np.int64, copy=True)
-
-        # Pre-compute top-5 liquidity per sample for the vectorised
-        # liquidity filter below.
-        top5_bid_sample = bid_vols[end_indices, :5].sum(axis=1).astype(np.float64)
-        top5_ask_sample = ask_vols[end_indices, :5].sum(axis=1).astype(np.float64)
+        if _rust_path_used:
+            sample_mids = _stashed_sample_mids
+            sample_bids = _stashed_sample_bids
+            sample_asks = _stashed_sample_asks
+            sample_ts_ms = _stashed_sample_ts
+            top5_bid_sample = _stashed_top5_bid
+            top5_ask_sample = _stashed_top5_ask
+        else:
+            sample_mids = mid_prices[end_indices].copy()
+            sample_bids = bid_prices[end_indices, 0].astype(np.float64, copy=True)
+            sample_asks = ask_prices[end_indices, 0].astype(np.float64, copy=True)
+            sample_ts_ms = depth_ts[end_indices].astype(np.int64, copy=True)
+            top5_bid_sample = bid_vols[end_indices, :5].sum(axis=1).astype(np.float64)
+            top5_ask_sample = ask_vols[end_indices, :5].sum(axis=1).astype(np.float64)
 
         # === Global filter mask (vectorised) ===================================
         # Every predicate mirrors the exact constant from `src/filters.py` —
@@ -844,6 +900,86 @@ class Trainer:
         logger.info("Top live_sim exit reasons: %s", top_reasons)
 
         return X_lob, X_feat, y, sample_mids, target_pnl
+
+    def _save_streams_for_rust(
+        self,
+        *,
+        bid_vols, ask_vols, bid_prices, ask_prices, depth_ts,
+        trade_ts, trade_qty, trade_side, trade_price,
+        eth_ts=None, eth_price=None, eth_qty=None, eth_side=None,
+        funding_ts=None, funding_rate=None,
+        deriv_ts=None, deriv_oi=None, deriv_ls=None,
+        cross_ex_data: dict | None = None,
+    ) -> dict:
+        """Phase 1 of memory-aware Rust path: save all loaded streams as
+        flat-schema parquets via chunked writers (~320 MB transient).
+
+        Returns dict of paths to pass to compute_features_from_paths.
+        Caller MUST drop the array refs after calling (so gc can reclaim
+        the 40 GB depth + 18 GB other-streams memory) BEFORE invoking Rust.
+        """
+        from src import rust_bridge
+        from src.rust_bridge import _write_trades_parquet, _write_scalar_parquet
+
+        merged = self._data_dir / "_merged"
+        merged.mkdir(exist_ok=True)
+        paths: dict = {"depth_path": merged / "depth.parquet"}
+
+        logger.info("[trainer] saving merged depth (~%.1f GB)...",
+                    bid_vols.nbytes * 4 / 1e9)
+        rust_bridge.save_flat_depth_parquet(
+            paths["depth_path"], depth_ts, bid_prices, bid_vols, ask_prices, ask_vols,
+        )
+
+        if trade_ts is not None and len(trade_ts) > 0:
+            paths["trades_path"] = merged / "trades.parquet"
+            px = trade_price if trade_price is not None else np.zeros(len(trade_ts))
+            _write_trades_parquet(paths["trades_path"], trade_ts, px, trade_qty,
+                                   trade_side, side_col="is_buyer_maker")
+
+        if funding_ts is not None and len(funding_ts) > 0:
+            paths["funding_path"] = merged / "funding.parquet"
+            _write_scalar_parquet(paths["funding_path"], funding_ts,
+                                   {"funding_rate": funding_rate,
+                                    "mark_price": np.zeros(len(funding_ts))})
+
+        if deriv_ts is not None and len(deriv_ts) > 0:
+            paths["derivs_path"] = merged / "derivs.parquet"
+            _write_scalar_parquet(paths["derivs_path"], deriv_ts,
+                                   {"open_interest": deriv_oi,
+                                    "long_short_ratio": deriv_ls})
+
+        if eth_ts is not None and len(eth_ts) > 0:
+            paths["eth_path"] = merged / "eth.parquet"
+            _write_trades_parquet(paths["eth_path"], eth_ts, eth_price, eth_qty,
+                                   eth_side, side_col="is_buyer_maker")
+
+        if cross_ex_data:
+            for ex in ("bybit", "okx", "bitget", "gateio"):
+                if ex not in cross_ex_data:
+                    continue
+                ex_ts, ex_signed = cross_ex_data[ex]
+                if len(ex_ts) == 0:
+                    continue
+                cp = merged / f"{ex}.parquet"
+                qty = np.abs(ex_signed)
+                is_seller = ex_signed < 0
+                _write_trades_parquet(cp, ex_ts,
+                                       np.zeros(len(ex_ts), dtype=np.float64),
+                                       qty, is_seller, side_col="is_seller")
+                paths[f"{ex}_path"] = cp
+
+        logger.info("[trainer] merged streams written to %s", merged)
+        return paths
+
+    def _run_rust_features(self, paths: dict, indices: np.ndarray) -> np.ndarray:
+        """Phase 2: invoke Rust feature_builder via paths. Caller should have
+        already dropped the heavy Python arrays + gc.collect() before this.
+        """
+        from src import rust_bridge
+        return rust_bridge.compute_features_from_paths(
+            indices=indices, **{k: v for k, v in paths.items() if v is not None},
+        )
 
     def _calc_features_batch(
         self,
