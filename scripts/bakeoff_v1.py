@@ -30,6 +30,8 @@ from src.models import (  # noqa: E402
     HybridMambaAttnClassifier, HybridMambaAttnConfig,
     TCNClassifier, TCNConfig,
     ChronosClassifier, ChronosAdapterConfig,
+    TimesFMClassifier, TimesFMAdapterConfig,
+    MOMENTClassifier, MOMENTAdapterConfig,
 )
 from src.models.train import train_generic  # noqa: E402
 from src.teacher import MultiStreamTransformer, TeacherConfig  # noqa: E402
@@ -78,6 +80,16 @@ def build_factory(arch: str):
             return ChronosClassifier(num_feat=num_feat, cfg=ChronosAdapterConfig(
                 model_name="amazon/chronos-bolt-base", freeze_encoder=True))
         return _f, "chronos_bolt_base"
+    if arch == "timesfm_2p5_200m":
+        def _f(num_feat: int):
+            return TimesFMClassifier(num_feat=num_feat,
+                                      cfg=TimesFMAdapterConfig(freeze_encoder=True))
+        return _f, "timesfm_2p5_200m"
+    if arch == "moment_large":
+        def _f(num_feat: int):
+            return MOMENTClassifier(num_feat=num_feat,
+                                     cfg=MOMENTAdapterConfig(freeze_encoder=True))
+        return _f, "moment_large"
     # "patchtst_pretrained:PATH" — loads SSL-pretrained backbone
     if arch.startswith("patchtst_pretrained:"):
         weight_path = arch.split(":", 1)[1]

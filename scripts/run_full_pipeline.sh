@@ -72,7 +72,9 @@ fi
 BAKEOFF_DIR="${RUNS}/bakeoff_v2"
 if [[ ! -f "${BAKEOFF_DIR}/leaderboard.json" ]]; then
     log "STAGE 3: bake-off (${EPOCHS} epochs per arch)"
-    ARCHS=(transformer patchtst mamba tcn chronos_bolt_tiny)
+    ARCHS=(transformer patchtst mamba hybrid_mamba_attn tcn
+           chronos_bolt_tiny chronos_bolt_small chronos_bolt_base
+           timesfm_2p5_200m moment_large)
     if [[ -n "${SSL_WEIGHTS}" && -f "${SSL_WEIGHTS}" ]]; then
         ARCHS+=("patchtst_pretrained:${SSL_WEIGHTS}")
     fi

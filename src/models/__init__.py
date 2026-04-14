@@ -12,6 +12,8 @@ from .mamba import MambaClassifier, MambaModelConfig
 from .hybrid_mamba_attn import HybridMambaAttnClassifier, HybridMambaAttnConfig
 from .tcn import TCNClassifier, TCNConfig
 from .chronos_adapter import ChronosClassifier, ChronosAdapterConfig
+from .timesfm_adapter import TimesFMClassifier, TimesFMAdapterConfig
+from .moment_adapter import MOMENTClassifier, MOMENTAdapterConfig
 from .meta_label import (
     MetaConfig, build_meta_dataset, train_meta, combine as meta_combine,
 )
@@ -23,6 +25,8 @@ __all__ = [
     "HybridMambaAttnClassifier", "HybridMambaAttnConfig",
     "TCNClassifier", "TCNConfig",
     "ChronosClassifier", "ChronosAdapterConfig",
+    "TimesFMClassifier", "TimesFMAdapterConfig",
+    "MOMENTClassifier", "MOMENTAdapterConfig",
     "MetaConfig", "build_meta_dataset", "train_meta", "meta_combine",
     "StackerConfig", "train_stacker", "predict_stacked", "stack_inputs",
 ]
