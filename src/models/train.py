@@ -44,13 +44,26 @@ class LOBDataset(Dataset):
 
     def __getitem__(self, idx: int):
         # np.array() forces a RAM copy of the 12 KB slice out of the memmap.
-        lob = np.array(self.X_lob[idx], dtype=np.float32)
-        feat = np.array(self.X_feat[idx], dtype=np.float32)
+        # Defensive nan_to_num on LOB: a single NaN in a batch kills the loss
+        # and collapses training. The cache cleaner (scripts/clean_cache.py)
+        # should have scrubbed these, but keep the guard so a regression in
+        # cache building doesn't silently destroy a multi-hour bake-off.
+        lob = np.nan_to_num(
+            np.array(self.X_lob[idx], dtype=np.float32),
+            nan=0.0, posinf=0.0, neginf=0.0,
+        )
+        feat = np.nan_to_num(
+            np.array(self.X_feat[idx], dtype=np.float32),
+            nan=0.0, posinf=0.0, neginf=0.0,
+        )
+        pnl = float(self.pnl[idx])
+        if not np.isfinite(pnl):
+            pnl = 0.0
         return (
             torch.from_numpy(lob),
             torch.from_numpy(feat),
             torch.tensor(int(self.y[idx]), dtype=torch.long),
-            torch.tensor(float(self.pnl[idx]), dtype=torch.float32),
+            torch.tensor(pnl, dtype=torch.float32),
         )
 
 
