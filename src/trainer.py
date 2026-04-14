@@ -41,7 +41,7 @@ SIM_HORIZON = 1300     # forward ticks handed to `live_sim.simulate_trade`
                        #   - 80 safety margin for rounding
                        # `simulate_trade` clamps gracefully to the path
                        # length, so shorter slices degrade to timeout_market.
-CACHE_SCHEMA_VERSION = "v2"  # bumped on the label rewrite to invalidate
+CACHE_SCHEMA_VERSION = "v3"  # v3: persist mid_paths + entry_long/short for live_sim grid backend
                              # all old `samples_*h_*` files — v1 labels
                              # used fixed 0.20/0.10/60 s with no filters.
 
@@ -271,6 +271,12 @@ class Trainer:
         y_path = cache_dir / f"samples_{key}_y.npy"
         mid_path = cache_dir / f"samples_{key}_mid.npy"
         pnl_path = cache_dir / f"samples_{key}_pnl.npy"
+        # v3 additions — optional live_sim grid inputs. Cache-HIT path still
+        # returns the 5-tuple (back-compat); grid scripts reach for these
+        # sidecar arrays by path themselves.
+        mid_paths_path = cache_dir / f"samples_{key}_mid_paths.npy"
+        entry_long_path = cache_dir / f"samples_{key}_entry_long.npy"
+        entry_short_path = cache_dir / f"samples_{key}_entry_short.npy"
 
         all_paths = (lob_path, feat_path, y_path, mid_path, pnl_path)
 
@@ -295,18 +301,28 @@ class Trainer:
         if evicted:
             logger.info("Evicted %d stale cache files", evicted)
 
-        X_lob, X_feat, y, mid, target_pnl = self.build_samples(
+        build_result = self.build_samples(
             hours=hours, lob_output_path=lob_path,
+            return_sim_inputs=True,
         )
+        X_lob, X_feat, y, mid, target_pnl = build_result[:5]
         np.save(str(feat_path), X_feat)
         np.save(str(y_path), y)
         np.save(str(mid_path), mid)
         np.save(str(pnl_path), target_pnl)
+        if len(build_result) >= 8 and build_result[5] is not None:
+            mid_paths_arr, entry_long_arr, entry_short_arr = build_result[5:8]
+            np.save(str(mid_paths_path), mid_paths_arr)
+            np.save(str(entry_long_path), entry_long_arr)
+            np.save(str(entry_short_path), entry_short_arr)
+            logger.info("Saved live_sim grid inputs: mid_paths=%s entry_long=%s",
+                        mid_paths_arr.shape, entry_long_arr.shape)
         return X_lob, X_feat, y, mid, target_pnl
 
     def build_samples(
         self, hours: int = 24, lob_output_path: Path | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        return_sim_inputs: bool = False,
+    ) -> tuple:
         """Build (X_lob, X_features, y, mid_prices, target_pnl) from raw data.
 
         Loads data, parses into numpy, frees DataFrames immediately to save
@@ -882,6 +898,15 @@ class Trainer:
         target_pnl = pnl_full[mask]
         sample_mids = sample_mids[mask]
 
+        # Optionally keep the per-sample live_sim inputs so the grid backend
+        # can replay trades with different TP/SL/partial/trailing/time_exit
+        # settings later. Stored *aligned to the final post-mask sample set*.
+        if return_sim_inputs:
+            keep_indices_in_kept = np.isin(kept_indices, np.where(mask)[0])
+            sim_mid_paths = mid_paths_arr[keep_indices_in_kept]
+            sim_entry_long = kept_entry_long[keep_indices_in_kept]
+            sim_entry_short = kept_entry_short[keep_indices_in_kept]
+
         # Log label + exit-reason distribution.
         counts = {
             UP: int((y == UP).sum()),
@@ -909,6 +934,9 @@ class Trainer:
         )[:6]
         logger.info("Top live_sim exit reasons: %s", top_reasons)
 
+        if return_sim_inputs:
+            return (X_lob, X_feat, y, sample_mids, target_pnl,
+                    sim_mid_paths, sim_entry_long, sim_entry_short)
         return X_lob, X_feat, y, sample_mids, target_pnl
 
     def _save_streams_for_rust(
