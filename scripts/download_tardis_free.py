@@ -53,8 +53,8 @@ TARGETS = [
     ("bybit",             "ETHUSDT",         "trades"),
     ("okex-swap",         "BTC-USDT-SWAP",   "trades"),
     ("okex-swap",         "ETH-USDT-SWAP",   "trades"),
-    ("bitget",            "BTCUSDT_UMCBL",   "trades"),   # USDT-M futures
-    ("bitget",            "ETHUSDT_UMCBL",   "trades"),
+    ("bitget-futures",    "BTCUSDT",         "trades"),   # USDT-M perp, since 2024-11-08
+    ("bitget-futures",    "ETHUSDT",         "trades"),
     ("gate-io-futures",   "BTC_USDT",        "trades"),
     ("gate-io-futures",   "ETH_USDT",        "trades"),
 ]
@@ -111,7 +111,9 @@ def _download_one(exchange: str, symbol: str, dtype: str, d: date,
             tmp.rename(out_path)
             return ("ok", str(out_path), total)
         except urllib.error.HTTPError as e:
-            if e.code == 404:
+            # 404 = file not published; 400 = dataset not available for this date
+            # (symbol existed but outside availableSince window). Both non-retryable.
+            if e.code in (400, 404):
                 tmp.unlink(missing_ok=True)
                 return ("missing", url, 0)
             if attempt == retries - 1:

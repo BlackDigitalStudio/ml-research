@@ -136,41 +136,23 @@ class Trainer:
 
         # Per-file arrays accumulated then concatenated once.
         ts_parts, bp_parts, bq_parts, ap_parts, aq_parts = [], [], [], [], []
-        n_legacy = n_flat = 0
+        n_flat = 0
 
         for f in files:
             t = pq.read_table(f)
             names = set(t.schema.names)
-            if {"bid_prices", "bid_qtys", "ask_prices", "ask_qtys"} <= names:
-                t = t.combine_chunks()
-                ts_parts.append(t["timestamp"].chunk(0).to_numpy(zero_copy_only=True).astype(np.int64, copy=False))
-                bp_parts.append(t["bid_prices"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20).astype(np.float64, copy=False))
-                bq_parts.append(t["bid_qtys"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20).astype(np.float32, copy=False))
-                ap_parts.append(t["ask_prices"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20).astype(np.float64, copy=False))
-                aq_parts.append(t["ask_qtys"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20).astype(np.float32, copy=False))
-                n_flat += 1
-            elif {"bids", "asks"} <= names:
-                # Legacy nested — convert per-row in numpy. Pay one-time cost
-                # but materialize directly into target arrays (no Python tuples).
-                df = t.to_pandas()
-                m = len(df)
-                ts_parts.append(df["timestamp"].values.astype(np.int64, copy=False))
-                bp = np.zeros((m, 20), dtype=np.float64)
-                bq = np.zeros((m, 20), dtype=np.float32)
-                ap = np.zeros((m, 20), dtype=np.float64)
-                aq = np.zeros((m, 20), dtype=np.float32)
-                bids_raw = df["bids"].values
-                asks_raw = df["asks"].values
-                for i in range(m):
-                    for j, (p, q) in enumerate(bids_raw[i][:20]):
-                        bp[i, j], bq[i, j] = p, q
-                    for j, (p, q) in enumerate(asks_raw[i][:20]):
-                        ap[i, j], aq[i, j] = p, q
-                bp_parts.append(bp); bq_parts.append(bq)
-                ap_parts.append(ap); aq_parts.append(aq)
-                n_legacy += 1
-            else:
-                raise ValueError(f"{f.name}: unknown depth schema (cols={sorted(names)})")
+            if not {"bid_prices", "bid_qtys", "ask_prices", "ask_qtys"} <= names:
+                raise ValueError(
+                    f"{f.name}: non-flat depth schema (cols={sorted(names)}). "
+                    f"Run scripts/migrate_legacy_depth.py to convert legacy files."
+                )
+            t = t.combine_chunks()
+            ts_parts.append(t["timestamp"].chunk(0).to_numpy(zero_copy_only=True).astype(np.int64, copy=False))
+            bp_parts.append(t["bid_prices"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20).astype(np.float64, copy=False))
+            bq_parts.append(t["bid_qtys"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20).astype(np.float32, copy=False))
+            ap_parts.append(t["ask_prices"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20).astype(np.float64, copy=False))
+            aq_parts.append(t["ask_qtys"].chunk(0).values.to_numpy(zero_copy_only=True).reshape(-1, 20).astype(np.float32, copy=False))
+            n_flat += 1
 
         ts = np.concatenate(ts_parts)
         bp = np.concatenate(bp_parts, axis=0)
@@ -183,8 +165,8 @@ class Trainer:
             ts = ts[order]; bp = bp[order]; bq = bq[order]
             ap = ap[order]; aq = aq[order]
         logger.info(
-            "Loaded %d depth snapshots (%.1f hours, legacy=%d files, flat=%d files)",
-            len(ts), len(ts) / 36000, n_legacy, n_flat,
+            "Loaded %d depth snapshots (%.1f hours, flat=%d files)",
+            len(ts), len(ts) / 36000, n_flat,
         )
         return ts, bp, bq, ap, aq
 
@@ -1031,7 +1013,7 @@ class Trainer:
         """Compute all NUM_FEATURES features for all sample indices at once."""
         from src.features import NUM_FEATURES
 
-        # --- Rust fast-path (opt-in via SCALPER_USE_RUST=1) ---
+        # --- Rust fast-path (default; opt out via SCALPER_USE_RUST=0) ---
         from src import rust_bridge
         if rust_bridge.use_rust():
             return rust_bridge.compute_features(

@@ -1,16 +1,22 @@
 """Bridge module — invokes Rust `feature_builder` / `sim_labels` from Python.
 
 Drop-in replacements for `Trainer._calc_features_batch` and the LONG/SHORT
-forward-sim loop in `Trainer.build_samples`. Enable via env var:
+forward-sim loop in `Trainer.build_samples`. The Rust path is the
+**default** — Python is kept only for parity debugging and must be opted
+into explicitly:
 
-    export SCALPER_USE_RUST=1
+    export SCALPER_USE_RUST=0   # disable Rust (parity/debug only)
 
-The binaries must be built (`cargo build --release` in rust_ingest/). This
-module is parity-validated against the Python reference; see:
+Binaries must be built (`cargo build --release` in rust_ingest/). If they
+are missing while Rust is active (the default), use_rust() raises
+RustBinariesMissing rather than silently falling back — silent fallback
+previously wasted hours of training on the slow path.
+
+Parity is validated by:
     scripts/parity_rust_features.py
     scripts/parity_rust_live_sim.py
 
-Contract: the Rust path produces byte-identical outputs (to f32 precision)
+Contract: Rust path produces byte-identical outputs (to f32 precision)
 for all 34 features and byte-identical labels + target_pnl for live_sim.
 Any divergence is a bug — do not silently fall through.
 """
@@ -31,11 +37,34 @@ _FEATURE_BIN = _REPO / "rust_ingest" / "target" / "release" / "feature_builder"
 _SIM_BIN = _REPO / "rust_ingest" / "target" / "release" / "sim_labels"
 
 
+class RustBinariesMissing(RuntimeError):
+    """Raised when Rust is active (default) but binaries are not built."""
+
+
+def _rust_enabled() -> bool:
+    """Default: Rust ON. Opt out with SCALPER_USE_RUST in {0,false,no,off}."""
+    v = os.environ.get("SCALPER_USE_RUST", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
 def use_rust() -> bool:
-    """Return True iff the Rust path is enabled AND binaries exist."""
-    if os.environ.get("SCALPER_USE_RUST", "").lower() not in ("1", "true", "yes"):
+    """Return True when the Rust path should be used.
+
+    Raises RustBinariesMissing if Rust is active but binaries are absent —
+    silent Python fallback is considered a bug (can double training time
+    without anyone noticing).
+    """
+    if not _rust_enabled():
         return False
-    return _FEATURE_BIN.exists() and _SIM_BIN.exists()
+    missing = [p for p in (_FEATURE_BIN, _SIM_BIN) if not p.exists()]
+    if missing:
+        raise RustBinariesMissing(
+            "Rust pipeline is the default but binaries are missing: "
+            f"{[str(p) for p in missing]}. "
+            "Build with: cd rust_ingest && cargo build --release. "
+            "Or opt out (parity/debug only): SCALPER_USE_RUST=0"
+        )
+    return True
 
 
 def _write_depth_parquet(path: Path, depth_ts, bid_prices, bid_qtys, ask_prices, ask_qtys,

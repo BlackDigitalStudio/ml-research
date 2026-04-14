@@ -20,6 +20,67 @@ logger = logging.getLogger(__name__)
 FLUSH_INTERVAL = 60  # flush to disk every 60 seconds
 RETENTION_HOURS = 72
 PARTS_SUBDIR = ".parts"
+DEPTH_LEVELS = 20
+
+
+def _snapshot_to_flat_row(snapshot) -> dict:
+    """Convert an OrderBook Snapshot to flat columnar row.
+
+    Snapshot.bids / .asks are numpy arrays (DEPTH_LEVELS, 2) already sorted
+    and zero-padded (qty=0 for unused slots). We copy directly into four
+    fixed-length f64 vectors so downstream Arrow can store them as
+    FixedSizeList<f64, 20> with zero post-processing.
+    """
+    bids = np.asarray(snapshot.bids, dtype=np.float64)
+    asks = np.asarray(snapshot.asks, dtype=np.float64)
+    bp = np.zeros(DEPTH_LEVELS, dtype=np.float64)
+    bq = np.zeros(DEPTH_LEVELS, dtype=np.float64)
+    ap = np.zeros(DEPTH_LEVELS, dtype=np.float64)
+    aq = np.zeros(DEPTH_LEVELS, dtype=np.float64)
+    n_b = min(DEPTH_LEVELS, bids.shape[0])
+    n_a = min(DEPTH_LEVELS, asks.shape[0])
+    if n_b:
+        bp[:n_b] = bids[:n_b, 0]
+        bq[:n_b] = bids[:n_b, 1]
+    if n_a:
+        ap[:n_a] = asks[:n_a, 0]
+        aq[:n_a] = asks[:n_a, 1]
+    return {
+        "timestamp": int(snapshot.timestamp),
+        "bid_prices": bp,
+        "bid_qtys": bq,
+        "ask_prices": ap,
+        "ask_qtys": aq,
+    }
+
+
+def _build_flat_depth_table(rows: list[dict]) -> pa.Table:
+    """Assemble FixedSizeList<f64,20> depth table from flat rows."""
+    n = len(rows)
+    ts = np.empty(n, dtype=np.int64)
+    bp = np.empty((n, DEPTH_LEVELS), dtype=np.float64)
+    bq = np.empty((n, DEPTH_LEVELS), dtype=np.float64)
+    ap = np.empty((n, DEPTH_LEVELS), dtype=np.float64)
+    aq = np.empty((n, DEPTH_LEVELS), dtype=np.float64)
+    for i, r in enumerate(rows):
+        ts[i] = r["timestamp"]
+        bp[i] = r["bid_prices"]
+        bq[i] = r["bid_qtys"]
+        ap[i] = r["ask_prices"]
+        aq[i] = r["ask_qtys"]
+
+    def _fsl(flat: np.ndarray) -> pa.Array:
+        return pa.FixedSizeListArray.from_arrays(
+            pa.array(flat.reshape(-1), type=pa.float64()), DEPTH_LEVELS
+        )
+
+    return pa.table({
+        "timestamp":  pa.array(ts, type=pa.int64()),
+        "bid_prices": _fsl(bp),
+        "bid_qtys":   _fsl(bq),
+        "ask_prices": _fsl(ap),
+        "ask_qtys":   _fsl(aq),
+    })
 
 
 class Recorder:
@@ -125,15 +186,7 @@ class Recorder:
 
     # ---- record_* (called from WS callbacks) ----
     def record_depth(self, snapshot) -> None:
-        bids = [(float(snapshot.bids[i, 0]), float(snapshot.bids[i, 1]))
-                for i in range(len(snapshot.bids)) if snapshot.bids[i, 1] > 0]
-        asks = [(float(snapshot.asks[i, 0]), float(snapshot.asks[i, 1]))
-                for i in range(len(snapshot.asks)) if snapshot.asks[i, 1] > 0]
-        self._depth_buf.append({
-            "timestamp": snapshot.timestamp,
-            "bids": bids,
-            "asks": asks,
-        })
+        self._depth_buf.append(_snapshot_to_flat_row(snapshot))
 
     def record_trade(self, data: dict) -> None:
         self._trade_buf.append({
@@ -184,15 +237,7 @@ class Recorder:
         })
 
     def record_eth_depth(self, snapshot) -> None:
-        bids = [(float(snapshot.bids[i, 0]), float(snapshot.bids[i, 1]))
-                for i in range(len(snapshot.bids)) if snapshot.bids[i, 1] > 0]
-        asks = [(float(snapshot.asks[i, 0]), float(snapshot.asks[i, 1]))
-                for i in range(len(snapshot.asks)) if snapshot.asks[i, 1] > 0]
-        self._eth_depth_buf.append({
-            "timestamp": snapshot.timestamp,
-            "bids": bids,
-            "asks": asks,
-        })
+        self._eth_depth_buf.append(_snapshot_to_flat_row(snapshot))
 
     def record_funding(self, data: dict) -> None:
         self._funding_buf.append({
@@ -299,14 +344,7 @@ class Recorder:
 
     def _write_depth_part(self, directory: Path, hour_key: str, rows: list[dict]) -> None:
         try:
-            timestamps = [r["timestamp"] for r in rows]
-            bids = [r["bids"] for r in rows]
-            asks = [r["asks"] for r in rows]
-            table = pa.table({
-                "timestamp": pa.array(timestamps, type=pa.int64()),
-                "bids": pa.array(bids),
-                "asks": pa.array(asks),
-            })
+            table = _build_flat_depth_table(rows)
             path = self._next_part_path(directory, hour_key)
             self._atomic_write(table, path)
         except Exception as e:
