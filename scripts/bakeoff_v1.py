@@ -108,6 +108,23 @@ def build_factory(arch: str):
             return MOMENTClassifier(num_feat=num_feat, cfg=MOMENTAdapterConfig(
                 freeze_encoder=True, multivariate_mode="full"))
         return _f, "moment_large_multi"
+    # UNFROZEN foundation — full fine-tune, +2-5% accuracy expected.
+    if arch == "chronos_base_unfrozen":
+        def _f(num_feat: int):
+            return ChronosClassifier(num_feat=num_feat, cfg=ChronosAdapterConfig(
+                model_name="amazon/chronos-bolt-base",
+                freeze_encoder=False, multivariate_mode="full"))
+        return _f, "chronos_base_unfrozen"
+    if arch == "timesfm_2p5_unfrozen":
+        def _f(num_feat: int):
+            return TimesFMClassifier(num_feat=num_feat, cfg=TimesFMAdapterConfig(
+                freeze_encoder=False, multivariate_mode="full"))
+        return _f, "timesfm_2p5_unfrozen"
+    if arch == "moment_large_unfrozen":
+        def _f(num_feat: int):
+            return MOMENTClassifier(num_feat=num_feat, cfg=MOMENTAdapterConfig(
+                freeze_encoder=False, multivariate_mode="full"))
+        return _f, "moment_large_unfrozen"
     # Time-LLM variants. Smaller default (0.5B) for CPU-dev; GPU uses 1.5B+.
     if arch == "time_llm_0p5b":
         def _f(num_feat: int):

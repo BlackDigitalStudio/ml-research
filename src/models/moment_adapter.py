@@ -57,14 +57,22 @@ class MOMENTClassifier(nn.Module):
         self.lob_time_dim = lob_time_dim
 
         from momentfm import MOMENTPipeline
+        # MOMENTPipeline has its own freeze flags — pass them through.
+        model_kwargs = {
+            "task_name": "embedding",
+            "freeze_encoder": cfg.freeze_encoder,
+            "freeze_embedder": cfg.freeze_encoder,
+            "freeze_head": False,
+        }
         self.backbone = MOMENTPipeline.from_pretrained(
-            cfg.model_repo,
-            model_kwargs={"task_name": "embedding"},
+            cfg.model_repo, model_kwargs=model_kwargs,
         )
         if cfg.freeze_encoder:
             for p in self.backbone.parameters():
                 p.requires_grad = False
             self.backbone.eval()
+        # else: MOMENTPipeline internal flags already enabled training;
+        # don't call .eval() so dropout/layernorm train properly.
 
         # Infer embedding dim by one dry forward
         with torch.no_grad():
