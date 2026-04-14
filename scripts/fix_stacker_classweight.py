@@ -142,8 +142,13 @@ def main() -> int:
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    print("\n>> Retraining balanced stacker on ALL val data (for downstream) ...")
-    w_all = balanced_sample_weight(y_val)
+    # IMPORTANT: stacker is trained on TRAIN split ONLY. A prior version
+    # fit on ALL of val → the balanced stacker's argmax memorised y
+    # everywhere, and every downstream walk-forward metric inherited the
+    # leak (wrong_direction count = 0 on tail). Keep this clean.
+    print(f"\n>> Fitting balanced stacker on TRAIN split only "
+          f"({n_tr}/{n}) ...")
+    w_tr = balanced_sample_weight(ytr)
     m_full = xgb.XGBClassifier(
         n_estimators=cfg.n_estimators, max_depth=cfg.max_depth,
         learning_rate=cfg.learning_rate, subsample=cfg.subsample,
@@ -152,11 +157,11 @@ def main() -> int:
         objective="multi:softprob", num_class=3,
         random_state=args.seed, n_jobs=-1, verbosity=0,
     )
-    # n_estimators pinned (no early-stop because no held-out) — keep cfg value.
-    m_full.fit(X_stack, y_val, sample_weight=w_all, verbose=False)
+    m_full.fit(Xtr, ytr, sample_weight=w_tr, verbose=False)
     m_full.save_model(str(out / "stacker_balanced.json"))
 
-    # Recompute stacker_soft_balanced over FULL val set.
+    # Inference on FULL series so downstream scripts have aligned softmax
+    # over all samples — honest because training used only Xtr/ytr.
     stacker_soft_balanced = m_full.predict_proba(X_stack).astype(np.float32)
 
     # Save alongside originals. Preserve every existing array.
