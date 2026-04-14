@@ -59,10 +59,15 @@ def train_generic(
     y_train_np = y[:n_train]
     cls_counts = np.bincount(y_train_np, minlength=3).astype(np.float64)
     cls_counts = np.maximum(cls_counts, 1.0)
-    cls_weights_np = len(y_train_np) / (3.0 * cls_counts)
+    # Softer class weights: sqrt of inverse frequency instead of raw inverse.
+    # Raw inverse made the model over-predict UP/DN on FL samples, collapsing
+    # precision to ~15% (bal_acc looked good by recall but trading was lossy).
+    # sqrt keeps some upweighting for minorities without destroying argmax.
+    inv_freq = len(y_train_np) / (3.0 * cls_counts)
+    cls_weights_np = np.sqrt(inv_freq)
     cls_weights = torch.tensor(cls_weights_np, dtype=torch.float32)
-    print(f"[{tag}] class weights: UP={cls_weights[0]:.3f} "
-          f"DOWN={cls_weights[1]:.3f} FLAT={cls_weights[2]:.3f}")
+    print(f"[{tag}] class weights (sqrt-inv-freq): "
+          f"UP={cls_weights[0]:.3f} DOWN={cls_weights[1]:.3f} FLAT={cls_weights[2]:.3f}")
 
     X_lob_train = torch.from_numpy(np.asarray(X_lob[:n_train]).copy()).float()
     X_feat_train = torch.from_numpy(X_feat[:n_train]).float()
@@ -94,8 +99,12 @@ def train_generic(
         return 0.5 * (1 + np.cos(np.pi * prog))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda)
 
-    best_bal = -1e9
+    # Early stop on F1-macro instead of bal_acc — balanced accuracy is averaged
+    # recall which is recall-only (ignores precision). For trading we need
+    # high precision on non-FLAT predictions; F1-macro balances both.
+    best_score = -1e9
     best_state: dict | None = None
+    best_metrics: dict = {}
     patience = early_stop_patience
     ce = nn.CrossEntropyLoss(weight=cls_weights.to(device), label_smoothing=label_smoothing)
 
@@ -121,11 +130,11 @@ def train_generic(
 
         model.eval()
         vl_loss = 0.0
-        correct_per_class = np.zeros(3, dtype=np.int64)
-        total_per_class = np.zeros(3, dtype=np.int64)
-        correct = 0
+        # Confusion matrix: cm[true, pred]
+        cm = np.zeros((3, 3), dtype=np.int64)
         total = 0
         reg_mae = 0.0
+        val_pnl_sum = 0.0
         with torch.no_grad():
             for xb, fb, yb, pb in val_ld:
                 xb, fb, yb, pb = xb.to(device), fb.to(device), yb.to(device), pb.to(device)
@@ -134,40 +143,72 @@ def train_generic(
                 loss_reg = F.smooth_l1_loss(reg, pb)
                 vl_loss += (loss_cls + reg_loss_weight * loss_reg).item() * xb.size(0)
                 pred = logits.argmax(dim=-1)
-                correct += (pred == yb).sum().item()
                 total += xb.size(0)
                 reg_mae += (reg - pb).abs().sum().item()
                 yb_np = yb.cpu().numpy()
                 pred_np = pred.cpu().numpy()
-                for cls in range(3):
-                    mask = (yb_np == cls)
-                    total_per_class[cls] += mask.sum()
-                    correct_per_class[cls] += ((pred_np == cls) & mask).sum()
+                for t in range(3):
+                    for p_ in range(3):
+                        cm[t, p_] += int(((yb_np == t) & (pred_np == p_)).sum())
+                # Trading pnl proxy: sum of target_pnl where model predicted
+                # non-FLAT (i.e., would take a trade). Sign handling: if model
+                # predicts correct direction, pnl_val is positive; wrong
+                # direction on true UP/DN → negative; predicting non-FLAT on
+                # true FL → pnl_val is negative (FL samples have pnl_val<0).
+                pb_np = pb.cpu().numpy()
+                signal = pred_np != 2  # FLAT = class 2
+                val_pnl_sum += float(pb_np[signal].sum())
+
         vl_loss /= total
-        val_acc = correct / total
+        val_acc = float(np.trace(cm) / total) if total > 0 else 0.0
         reg_mae /= total
-        recalls = np.where(total_per_class > 0,
-                           correct_per_class / np.maximum(total_per_class, 1), np.nan)
+        # Per-class recalls + precisions + F1
+        totals_per_class = cm.sum(axis=1)  # true counts
+        preds_per_class = cm.sum(axis=0)   # predicted counts
+        diag = np.diag(cm)
+        recalls = np.where(totals_per_class > 0,
+                           diag / np.maximum(totals_per_class, 1), np.nan)
+        precisions = np.where(preds_per_class > 0,
+                              diag / np.maximum(preds_per_class, 1), np.nan)
+        f1 = np.where((precisions + recalls) > 0,
+                      2 * precisions * recalls / np.maximum(precisions + recalls, 1e-12),
+                      0.0)
         bal_acc = float(np.nanmean(recalls))
+        f1_macro = float(np.nanmean(f1))
+        # Precision on non-FLAT predictions combined (key for trading)
+        nonflat_pred = preds_per_class[0] + preds_per_class[1]
+        nonflat_correct = diag[0] + diag[1]
+        precision_nonflat = float(nonflat_correct / max(nonflat_pred, 1))
 
         history.append({
             "epoch": epoch + 1, "tr_loss": tr_loss, "vl_loss": vl_loss,
-            "val_acc": val_acc, "bal_acc": bal_acc, "reg_mae": reg_mae,
+            "val_acc": val_acc, "bal_acc": bal_acc,
+            "f1_macro": f1_macro,
+            "precision_up": float(precisions[0]), "precision_dn": float(precisions[1]),
+            "precision_nonflat": precision_nonflat,
+            "val_pnl_sum": val_pnl_sum, "reg_mae": reg_mae,
         })
         print(f"[{tag}] epoch {epoch + 1:3d}/{epochs} "
               f"tr={tr_loss:.4f} vl={vl_loss:.4f} "
-              f"val_acc={val_acc:.4f} bal_acc={bal_acc:.4f} "
-              f"recalls=UP{recalls[0]:.2f}/DN{recalls[1]:.2f}/FL{recalls[2]:.2f} "
-              f"reg_mae={reg_mae:.4f}")
+              f"acc={val_acc:.3f} bal={bal_acc:.3f} F1={f1_macro:.3f} "
+              f"prec[UP={precisions[0]:.2f}/DN={precisions[1]:.2f}/nonFL={precision_nonflat:.2f}] "
+              f"rec[UP={recalls[0]:.2f}/DN={recalls[1]:.2f}/FL={recalls[2]:.2f}] "
+              f"pnl={val_pnl_sum:+.1f}")
 
-        if bal_acc > best_bal + 1e-4:
-            best_bal = bal_acc
+        # Early stop: use F1-macro (balances precision + recall across classes).
+        # This selects checkpoints where UP/DN are accurately predicted AND
+        # NOT over-predicted into FL territory. bal_acc alone was fooled by
+        # recall-heavy models with catastrophic precision.
+        score = f1_macro
+        if score > best_score + 1e-4:
+            best_score = score
+            best_metrics = history[-1].copy()
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             patience = early_stop_patience
         else:
             patience -= 1
             if patience <= 0:
-                print(f"[{tag}] early stop at epoch {epoch + 1}")
+                print(f"[{tag}] early stop at epoch {epoch + 1}  (best F1={best_score:.4f})")
                 break
 
     if best_state is not None:
@@ -184,7 +225,9 @@ def train_generic(
     val_soft_np = torch.cat(val_softs, dim=0).numpy()
 
     return model, {
-        "best_bal_acc": best_bal,
+        "best_f1_macro": best_score,
+        "best_bal_acc": best_metrics.get("bal_acc", 0.0),
+        "best_metrics": best_metrics,
         "params_M": n_params / 1e6,
         "history": history,
         "tag": tag,
