@@ -32,6 +32,9 @@ class TimesFMAdapterConfig:
     dropout: float = 0.15
     patch_len: int = 32       # TimesFM 2.5 default
     context_len: int = 512    # must be multiple of patch_len
+    # Channel-independent multivariate: run encoder over each LOB channel
+    # separately, then mean-pool across channels. None = univariate proxy.
+    multivariate_mode: str | None = None
 
     # Training
     batch_size: int = 128
@@ -118,11 +121,22 @@ class TimesFMClassifier(nn.Module):
         )
 
     def _lob_to_series(self, lob: torch.Tensor) -> torch.Tensor:
-        """Reduce (B, 3, 20, T) → (B, T) — top-level order imbalance proxy."""
-        bid_l1 = lob[:, 0, 0, :]
-        ask_l1 = lob[:, 1, 0, :]
-        tot = bid_l1 + ask_l1 + 1e-6
-        return (bid_l1 - ask_l1) / tot
+        """Project (B, 3, 20, T) → (B, C, T). C=1 default or 20/60 multivariate."""
+        if self.cfg.multivariate_mode is None:
+            bid_l1 = lob[:, 0, 0, :]
+            ask_l1 = lob[:, 1, 0, :]
+            tot = bid_l1 + ask_l1 + 1e-6
+            return ((bid_l1 - ask_l1) / tot).unsqueeze(1)          # (B, 1, T)
+        if self.cfg.multivariate_mode == "all_levels":
+            bid_vol = lob[:, 0, :5, :]
+            ask_vol = lob[:, 1, :5, :]
+            tot = bid_vol + ask_vol + 1e-6
+            imb = (bid_vol - ask_vol) / tot
+            return torch.cat([bid_vol, ask_vol, imb, imb], dim=1)
+        if self.cfg.multivariate_mode == "full":
+            B, _, _, T = lob.shape
+            return lob.reshape(B, 60, T)
+        raise ValueError(f"unknown multivariate_mode={self.cfg.multivariate_mode}")
 
     def _encode(self, series: torch.Tensor) -> torch.Tensor:
         """Run (B, T) → encoder → (B, d_model) pooled."""
@@ -145,9 +159,13 @@ class TimesFMClassifier(nn.Module):
         return h.mean(dim=1)                       # (B, d_model)
 
     def forward(self, lob: torch.Tensor, feat: torch.Tensor):
-        series = self._lob_to_series(lob)
-        lob_pool = self._encode(series)
-        lob_tok = self.lob_proj(lob_pool)
+        series = self._lob_to_series(lob)                # (B, C, T)
+        B, C, T = series.shape
+        # Channel-independent: run TimesFM encoder per channel, mean-pool.
+        flat = series.reshape(B * C, T)
+        pooled = self._encode(flat)                      # (B*C, d_model)
+        pooled = pooled.view(B, C, -1).mean(dim=1)       # (B, d_model)
+        lob_tok = self.lob_proj(pooled)
         feat_tok = self.feat_proj(feat)
         fused = torch.cat([lob_tok, feat_tok], dim=-1)
         logits = self.cls_head(fused)

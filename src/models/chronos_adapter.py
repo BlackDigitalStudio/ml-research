@@ -52,6 +52,12 @@ class ChronosAdapterConfig:
     d_proj: int = 192                    # projection dim for head
     head_hidden: int = 256
     dropout: float = 0.15
+    # Multivariate path: iterate channel-independently through encoder and
+    # aggregate across channels. Trades throughput for signal quality.
+    # None = single-channel (top-level imbalance only, legacy behaviour).
+    # "all_levels" = bid/ask level-0 ... level-4 prices + qtys (20 channels).
+    # "full" = all 80 LOB channels.
+    multivariate_mode: str | None = None
 
     # Training knobs (same interface as other bake-off models)
     batch_size: int = 128
@@ -141,22 +147,31 @@ class ChronosClassifier(nn.Module):
         )
 
     def _lob_to_series(self, lob: torch.Tensor) -> torch.Tensor:
-        """Reduce (B, 3, 20, T) → (B, T) univariate signal for Chronos.
+        """Reduce (B, 3, 20, T) → (B, C, T) where C depends on multivariate_mode.
 
-        We use the sum of best-bid and best-ask L1 volumes as a proxy
-        signal (not prices — current X_lob cache doesn't carry prices).
-        This is a KNOWN LIMITATION — for real fine-tuning we need to
-        rebuild the sample cache to carry mid prices in X_lob. The
-        encoder still sees structured time-series; whether it extracts
-        useful features from volume dynamics is the empirical question
-        this adapter is meant to answer.
+        C=1 (default): top-level imbalance — smallest info, fastest.
+        C=20 ("all_levels"): bid_vol[0..4] + ask_vol[0..4] + bid_imb[0..4]
+              + ask_imb[0..4] — the 5 best levels of each side with
+              derived imbalance channels.
+        C=60 ("full"): all LOB channels 3×20 (bid_vol, ask_vol, trade_flow)
+              stacked. Maximum signal.
         """
-        # lob channels: 0=bid_vol, 1=ask_vol, 2=trade_flow (from trainer.py)
-        bid_l1 = lob[:, 0, 0, :]  # (B, T)
-        ask_l1 = lob[:, 1, 0, :]
-        # Imbalance as the signal (bounded, informative)
-        tot = bid_l1 + ask_l1 + 1e-6
-        return (bid_l1 - ask_l1) / tot
+        if self.cfg.multivariate_mode is None:
+            bid_l1 = lob[:, 0, 0, :]
+            ask_l1 = lob[:, 1, 0, :]
+            tot = bid_l1 + ask_l1 + 1e-6
+            return ((bid_l1 - ask_l1) / tot).unsqueeze(1)           # (B, 1, T)
+        if self.cfg.multivariate_mode == "all_levels":
+            # First 5 levels bid + ask + per-level imbalance.
+            bid_vol = lob[:, 0, :5, :]                              # (B, 5, T)
+            ask_vol = lob[:, 1, :5, :]
+            tot = bid_vol + ask_vol + 1e-6
+            imb = (bid_vol - ask_vol) / tot
+            return torch.cat([bid_vol, ask_vol, imb, imb], dim=1)   # (B, 20, T)
+        if self.cfg.multivariate_mode == "full":
+            B, _, _, T = lob.shape
+            return lob.reshape(B, 60, T)                             # (B, 60, T)
+        raise ValueError(f"unknown multivariate_mode={self.cfg.multivariate_mode}")
 
     def _encode_chronos(self, series: torch.Tensor) -> torch.Tensor:
         """Run series (B, T) through Chronos encoder → pooled (B, d_chronos)."""
@@ -208,11 +223,16 @@ class ChronosClassifier(nn.Module):
     def forward(
         self, lob: torch.Tensor, feat: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        series = self._lob_to_series(lob)
-        lob_pool = self._encode_chronos(series)          # (B, d_chronos)
-        lob_tok = self.lob_proj(lob_pool)                # (B, d_proj)
-        feat_tok = self.feat_proj(feat)                  # (B, d_proj)
-        fused = torch.cat([lob_tok, feat_tok], dim=-1)   # (B, 2*d_proj)
+        series = self._lob_to_series(lob)                # (B, C, T)
+        B, C, T = series.shape
+        # Channel-independent encoding: flatten channel into batch dim,
+        # run encoder once, then reshape + mean-pool across channels.
+        flat = series.reshape(B * C, T)
+        pooled = self._encode_chronos(flat)              # (B*C, d_chronos)
+        pooled = pooled.view(B, C, -1).mean(dim=1)       # (B, d_chronos)
+        lob_tok = self.lob_proj(pooled)
+        feat_tok = self.feat_proj(feat)
+        fused = torch.cat([lob_tok, feat_tok], dim=-1)
         logits = self.cls_head(fused)
         reg = self.reg_head(fused).squeeze(-1)
         return logits, reg

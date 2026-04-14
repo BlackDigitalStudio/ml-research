@@ -29,6 +29,10 @@ class MOMENTAdapterConfig:
     dropout: float = 0.15
     context_len: int = 512      # MOMENT native context
     reduction: str = "mean"     # mean | concat
+    # Multivariate: None = top-level imbalance only (C=1).
+    # "all_levels" = best 5 levels × bid/ask/imb (C=20).
+    # "full" = full 60 LOB channels natively multivariate.
+    multivariate_mode: str | None = None
 
     # Training
     batch_size: int = 128
@@ -97,26 +101,39 @@ class MOMENTClassifier(nn.Module):
         )
 
     def _lob_to_series(self, lob: torch.Tensor) -> torch.Tensor:
-        """(B, 3, 20, T) → (B, 1, T) univariate (order imbalance)."""
-        bid_l1 = lob[:, 0, 0, :]
-        ask_l1 = lob[:, 1, 0, :]
-        tot = bid_l1 + ask_l1 + 1e-6
-        signal = (bid_l1 - ask_l1) / tot          # (B, T)
-        # MOMENT expects (B, 1, T) — univariate channel.
-        return signal.unsqueeze(1)
+        """Project (B, 3, 20, T) → (B, C, T). MOMENT natively multivariate."""
+        if self.cfg.multivariate_mode is None:
+            bid_l1 = lob[:, 0, 0, :]
+            ask_l1 = lob[:, 1, 0, :]
+            tot = bid_l1 + ask_l1 + 1e-6
+            return ((bid_l1 - ask_l1) / tot).unsqueeze(1)           # (B, 1, T)
+        if self.cfg.multivariate_mode == "all_levels":
+            bid_vol = lob[:, 0, :5, :]
+            ask_vol = lob[:, 1, :5, :]
+            tot = bid_vol + ask_vol + 1e-6
+            imb = (bid_vol - ask_vol) / tot
+            return torch.cat([bid_vol, ask_vol, imb, imb], dim=1)   # (B, 20, T)
+        if self.cfg.multivariate_mode == "full":
+            B, _, _, T = lob.shape
+            return lob.reshape(B, 60, T)
+        raise ValueError(f"unknown multivariate_mode={self.cfg.multivariate_mode}")
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
-        """(B, 1, T) → MOMENT embed → (B, d_moment). Pads/truncates to ctx_len."""
+        """(B, C, T) → MOMENT embed → (B, d_moment) via channel-independent pool.
+        MOMENT accepts (B, C, T) natively but returns (B, C, D) — we mean over C.
+        """
         B, C, T = x.shape
         ctx = self.cfg.context_len
         if T < ctx:
-            # left-pad with zeros
             pad = torch.zeros(B, C, ctx - T, dtype=x.dtype, device=x.device)
             x = torch.cat([pad, x], dim=-1)
         elif T > ctx:
             x = x[..., -ctx:]
-        out = self.backbone.embed(x_enc=x, reduction=self.cfg.reduction)
-        return out.embeddings
+        # Run channel-independently (pools over C)
+        flat = x.reshape(B * C, 1, x.shape[-1])
+        out = self.backbone.embed(x_enc=flat, reduction=self.cfg.reduction)
+        emb = out.embeddings.view(B, C, -1).mean(dim=1)
+        return emb
 
     def forward(self, lob: torch.Tensor, feat: torch.Tensor):
         series = self._lob_to_series(lob)
