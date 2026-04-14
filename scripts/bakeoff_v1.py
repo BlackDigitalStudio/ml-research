@@ -32,6 +32,7 @@ from src.models import (  # noqa: E402
     ChronosClassifier, ChronosAdapterConfig,
     TimesFMClassifier, TimesFMAdapterConfig,
     MOMENTClassifier, MOMENTAdapterConfig,
+    TimeLLMClassifier, TimeLLMConfig,
 )
 from src.models.train import train_generic  # noqa: E402
 from src.teacher import MultiStreamTransformer, TeacherConfig  # noqa: E402
@@ -90,6 +91,39 @@ def build_factory(arch: str):
             return MOMENTClassifier(num_feat=num_feat,
                                      cfg=MOMENTAdapterConfig(freeze_encoder=True))
         return _f, "moment_large"
+    # Multivariate unlocked variants — feed full 60-channel LOB through encoder.
+    if arch == "chronos_base_multi":
+        def _f(num_feat: int):
+            return ChronosClassifier(num_feat=num_feat, cfg=ChronosAdapterConfig(
+                model_name="amazon/chronos-bolt-base",
+                freeze_encoder=True, multivariate_mode="full"))
+        return _f, "chronos_base_multi"
+    if arch == "timesfm_2p5_multi":
+        def _f(num_feat: int):
+            return TimesFMClassifier(num_feat=num_feat, cfg=TimesFMAdapterConfig(
+                freeze_encoder=True, multivariate_mode="full"))
+        return _f, "timesfm_2p5_multi"
+    if arch == "moment_large_multi":
+        def _f(num_feat: int):
+            return MOMENTClassifier(num_feat=num_feat, cfg=MOMENTAdapterConfig(
+                freeze_encoder=True, multivariate_mode="full"))
+        return _f, "moment_large_multi"
+    # Time-LLM variants. Smaller default (0.5B) for CPU-dev; GPU uses 1.5B+.
+    if arch == "time_llm_0p5b":
+        def _f(num_feat: int):
+            return TimeLLMClassifier(num_feat=num_feat, cfg=TimeLLMConfig(
+                llm_repo="Qwen/Qwen2.5-0.5B", apply_lora=True, use_4bit=False))
+        return _f, "time_llm_0p5b"
+    if arch == "time_llm_1p5b":
+        def _f(num_feat: int):
+            return TimeLLMClassifier(num_feat=num_feat, cfg=TimeLLMConfig(
+                llm_repo="Qwen/Qwen2.5-1.5B", apply_lora=True, use_4bit=False))
+        return _f, "time_llm_1p5b"
+    if arch == "time_llm_7b_4bit":
+        def _f(num_feat: int):
+            return TimeLLMClassifier(num_feat=num_feat, cfg=TimeLLMConfig(
+                llm_repo="Qwen/Qwen2.5-7B", apply_lora=True, use_4bit=True))
+        return _f, "time_llm_7b_4bit"
     # "patchtst_pretrained:PATH" — loads SSL-pretrained backbone
     if arch.startswith("patchtst_pretrained:"):
         weight_path = arch.split(":", 1)[1]

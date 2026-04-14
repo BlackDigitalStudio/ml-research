@@ -72,9 +72,20 @@ fi
 BAKEOFF_DIR="${RUNS}/bakeoff_v2"
 if [[ ! -f "${BAKEOFF_DIR}/leaderboard.json" ]]; then
     log "STAGE 3: bake-off (${EPOCHS} epochs per arch)"
+    # Default bake-off covers all ROI tiers:
+    #  Tier A (fully trainable, multivariate native):
+    #    transformer patchtst mamba hybrid_mamba_attn tcn
+    #  Tier B (foundation models, frozen + small head, univariate):
+    #    chronos_bolt_tiny chronos_bolt_small chronos_bolt_base
+    #    timesfm_2p5_200m moment_large
+    #  Tier C (foundation models UNLOCKED — full 60-channel input):
+    #    chronos_base_multi timesfm_2p5_multi moment_large_multi
+    #  Tier D (Time-LLM with LoRA fine-tuning):
+    #    time_llm_0p5b time_llm_1p5b   (larger 7B needs GPU 4bit)
     ARCHS=(transformer patchtst mamba hybrid_mamba_attn tcn
-           chronos_bolt_tiny chronos_bolt_small chronos_bolt_base
-           timesfm_2p5_200m moment_large)
+           chronos_bolt_base timesfm_2p5_200m moment_large
+           chronos_base_multi timesfm_2p5_multi moment_large_multi
+           time_llm_0p5b)
     if [[ -n "${SSL_WEIGHTS}" && -f "${SSL_WEIGHTS}" ]]; then
         ARCHS+=("patchtst_pretrained:${SSL_WEIGHTS}")
     fi

@@ -14,6 +14,13 @@ from .tcn import TCNClassifier, TCNConfig
 from .chronos_adapter import ChronosClassifier, ChronosAdapterConfig
 from .timesfm_adapter import TimesFMClassifier, TimesFMAdapterConfig
 from .moment_adapter import MOMENTClassifier, MOMENTAdapterConfig
+from .time_llm_adapter import TimeLLMClassifier, TimeLLMConfig
+from .multitask_heads import (
+    MultiTaskHeads, MultiTaskConfig, MultiTaskWrapper, multitask_loss,
+)
+from .regime_moe import (
+    RegimeMoE, RegimeMoEConfig, build_regime_moe, compute_regime_hard,
+)
 from .meta_label import (
     MetaConfig, build_meta_dataset, train_meta, combine as meta_combine,
 )
@@ -27,6 +34,9 @@ __all__ = [
     "ChronosClassifier", "ChronosAdapterConfig",
     "TimesFMClassifier", "TimesFMAdapterConfig",
     "MOMENTClassifier", "MOMENTAdapterConfig",
+    "TimeLLMClassifier", "TimeLLMConfig",
+    "MultiTaskHeads", "MultiTaskConfig", "MultiTaskWrapper", "multitask_loss",
+    "RegimeMoE", "RegimeMoEConfig", "build_regime_moe", "compute_regime_hard",
     "MetaConfig", "build_meta_dataset", "train_meta", "meta_combine",
     "StackerConfig", "train_stacker", "predict_stacked", "stack_inputs",
 ]
