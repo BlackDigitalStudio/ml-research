@@ -162,22 +162,31 @@ def main() -> int:
 
     stacker_soft = predict_stacked(stacker, primary_softs, X_feat=None, use_feats=False)
 
-    print(f"\n[recover] training meta-labeler...")
-    X_m, y_m, w_m = build_meta_dataset(
-        stacker_soft, y_val, pnl_val,
-        cfg=MetaConfig(pnl_threshold_pct=0.0),
-    )
-    meta, meta_m = train_meta(X_m, y_m, w_m, cfg=MetaConfig())
-    meta.save_model(str(out_dir / "meta.json"))
-    print(f"[recover] meta val_auc={meta_m['val_auc']:.4f} "
-          f"prec={meta_m['val_precision']:.4f} rec={meta_m['val_recall']:.4f}")
-
-    # Final output — mirrors bakeoff_v2.py's val_predictions.npz format
+    # Save val_predictions.npz BEFORE meta so we don't lose softmaxes if
+    # meta training fails (e.g., too few non-FL signals from collapsed
+    # stacker — happened on first 2-arch recovery run).
     np.savez(
         out_dir / "val_predictions.npz",
         y_val=y_val, pnl_val=pnl_val, stacker_soft=stacker_soft,
         **{f"soft_{t}": s for t, s in zip(primary_tags, primary_softs)},
     )
+    print(f"[recover] saved val_predictions.npz (stacker softmax + primaries)")
+
+    print(f"\n[recover] training meta-labeler...")
+    meta_m = {}
+    try:
+        X_m, y_m, w_m = build_meta_dataset(
+            stacker_soft, y_val, pnl_val,
+            cfg=MetaConfig(pnl_threshold_pct=0.0),
+        )
+        meta, meta_m = train_meta(X_m, y_m, w_m, cfg=MetaConfig())
+        meta.save_model(str(out_dir / "meta.json"))
+        print(f"[recover] meta val_auc={meta_m['val_auc']:.4f} "
+              f"prec={meta_m['val_precision']:.4f} rec={meta_m['val_recall']:.4f}")
+    except Exception as e:
+        print(f"[recover] meta-label failed ({type(e).__name__}: {e}) — "
+              f"likely stacker collapsed to FLAT-only. Leaderboard/stacker saved anyway.")
+        meta_m = {"error": str(e)}
 
     with (out_dir / "leaderboard.json").open("w") as f:
         json.dump({
