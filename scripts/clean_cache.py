@@ -28,24 +28,40 @@ from pathlib import Path
 
 import numpy as np
 
-CLIP_LO_PCT = 0.1   # lower percentile for robust clip
-CLIP_HI_PCT = 99.9  # upper percentile
-MAD_SCALE = 1.4826  # makes MAD consistent with std under Normal
+CLIP_LO_PCT = 1.0    # tight clip percentiles — kill the heavy tail early
+CLIP_HI_PCT = 99.0
 LOB_CLIP_MAX = 100.0
+MIN_SCALE = 1e-6     # prevent div-by-zero when a column is near-constant
 
 
 def _robust_norm(X: np.ndarray) -> tuple[np.ndarray, dict]:
-    """Clip + z-score per column. Returns (X_clean, stats_dict)."""
+    """Clip + z-score per column. Returns (X_clean, stats_dict).
+
+    Two-layer robustness:
+      1. Clip to [p1, p99] to remove heavy-tail outliers.
+      2. Scale = max(std_of_clipped, IQR/1.349, MIN_SCALE) — falls back
+         gracefully when std=0 (column near-constant) or MAD=0 (bimodal).
+
+    MAD-only normalization (what we tried first) collapses when >50% of
+    values are identical — common in binary/flag-like features — because
+    MAD is literally 0, scale defaults to 1, and clipped-boundary values
+    survive unchanged. Std of clipped values handles this case.
+    """
     stats = {}
     X_out = np.empty_like(X, dtype=np.float32)
     for i in range(X.shape[1]):
-        col = X[:, i].astype(np.float64)  # promote for percentile stability
+        col = X[:, i].astype(np.float64)
         lo = float(np.percentile(col, CLIP_LO_PCT))
         hi = float(np.percentile(col, CLIP_HI_PCT))
+        if hi <= lo:  # degenerate: column is (near) constant
+            lo -= 1.0
+            hi += 1.0
         clipped = np.clip(col, lo, hi)
         med = float(np.median(clipped))
-        mad = float(np.median(np.abs(clipped - med)))
-        scale = MAD_SCALE * mad if mad > 1e-12 else 1.0
+        std = float(clipped.std())
+        q25, q75 = np.percentile(clipped, [25, 75])
+        iqr_scale = float((q75 - q25) / 1.349)
+        scale = max(std, iqr_scale, MIN_SCALE)
         normed = (clipped - med) / scale
         X_out[:, i] = normed.astype(np.float32)
         stats[i] = {"clip_lo": lo, "clip_hi": hi, "median": med, "scale": scale}
