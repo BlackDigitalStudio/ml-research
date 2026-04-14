@@ -17,10 +17,41 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 
 
 ModelFactory = Callable[[int], nn.Module]  # num_feat -> model
+
+
+class LOBDataset(Dataset):
+    """Memmap-safe (X_lob, X_feat, y, pnl) dataset.
+
+    X_lob at 10M samples is ~120 GB (N × 3 × 20 × 50 × 4B). Keeping it as a
+    memmap view means only the actively-batched 12 KB/sample is paged in.
+    X_feat/y/pnl are small enough (≲5 GB total) to live in RAM as contiguous
+    float32/int64 arrays — cheap per-item slicing.
+    """
+
+    def __init__(self, X_lob, X_feat, y, pnl):
+        assert len(X_lob) == len(X_feat) == len(y) == len(pnl)
+        self.X_lob = X_lob  # memmap view — do NOT materialize
+        self.X_feat = X_feat
+        self.y = y
+        self.pnl = pnl
+
+    def __len__(self) -> int:
+        return len(self.y)
+
+    def __getitem__(self, idx: int):
+        # np.array() forces a RAM copy of the 12 KB slice out of the memmap.
+        lob = np.array(self.X_lob[idx], dtype=np.float32)
+        feat = np.array(self.X_feat[idx], dtype=np.float32)
+        return (
+            torch.from_numpy(lob),
+            torch.from_numpy(feat),
+            torch.tensor(int(self.y[idx]), dtype=torch.long),
+            torch.tensor(float(self.pnl[idx]), dtype=torch.float32),
+        )
 
 
 def train_generic(
@@ -69,19 +100,27 @@ def train_generic(
     print(f"[{tag}] class weights (sqrt-inv-freq): "
           f"UP={cls_weights[0]:.3f} DOWN={cls_weights[1]:.3f} FLAT={cls_weights[2]:.3f}")
 
-    X_lob_train = torch.from_numpy(np.asarray(X_lob[:n_train]).copy()).float()
-    X_feat_train = torch.from_numpy(X_feat[:n_train]).float()
-    y_train = torch.from_numpy(y[:n_train]).long()
-    pnl_train = torch.from_numpy(target_pnl[:n_train]).float()
-    X_lob_val = torch.from_numpy(np.asarray(X_lob[n_train + gap:]).copy()).float()
-    X_feat_val = torch.from_numpy(X_feat[n_train + gap:]).float()
-    y_val = torch.from_numpy(y[n_train + gap:]).long()
-    pnl_val = torch.from_numpy(target_pnl[n_train + gap:]).float()
+    # X_lob: keep memmap view (no copy — at 10M this would be 120 GB in RAM).
+    # X_feat/y/pnl: materialize into contiguous RAM arrays (≲5 GB total).
+    X_lob_train = X_lob[:n_train]
+    X_feat_train = np.ascontiguousarray(X_feat[:n_train], dtype=np.float32)
+    y_train_arr = np.ascontiguousarray(y[:n_train], dtype=np.int64)
+    pnl_train_arr = np.ascontiguousarray(target_pnl[:n_train], dtype=np.float32)
+    X_lob_val = X_lob[n_train + gap:]
+    X_feat_val_arr = np.ascontiguousarray(X_feat[n_train + gap:], dtype=np.float32)
+    y_val_arr = np.ascontiguousarray(y[n_train + gap:], dtype=np.int64)
+    pnl_val_arr = np.ascontiguousarray(target_pnl[n_train + gap:], dtype=np.float32)
 
-    train_ds = TensorDataset(X_lob_train, X_feat_train, y_train, pnl_train)
-    val_ds = TensorDataset(X_lob_val, X_feat_val, y_val, pnl_val)
-    train_ld = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
-    val_ld = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    train_ds = LOBDataset(X_lob_train, X_feat_train, y_train_arr, pnl_train_arr)
+    val_ds = LOBDataset(X_lob_val, X_feat_val_arr, y_val_arr, pnl_val_arr)
+    train_ld = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True, drop_last=True,
+        num_workers=2, pin_memory=(device == "cuda"), persistent_workers=True,
+    )
+    val_ld = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False,
+        num_workers=2, pin_memory=(device == "cuda"), persistent_workers=True,
+    )
 
     model = model_factory(X_feat.shape[1]).to(device)
     n_params = sum(p.numel() for p in model.parameters())

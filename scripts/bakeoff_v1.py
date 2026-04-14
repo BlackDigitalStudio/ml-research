@@ -15,12 +15,33 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
+
+
+# Models too heavy to deploy on the 16-vCPU CPU-only Contabo prod server —
+# latency >500 ms per sample on CPU makes them unfit for live trading.
+# Training them wastes GPU-time without a path to production. Override with
+# SCALPER_ENABLE_HEAVY_ARCHS=1 for research-only experiments.
+HEAVY_ARCHS = frozenset({
+    "chronos_bolt_base",       # 100M
+    "chronos_base_multi",
+    "chronos_base_unfrozen",
+    "timesfm_2p5_200m",        # 200M
+    "timesfm_2p5_multi",
+    "timesfm_2p5_unfrozen",
+    "moment_large",            # 385M
+    "moment_large_multi",
+    "moment_large_unfrozen",
+    "time_llm_0p5b",           # 500M
+    "time_llm_1p5b",           # 1.5B
+    "time_llm_7b_4bit",        # 7B
+})
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -40,6 +61,13 @@ from src.teacher import MultiStreamTransformer, TeacherConfig  # noqa: E402
 
 def build_factory(arch: str):
     """Return model_factory(num_feat) → nn.Module for the given arch name."""
+    if arch in HEAVY_ARCHS and not os.environ.get("SCALPER_ENABLE_HEAVY_ARCHS"):
+        raise ValueError(
+            f"arch '{arch}' is gated as too heavy for CPU prod inference on "
+            f"Contabo. Set SCALPER_ENABLE_HEAVY_ARCHS=1 to override (research "
+            f"only — do NOT train models you can't deploy).\n"
+            f"Gated archs: {sorted(HEAVY_ARCHS)}"
+        )
     if arch == "transformer":
         def _f(num_feat: int):
             return MultiStreamTransformer(num_feat=num_feat, cfg=TeacherConfig())

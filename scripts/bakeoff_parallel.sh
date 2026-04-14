@@ -17,11 +17,13 @@ OUT_MERGED="runs/bakeoff_v2"
 OUT_GPU0="runs/bakeoff_v2_gpu0"
 OUT_GPU1="runs/bakeoff_v2_gpu1"
 
-# Balance split — heavy models on GPU 1 (which is idle longer), light on GPU 0.
-# Each split has ~equal wall-time estimate (light has 4 small archs, heavy has
-# 4 larger + foundation archs).
-ARCHS_GPU0=(transformer patchtst mamba tcn)                     # ~60 min total
-ARCHS_GPU1=(hybrid_mamba_attn chronos_bolt_base timesfm_2p5_200m moment_large)  # ~3 hr total
+# CPU-deployable archs only — heavy foundation models (moment/timesfm/time-llm)
+# were gated out of the factory (see HEAVY_ARCHS in bakeoff_v1.py).
+# Splits are balanced by wall-time estimate for 2-GPU single-pod use.
+# For 3-pod orchestration see ROADMAP_2026_04_14.md and the shared-volume
+# playbook — each pod runs bakeoff_v2.py independently against the same cache.
+ARCHS_GPU0=(transformer patchtst mamba tcn)
+ARCHS_GPU1=(hybrid_mamba_attn chronos_bolt_tiny chronos_bolt_mini chronos_bolt_small)
 
 log() { echo "[$(date -Iseconds)] $*"; }
 
