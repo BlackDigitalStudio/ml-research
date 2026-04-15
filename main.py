@@ -1,4 +1,4 @@
-"""Scalper bot entry point — ETHUSDT Perpetual on Binance Futures."""
+"""Scalper bot entry point — BTCUSDT Perpetual on Binance Futures."""
 from __future__ import annotations
 
 import asyncio

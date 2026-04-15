@@ -62,8 +62,9 @@ Feature order (must mirror Rust `fill_horizon_features{,_b,_c}`):
                                      to trade-price returns.
 
 All windows are in depth-tick units assuming 100 ms cadence (same
-convention as existing features 10/12). `get()` returns a (11,) float32
-vector. Features emit 0 until their window is saturated, matching the
+convention as existing features 10/12). `get()` returns a
+(NUM_EXT_FEATURES,) float32 vector — 22 as of Stage D (A=6 + B=5 + C=5 +
+D=6). Features emit 0 until their window is saturated, matching the
 stage-A convention.
 
 Semantic note on basis: Binance perp "basis" is (mark − index) / index but

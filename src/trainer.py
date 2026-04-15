@@ -1,6 +1,25 @@
-"""CNN encoder + ensemble trainer.
+"""Sample builder + legacy CNN/XGB/LGB/LogReg trainer.
 
-Reads Parquet data, builds training samples, trains models, saves with symlinks.
+Two roles today (as of the 2026-04-15 refactor):
+
+  1. **Sample cache builder (primary).** `build_samples_cached` produces
+     the v3 cache `(X_lob, X_feat, y, mid, target_pnl)` + sidecar
+     `mid_paths / entry_long / entry_short` arrays consumed by the
+     modern research pipeline (`scripts/bakeoff_v3.py` → neural archs →
+     `scripts/infer_primaries_v3.py` → L2 stacker → L3 meta →
+     `scripts/grid_live.py`). `SCALPER_USE_RUST=1` (default) dispatches
+     to the Rust `feature_builder` + `sim_labels` binaries for the hot
+     paths; `SCALPER_USE_RUST_DIRECT=1` takes the flat-RAM 1M-sample
+     path via `data/_merged/` + `build_samples` Rust binary.
+
+  2. **Legacy live-bot trainer.** `train_ensemble` still produces the
+     CNN `encoder_latest.pt` + 3× XGBoost + LightGBM + LogReg bundle
+     that `src/model.py::HybridModel` hot-loads in `main.py`. New neural
+     architectures live under `src/models/` and are trained via
+     `src/models/train_efficient.py` + `scripts/bakeoff_v3.py` — those
+     outputs are NOT wired into the live bot yet (train↔live gap is
+     tracked separately in STRATEGY.md).
+
 Designed to run in a separate process (not in the trading event loop).
 """
 from __future__ import annotations
@@ -239,18 +258,21 @@ class Trainer:
         """Cached wrapper around build_samples.
 
         Cache key = `{version}_{hours}h_{newest_mtime}`. Bumping
-        `CACHE_SCHEMA_VERSION` forces a rebuild; any old-version file in the
-        cache dir is evicted on next miss. V2 schema adds `target_pnl` for
-        the regression head — live_sim forward-simulation labels make it
-        free to compute and the ensemble regression head needs it.
+        `CACHE_SCHEMA_VERSION` (currently `v3`) forces a rebuild; any
+        old-version file in the cache dir is evicted on next miss. V3 schema
+        adds `mid_paths` + `entry_long` + `entry_short` sidecar arrays so
+        the live-sim grid (`scripts/grid_live.py`) can replay trades without
+        reloading raw depth data.
 
         X_lob is stored as a .npy file loaded via mmap (same semantics as
         the uncached path); X_feat/y/mid/target_pnl are small and fully
         loaded.
 
-        Returns a 5-tuple:
+        Returns a 5-tuple (v3 sidecars are persisted to disk but read
+        directly by grid scripts via the cache prefix):
             X_lob        : (N, 3, 20, 50) float32 mmap
-            X_feat       : (N, 34)        float32
+            X_feat       : (N, NUM_FEATURES) float32 — 49 cols after the
+                                                      2026-04-15 Stage-E prune.
             y            : (N,)           int64 {UP=0, DOWN=1, FLAT=2}
             mid_prices   : (N,)           float64 — mid at the sample tick
             target_pnl   : (N,)           float32 — net PnL % from live_sim,
@@ -367,11 +389,21 @@ class Trainer:
         `_tmp_X_lob.npy` location.
 
         Returns:
-            X_lob: (N, 3, 20, 50) — CNN input tensors (mmap'd from disk)
-            X_features: (N, NUM_FEATURES) — hand-crafted features
+            X_lob: (N, 3, 20, 50) — LOB tensors (mmap'd from disk). The
+                                    shape is also consumed by neural archs
+                                    under `src/models/` via
+                                    `bakeoff_v3.py`, which treat it as a
+                                    generic multivariate time series.
+            X_features: (N, NUM_FEATURES) — 49 hand-crafted features.
             y: (N,) — labels {0=UP, 1=DOWN, 2=FLAT}
             mid_prices: (N,) — mid price at each sample point (for backtest)
-            target_pnl: (N,) — continuous net PnL %, regression target
+            target_pnl: (N,) — continuous net PnL %, regression target.
+                              NOTE: this is the TB-winner PnL, NOT the
+                              direction-aware realised PnL. Honest
+                              evaluation uses `rust_bridge.simulate_labels`
+                              to produce `pnl_long` / `pnl_short` — see
+                              `scripts/grid_live.py` and
+                              `methodology_bugs_2026_04_14.md`.
         """
         import gc
 
