@@ -1,0 +1,30 @@
+# GPU training dependencies for bakeoff_v3.py on a GPU pod (Modal, RunPod).
+#
+# DO NOT `pip install -r requirements-training.txt` on the Contabo host —
+# torch GPU builds would overwrite the torch CPU used by the live bot.
+# Use only inside a dedicated training environment.
+#
+# Base `requirements.txt` covers runtime deps for main.py + recorder +
+# non-GPU trainer.
+
+# Neural training core
+torch>=2.2
+lightgbm==4.3.0
+scikit-learn==1.6.1
+joblib>=1.4
+
+# Foundation / LLM archs
+chronos-forecasting
+transformers>=4.43
+accelerate>=0.33
+peft>=0.12
+bitsandbytes>=0.43    # required for time_llm_7b_4bit (4bit NF4)
+
+# Mamba — CUDA kernels. Install with `--no-build-isolation`:
+#   pip install mamba-ssm causal-conv1d --no-build-isolation
+# Blackwell sm_120 compat unverified; Ada sm_89 works.
+# mamba-ssm
+# causal-conv1d
+
+# Optional: flash attention (Ampere+). Enable per-arch in the adapter config.
+# flash-attn
