@@ -12,7 +12,7 @@ from src.features_ext import FeatureExtEngine, EXT_FEATURE_KEYS
 
 logger = logging.getLogger(__name__)
 
-NUM_FEATURES = 50
+NUM_FEATURES = 56
 NORM_WINDOW = 300   # 30 sec at 100ms
 EMA_SPAN = 5
 TRADE_WINDOW_SEC = 5
@@ -90,6 +90,11 @@ FEATURE_KEYS = [
     # (volume-synchronised PIN), cancel-to-trade ratio.
     "microprice_deviation", "ofi_top5_weighted", "kyle_lambda_60s",
     "vpin_60s", "cancel_to_trade_ratio_30s",
+    # Horizon-tier (50-55) — Stage D of the 34→49 overhaul (2026-04-15).
+    # Cross-exchange and ETH context at 30-60 s horizons.
+    "bybit_lead_lag_corr_30s",
+    "okx_net_flow_30s", "bitget_net_flow_30s", "gateio_net_flow_30s",
+    "eth_momentum_60s", "eth_btc_corr_30s",
 ]
 
 assert len(FEATURE_KEYS) == NUM_FEATURES

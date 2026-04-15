@@ -1,4 +1,4 @@
-"""Extended feature set — horizon-tier (60-180 s) additions, Stage A + B + C.
+"""Extended feature set — horizon-tier (60-180 s) additions, Stage A + B + C + D.
 
 Sidecar module kept separate from `src/features.py` until Stage E, so the
 main feature set and its train-time batch twin share one source of truth
@@ -45,6 +45,22 @@ Feature order (must mirror Rust `fill_horizon_features{,_b,_c}`):
                                   (Σ |trade_qty| over last 30 s of trades + eps).
                                   cancel_tick = Σ_{k=0..4} max(0, qty_prev_k − qty_k).
 
+    Stage D (2026-04-15):
+     16: bybit_lead_lag_corr_30s   — Pearson corr of BTC 100 ms returns vs Bybit
+                                     100 ms returns lagged by 1 tick, over 300
+                                     ticks (30 s). Bybit price = last trade price.
+     17: okx_net_flow_30s          — Σ signed_qty from OKX trades over last 30 s.
+     18: bitget_net_flow_30s       — Σ signed_qty from Bitget trades over last 30 s.
+     19: gateio_net_flow_30s       — Σ signed_qty from Gate.io trades over last 30 s.
+     20: eth_momentum_60s          — (eth_last[T] − eth_last[T-600]) / eth_last[T-600]
+                                     where eth_last is the latest Binance ETH
+                                     trade price at or before the BTC depth tick.
+     21: eth_btc_corr_30s          — Pearson corr of BTC 100 ms mid-log-returns and
+                                     ETH 100 ms price-log-returns over 300 ticks.
+                                     ETH price at tick = latest trade price; ETH
+                                     depth stream not recorded, so we fall back
+                                     to trade-price returns.
+
 All windows are in depth-tick units assuming 100 ms cadence (same
 convention as existing features 10/12). `get()` returns a (11,) float32
 vector. Features emit 0 until their window is saturated, matching the
@@ -63,7 +79,7 @@ from math import log, sqrt
 
 import numpy as np
 
-NUM_EXT_FEATURES = 16
+NUM_EXT_FEATURES = 22
 
 EXT_FEATURE_KEYS = [
     # Stage A
@@ -85,6 +101,13 @@ EXT_FEATURE_KEYS = [
     "kyle_lambda_60s",
     "vpin_60s",
     "cancel_to_trade_ratio_30s",
+    # Stage D
+    "bybit_lead_lag_corr_30s",
+    "okx_net_flow_30s",
+    "bitget_net_flow_30s",
+    "gateio_net_flow_30s",
+    "eth_momentum_60s",
+    "eth_btc_corr_30s",
 ]
 assert len(EXT_FEATURE_KEYS) == NUM_EXT_FEATURES
 
@@ -110,6 +133,23 @@ _BV_SCALE = np.pi / 2.0
 
 # Per-level weights for ofi_top5_weighted. 1/(k+1) decays with depth.
 _OFI5_WEIGHTS = np.array([1.0 / (k + 1) for k in range(5)], dtype=np.float64)
+
+
+def _pearson_corr(x: np.ndarray, y: np.ndarray) -> float:
+    """Pearson correlation of two equal-length vectors. Zero when either
+    variance is < 1e-24; clipped to [-1, 1]."""
+    n = len(x)
+    if n < 2 or len(y) != n:
+        return 0.0
+    sx = float(x.sum())
+    sy = float(y.sum())
+    sxx = float((x * x).sum())
+    syy = float((y * y).sum())
+    sxy = float((x * y).sum())
+    den = (n * sxx - sx * sx) * (n * syy - sy * sy)
+    if den <= 1e-24:
+        return 0.0
+    return float((n * sxy - sx * sy) / np.sqrt(den))
 
 
 def _minutes_to_next_funding(ts_ms: int) -> float:
@@ -202,6 +242,21 @@ class FeatureExtEngine:
         "_cancel_sum",
         "_trade_buf_30s",  # deque of (ts_ms, |qty|) — 30 s window
         "_trade_abs_sum_30s",
+        # Stage D — cross-exchange + ETH.
+        "_btc_ret_buf",
+        "_bybit_ret_buf",
+        "_eth_ret_buf",
+        "_bybit_last_price",
+        "_eth_last_price",
+        "_bybit_prev_price",
+        "_eth_prev_price",
+        "_eth_price_buf",
+        "_okx_buf",
+        "_okx_sum",
+        "_bitget_buf",
+        "_bitget_sum",
+        "_gateio_buf",
+        "_gateio_sum",
         # output
         "features",
     )
@@ -262,12 +317,70 @@ class FeatureExtEngine:
         self._trade_buf_30s: deque[tuple[int, float]] = deque()
         self._trade_abs_sum_30s: float = 0.0
 
+        # Stage D — cross-exchange + ETH.
+        self._btc_ret_buf: deque[float] = deque(maxlen=_W_30S)
+        self._bybit_ret_buf: deque[float] = deque(maxlen=_W_30S)
+        self._eth_ret_buf: deque[float] = deque(maxlen=_W_30S)
+        self._bybit_last_price: float = 0.0
+        self._eth_last_price: float = 0.0
+        self._bybit_prev_price: float = 0.0
+        self._eth_prev_price: float = 0.0
+        self._eth_price_buf: deque[float] = deque(maxlen=_W_120S + 1)
+        self._okx_buf: deque[tuple[int, float]] = deque()
+        self._okx_sum: float = 0.0
+        self._bitget_buf: deque[tuple[int, float]] = deque()
+        self._bitget_sum: float = 0.0
+        self._gateio_buf: deque[tuple[int, float]] = deque()
+        self._gateio_sum: float = 0.0
+
         self.features: np.ndarray = np.zeros(NUM_EXT_FEATURES, dtype=np.float32)
 
     def set_funding(self, mark_price: float) -> None:
         """Record the latest mark price (used for `funding_basis_bps`)."""
         if mark_price > 0:
             self._mark_price = float(mark_price)
+
+    def on_bybit_trade(self, ts_ms: int, price: float) -> None:  # noqa: ARG002 — ts reserved
+        """Record latest Bybit BTC trade price for lead-lag correlation."""
+        if price > 0:
+            self._bybit_last_price = float(price)
+
+    def on_eth_trade(self, ts_ms: int, price: float) -> None:  # noqa: ARG002
+        """Record latest Binance ETH trade price for ETH-momentum + ETH/BTC corr."""
+        if price > 0:
+            self._eth_last_price = float(price)
+
+    def on_cross_flow(self, exchange: str, ts_ms: int, signed_qty: float) -> None:
+        """Record a cross-exchange trade for the 30 s net-flow windows.
+
+        Valid `exchange` values: "okx", "bitget", "gateio". Bybit is consumed
+        via on_bybit_trade (price, not flow — we already have feature 30 for
+        the cross-exchange momentum count).
+        """
+        if signed_qty == 0.0:
+            return
+        q = float(signed_qty)
+        ts = int(ts_ms)
+        if exchange == "okx":
+            self._okx_buf.append((ts, q))
+            self._okx_sum += q
+        elif exchange == "bitget":
+            self._bitget_buf.append((ts, q))
+            self._bitget_sum += q
+        elif exchange == "gateio":
+            self._gateio_buf.append((ts, q))
+            self._gateio_sum += q
+
+    def _evict_cross(self, now_ms: int) -> None:
+        cutoff = now_ms - _CTR_TRADE_WINDOW_MS
+        for buf, sum_name in (
+            (self._okx_buf, "_okx_sum"),
+            (self._bitget_buf, "_bitget_sum"),
+            (self._gateio_buf, "_gateio_sum"),
+        ):
+            while buf and buf[0][0] < cutoff:
+                _, q = buf.popleft()
+                setattr(self, sum_name, getattr(self, sum_name) - q)
 
     def on_trade(self, ts_ms: int, signed_qty: float) -> None:
         """Ingest one trade; `signed_qty > 0` for buyer-initiated trades."""
@@ -428,6 +541,28 @@ class FeatureExtEngine:
         # Evict stale trades to keep TFI honest.
         self._evict_trades(int(ts_ms))
         self._evict_trades_30s(int(ts_ms))
+        self._evict_cross(int(ts_ms))
+
+        # --- Stage D: per-tick BTC/Bybit/ETH log-returns ---
+        # BTC log-return r is already computed above when _last_mid > 0; mirror
+        # Stage A's deque into the Stage D buffer so correlations see the same
+        # series.
+        if len(self._ret_buf) > 0:
+            self._btc_ret_buf.append(self._ret_buf[-1])
+        # Bybit / ETH returns: we use the most recent trade price as proxy.
+        # Compute log-return vs the last stored price snapshot.
+        if self._bybit_last_price > 0:
+            if self._bybit_prev_price > 0:
+                self._bybit_ret_buf.append(
+                    log(self._bybit_last_price / self._bybit_prev_price))
+            self._bybit_prev_price = self._bybit_last_price
+        if self._eth_last_price > 0:
+            if self._eth_prev_price > 0:
+                self._eth_ret_buf.append(
+                    log(self._eth_last_price / self._eth_prev_price))
+            self._eth_prev_price = self._eth_last_price
+        # ETH price buffer for eth_momentum_60s (stores eth_last at each tick).
+        self._eth_price_buf.append(self._eth_last_price)
 
     def on_depth_l5(
         self,
@@ -564,6 +699,50 @@ class FeatureExtEngine:
         if len(self._cancel_buf) >= _W_30S and self._trade_abs_sum_30s > 0:
             f[15] = self._cancel_sum / self._trade_abs_sum_30s
 
+        # === Stage D ===
+        # [16] bybit_lead_lag_corr_30s — corr(btc_ret[t], bybit_ret[t-1]) over
+        # 300-tick window. Requires ≥ 301 aligned pairs (so we can lag by 1).
+        btc_n = len(self._btc_ret_buf)
+        bybit_n = len(self._bybit_ret_buf)
+        if btc_n >= _W_30S and bybit_n >= _W_30S:
+            # Take the last 300 btc rets and 300 bybit rets shifted by one
+            # from the deques. deques index fast (O(1)) for ends, but loops
+            # over middle are acceptable at sample cadence.
+            btc_arr = np.fromiter(
+                (self._btc_ret_buf[i] for i in range(btc_n - _W_30S, btc_n)),
+                dtype=np.float64, count=_W_30S)
+            bybit_arr = np.fromiter(
+                (self._bybit_ret_buf[i] for i in range(bybit_n - _W_30S, bybit_n)),
+                dtype=np.float64, count=_W_30S)
+            # Shift bybit by 1 step to realise the lead-lag alignment:
+            # pair (btc[t], bybit[t-1]) for t ∈ [1..W-1]; drop t=0.
+            x = btc_arr[1:]
+            y = bybit_arr[:-1]
+            f[16] = _pearson_corr(x, y)
+
+        # [17-19] Cross-exchange net flows.
+        f[17] = self._okx_sum
+        f[18] = self._bitget_sum
+        f[19] = self._gateio_sum
+
+        # [20] eth_momentum_60s
+        npb = len(self._eth_price_buf)
+        if npb > _W_60S and self._eth_last_price > 0:
+            past = self._eth_price_buf[npb - 1 - _W_60S]
+            if past > 0:
+                f[20] = (self._eth_last_price - past) / past
+
+        # [21] eth_btc_corr_30s
+        eth_n = len(self._eth_ret_buf)
+        if btc_n >= _W_30S and eth_n >= _W_30S:
+            btc_arr = np.fromiter(
+                (self._btc_ret_buf[i] for i in range(btc_n - _W_30S, btc_n)),
+                dtype=np.float64, count=_W_30S)
+            eth_arr = np.fromiter(
+                (self._eth_ret_buf[i] for i in range(eth_n - _W_30S, eth_n)),
+                dtype=np.float64, count=_W_30S)
+            f[21] = _pearson_corr(btc_arr, eth_arr)
+
         return f
 
 
@@ -582,6 +761,16 @@ def compute_ext_features_batch(
     bid_qtys_top5: np.ndarray | None = None,
     ask_prices_top5: np.ndarray | None = None,
     ask_qtys_top5: np.ndarray | None = None,
+    bybit_ts_ms: np.ndarray | None = None,
+    bybit_price: np.ndarray | None = None,
+    eth_ts_ms: np.ndarray | None = None,
+    eth_price: np.ndarray | None = None,
+    okx_ts_ms: np.ndarray | None = None,
+    okx_signed_qty: np.ndarray | None = None,
+    bitget_ts_ms: np.ndarray | None = None,
+    bitget_signed_qty: np.ndarray | None = None,
+    gateio_ts_ms: np.ndarray | None = None,
+    gateio_signed_qty: np.ndarray | None = None,
 ) -> np.ndarray:
     """Vectorised train-time computation of the 11 ext features.
 
@@ -857,6 +1046,126 @@ def compute_ext_features_batch(
             # gate `len(cancel_buf) >= _W_30S`).
             ready = np.asarray(indices, dtype=np.int64) >= _W_30S
             out[:, 15] = np.where(ready & safe, ratio, 0.0).astype(np.float32)
+
+    # === Stage D — cross-exchange net flows ===
+    if depth_ts_ms is not None:
+        dts = np.asarray(depth_ts_ms, dtype=np.int64)
+        sample_ts_d = dts[idx]
+        for out_col, ex_ts, ex_q in (
+            (17, okx_ts_ms, okx_signed_qty),
+            (18, bitget_ts_ms, bitget_signed_qty),
+            (19, gateio_ts_ms, gateio_signed_qty),
+        ):
+            if ex_ts is None or ex_q is None or len(ex_ts) == 0:
+                continue
+            e_ts = np.asarray(ex_ts, dtype=np.int64)
+            e_q = np.asarray(ex_q, dtype=np.float64)
+            cum_q = np.zeros(len(e_ts) + 1, dtype=np.float64)
+            cum_q[1:] = np.cumsum(e_q)
+            lo = np.searchsorted(e_ts, sample_ts_d - _CTR_TRADE_WINDOW_MS, side="left")
+            hi = np.searchsorted(e_ts, sample_ts_d, side="right")
+            out[:, out_col] = (cum_q[hi] - cum_q[lo]).astype(np.float32)
+
+    # === Stage D — ETH momentum + correlations, Bybit lead-lag ===
+    # Pre-compute per-BTC-tick last trade price for bybit + eth by searchsorted.
+    def _last_price_per_tick(src_ts, src_price, dts_):
+        src_ts = np.asarray(src_ts, dtype=np.int64)
+        src_p = np.asarray(src_price, dtype=np.float64)
+        if len(src_ts) == 0:
+            return np.zeros(len(dts_), dtype=np.float64)
+        r = np.searchsorted(src_ts, dts_, side="right")
+        fi = np.clip(r - 1, 0, len(src_ts) - 1)
+        valid = r > 0
+        out_p = np.where(valid, src_p[fi], 0.0)
+        return out_p
+
+    bybit_per_tick = None
+    eth_per_tick = None
+    if (
+        depth_ts_ms is not None
+        and bybit_ts_ms is not None and bybit_price is not None
+        and len(bybit_ts_ms) > 0
+    ):
+        bybit_per_tick = _last_price_per_tick(bybit_ts_ms, bybit_price, dts)
+    if (
+        depth_ts_ms is not None
+        and eth_ts_ms is not None and eth_price is not None
+        and len(eth_ts_ms) > 0
+    ):
+        eth_per_tick = _last_price_per_tick(eth_ts_ms, eth_price, dts)
+
+    # Per-tick log returns for BTC, Bybit, ETH. First tick has no prev → 0.
+    btc_ret = r  # shape (n-1,) with r[t-1] = log(mid[t]/mid[t-1])
+    # Align to index convention: ret_per_tick[t] for t in [1..n-1].
+    ret_per_tick_btc = np.concatenate([[0.0], btc_ret])  # shape (n,)
+
+    def _log_ret_series(prices):
+        out_r = np.zeros(n, dtype=np.float64)
+        if prices is None:
+            return out_r
+        safe_prev = prices[:-1] > 0
+        safe_cur = prices[1:] > 0
+        m = safe_prev & safe_cur
+        vals = np.where(m, np.log(np.where(m, prices[1:] / np.where(prices[:-1] > 0, prices[:-1], 1.0), 1.0)), 0.0)
+        out_r[1:] = vals
+        return out_r
+
+    ret_per_tick_bybit = _log_ret_series(bybit_per_tick)
+    ret_per_tick_eth = _log_ret_series(eth_per_tick)
+
+    # [16] bybit_lead_lag_corr_30s: corr(btc_ret[t], bybit_ret[t-1])
+    # over lagged window [T-W..T-1]. Shifted series: x = btc_ret, y = bybit_ret[..-1].
+    def _rolling_corr(xs, ys, window):
+        """Pearson corr for each sample in `indices` over xs[idx-W..idx-1], ys[idx-W..idx-1]."""
+        cx = np.zeros(n + 1)
+        cy = np.zeros(n + 1)
+        cxx = np.zeros(n + 1)
+        cyy = np.zeros(n + 1)
+        cxy = np.zeros(n + 1)
+        cx[1:] = np.cumsum(xs)
+        cy[1:] = np.cumsum(ys)
+        cxx[1:] = np.cumsum(xs * xs)
+        cyy[1:] = np.cumsum(ys * ys)
+        cxy[1:] = np.cumsum(xs * ys)
+        corr = np.zeros(ns, dtype=np.float64)
+        mask = idx >= window
+        if not mask.any():
+            return corr
+        hi = idx[mask]
+        lo = hi - window
+        sx = cx[hi] - cx[lo]
+        sy = cy[hi] - cy[lo]
+        sxx = cxx[hi] - cxx[lo]
+        syy = cyy[hi] - cyy[lo]
+        sxy = cxy[hi] - cxy[lo]
+        num = window * sxy - sx * sy
+        den = (window * sxx - sx * sx) * (window * syy - sy * sy)
+        out_c = np.zeros(mask.sum(), dtype=np.float64)
+        safe = den > 1e-24
+        out_c[safe] = num[safe] / np.sqrt(den[safe])
+        corr[mask] = out_c
+        return corr
+
+    if bybit_per_tick is not None:
+        # Lead-lag: y aligned to btc_ret[t], x aligned to bybit_ret[t-1].
+        # We form `bybit_lag = shift(ret_per_tick_bybit, 1)`.
+        bybit_lag = np.zeros(n, dtype=np.float64)
+        bybit_lag[1:] = ret_per_tick_bybit[:-1]
+        out[:, 16] = _rolling_corr(ret_per_tick_btc, bybit_lag, _W_30S).astype(np.float32)
+
+    # [20] eth_momentum_60s: (eth[T] - eth[T-W60]) / eth[T-W60]
+    if eth_per_tick is not None:
+        mask = idx >= _W_60S
+        if mask.any():
+            hi = idx[mask]
+            cur = eth_per_tick[hi]
+            past = eth_per_tick[hi - _W_60S]
+            safe = (past > 0) & (cur > 0)
+            mom = np.zeros(mask.sum(), dtype=np.float64)
+            mom[safe] = (cur[safe] - past[safe]) / past[safe]
+            out[mask, 20] = mom.astype(np.float32)
+        # [21] eth_btc_corr_30s
+        out[:, 21] = _rolling_corr(ret_per_tick_btc, ret_per_tick_eth, _W_30S).astype(np.float32)
 
     # === Stage B — funding_basis_bps ===
     if (

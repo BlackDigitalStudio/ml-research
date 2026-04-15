@@ -41,6 +41,11 @@ HORIZON_B_FUNDING_COLS = [44]
 # Horizon-tier — Stage C (45-49). [45,46] depth-only; [47,48,49] need trades.
 HORIZON_C_DEPTH_COLS = [45, 46]
 HORIZON_C_TRADE_COLS = [47, 48, 49]
+# Horizon-tier — Stage D (50-55). 50 needs bybit TRADES-w/price; 51-53 cross-ex;
+# 54,55 need ETH.
+HORIZON_D_BYBIT_COLS = [50]
+HORIZON_D_CROSS_COLS = [51, 52, 53]
+HORIZON_D_ETH_COLS = [54, 55]
 # Tolerances chosen generously; in practice parity is usually exact f32.
 ATOL = {
     0: 1e-4,    # OFI
@@ -101,6 +106,13 @@ ATOL = {
     47: 1e-4,   # kyle_lambda_60s (scale sensitive)
     48: 1e-6,   # vpin_60s
     49: 1e-5,   # cancel_to_trade_ratio_30s
+    # Stage D.
+    50: 1e-5,   # bybit_lead_lag_corr_30s
+    51: 1e-3,   # okx_net_flow_30s
+    52: 1e-3,   # bitget_net_flow_30s
+    53: 1e-3,   # gateio_net_flow_30s
+    54: 1e-7,   # eth_momentum_60s
+    55: 1e-5,   # eth_btc_corr_30s
 }
 
 
@@ -305,6 +317,10 @@ def main() -> int:
         cols += TRADE_COLS + MICRO_TRADE_COLS + HORIZON_B_TRADE_COLS + HORIZON_C_TRADE_COLS
     if args.funding:
         cols += FUNDING_COLS + HORIZON_B_FUNDING_COLS
+    if cross_ex_data:
+        cols += HORIZON_D_CROSS_COLS
+    if args.eth:
+        cols += HORIZON_D_ETH_COLS
     if args.derivs:
         cols += DERIV_COLS
     if args.eth:

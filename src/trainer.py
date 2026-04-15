@@ -1460,7 +1460,14 @@ class Trainer:
                               np.asarray(trade_qty, dtype=np.float64))
         else:
             _tfi_ts, _tfi_q = None, None
-        feat[:, 34:50] = compute_ext_features_batch(
+        # Stage D cross-exchange + ETH kwargs.
+        cx = cross_ex_data or {}
+        okx_ts, okx_sq = cx.get("okx", (None, None))
+        bitget_ts, bitget_sq = cx.get("bitget", (None, None))
+        gateio_ts, gateio_sq = cx.get("gateio", (None, None))
+        # Bybit is priced in the CrossExTrades path only when explicitly passed
+        # with a price column; skip col 50 if not available.
+        feat[:, 34:56] = compute_ext_features_batch(
             mid_prices, indices,
             bid_qty0=bid_vols[:, 0], ask_qty0=ask_vols[:, 0],
             depth_ts_ms=depth_ts,
@@ -1470,6 +1477,10 @@ class Trainer:
             bid_qtys_top5=bid_vols[:, :5],
             ask_prices_top5=ask_prices[:, :5],
             ask_qtys_top5=ask_vols[:, :5],
+            eth_ts_ms=eth_ts, eth_price=eth_price,
+            okx_ts_ms=okx_ts, okx_signed_qty=okx_sq,
+            bitget_ts_ms=bitget_ts, bitget_signed_qty=bitget_sq,
+            gateio_ts_ms=gateio_ts, gateio_signed_qty=gateio_sq,
         )
 
         return feat
