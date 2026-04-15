@@ -74,7 +74,7 @@ def _stream_ref(mid, bq, aq, depth_ts, trade_ts, signed, mark_price, indices):
 
 
 def test_ext_has_all_eleven():
-    assert NUM_EXT_FEATURES == 11
+    assert NUM_EXT_FEATURES >= 11
     assert EXT_FEATURE_KEYS[_OFI_60] == "ofi_60s"
     assert EXT_FEATURE_KEYS[_OFI_120] == "ofi_120s"
     assert EXT_FEATURE_KEYS[_TFI] == "trade_flow_imbalance_60s"

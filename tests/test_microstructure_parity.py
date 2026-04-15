@@ -27,7 +27,7 @@ from src.order_book import OrderBook, Snapshot, BOOK_DEPTH
 
 
 def test_num_features_constant() -> None:
-    assert NUM_FEATURES == 45
+    assert NUM_FEATURES == 50
     assert len(FEATURE_KEYS) == NUM_FEATURES
     assert FEATURE_KEYS[31] == "queue_pressure"
     assert FEATURE_KEYS[32] == "top3_asymmetry"

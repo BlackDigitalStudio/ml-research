@@ -38,6 +38,9 @@ HORIZON_COLS = [34, 35, 36, 37, 38, 39]
 HORIZON_B_DEPTH_COLS = [40, 41, 43]
 HORIZON_B_TRADE_COLS = [42]
 HORIZON_B_FUNDING_COLS = [44]
+# Horizon-tier — Stage C (45-49). [45,46] depth-only; [47,48,49] need trades.
+HORIZON_C_DEPTH_COLS = [45, 46]
+HORIZON_C_TRADE_COLS = [47, 48, 49]
 # Tolerances chosen generously; in practice parity is usually exact f32.
 ATOL = {
     0: 1e-4,    # OFI
@@ -91,6 +94,13 @@ ATOL = {
     42: 1e-6,   # trade_flow_imbalance_60s
     43: 1e-2,   # funding_time_to_next_min (480 max → 1 ulp ~ 3e-5; pad)
     44: 1e-4,   # funding_basis_bps
+    # Stage C. Microprice_dev bounded in [-0.5, 0.5]; ofi_top5 is sum over
+    # 30 ticks of weighted Δqty. Kyle/VPIN/ctr are ratios.
+    45: 1e-6,   # microprice_deviation
+    46: 5e-5,   # ofi_top5_weighted
+    47: 1e-4,   # kyle_lambda_60s (scale sensitive)
+    48: 1e-6,   # vpin_60s
+    49: 1e-5,   # cancel_to_trade_ratio_30s
 }
 
 
@@ -289,9 +299,10 @@ def main() -> int:
 
     # --- Compare ---
     ok = True
-    cols = list(LOB_COLS) + MICRO_DEPTH_COLS + HORIZON_COLS + HORIZON_B_DEPTH_COLS
+    cols = (list(LOB_COLS) + MICRO_DEPTH_COLS + HORIZON_COLS
+            + HORIZON_B_DEPTH_COLS + HORIZON_C_DEPTH_COLS)
     if args.trades:
-        cols += TRADE_COLS + MICRO_TRADE_COLS + HORIZON_B_TRADE_COLS
+        cols += TRADE_COLS + MICRO_TRADE_COLS + HORIZON_B_TRADE_COLS + HORIZON_C_TRADE_COLS
     if args.funding:
         cols += FUNDING_COLS + HORIZON_B_FUNDING_COLS
     if args.derivs:

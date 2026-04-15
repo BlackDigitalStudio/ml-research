@@ -11,7 +11,7 @@ use ndarray::{s, Array1, Array2};
 
 use crate::{CrossExTrades, DepthData, DerivativesData, FundingData, TradesData};
 
-pub const NUM_FEATURES: usize = 45;
+pub const NUM_FEATURES: usize = 50;
 
 /// Must match `src/features.py::QUEUE_DECAY_ALPHA`.
 pub const QUEUE_DECAY_ALPHA: f64 = 0.1;
@@ -1092,6 +1092,225 @@ pub fn fill_horizon_features_b(
                 let m = mid[ti];
                 if mark > 0.0 && m > 0.0 {
                     feat[[s_idx, 44]] = ((mark - m) / m * 10_000.0) as f32;
+                }
+            }
+        }
+    }
+}
+
+/// Fill cols [45..=49] — horizon-tier Stage C (structural microstructure).
+///
+/// Must match `src/features_ext.py::compute_ext_features_batch` bit-for-bit
+/// in f32. Semantics:
+///
+///   [45] microprice_deviation       = (microprice − mid) / max(spread, eps)
+///                                     where microprice = (aq0·bp0 + bq0·ap0)/(bq0+aq0)
+///   [46] ofi_top5_weighted (30 s)   = Σ_k 1/(k+1)·(Δbq_k − Δaq_k) summed over
+///                                     last 30 ticks; lagged window [T-30..T-1]
+///   [47] kyle_lambda_60s            = rolling OLS slope β over last 600 ticks:
+///                                     x_t = Σ signed_qty in (dts[t-1], dts[t]]
+///                                     y_t = log_mid[t] − log_mid[t-1]
+///                                     β   = Σxy / (Σxx + 1e-18), lagged [T-600..T-1]
+///   [48] vpin_60s                   = Σ|signed_k| / Σ total_k over 6 consecutive
+///                                     10 s sub-buckets ending at sample_ts.
+///   [49] cancel_to_trade_ratio_30s  = (cancel_sum over 300 ticks) /
+///                                     (|trade_qty| sum over 30 s trades).
+///                                     cancel_tick = Σ_k max(0, q_prev_k − q_k)
+///                                     over top-5 bids + top-5 asks.
+///                                     Only emitted once the 300-tick cancel window
+///                                     is saturated AND trade_vol > 0.
+pub fn fill_horizon_features_c(
+    feat: &mut Array2<f32>,
+    depth: &DepthData,
+    indices: &[i64],
+    trades: Option<&TradesData>,
+) {
+    const W3S: i64 = 30;
+    const W30S: i64 = 300;
+    const W60S: i64 = 600;
+    const CTR_WINDOW_MS: i64 = 30_000;
+    const VPIN_NUM_BUCKETS: i64 = 6;
+    const VPIN_BUCKET_MS: i64 = 10_000;
+    let ofi5_w = [1.0_f64, 0.5, 1.0 / 3.0, 0.25, 0.2];
+
+    let n = depth.n_rows();
+    if n == 0 || indices.is_empty() {
+        return;
+    }
+    let bp = &depth.bid_prices;
+    let ap = &depth.ask_prices;
+    let bq = &depth.bid_qtys;
+    let aq = &depth.ask_qtys;
+    let mid = depth.mid_prices();
+    let d_ts = depth.timestamps.as_slice().unwrap();
+
+    // --- Cumulative sums for ofi_top5_weighted (30-tick lagged window) ---
+    let mut cum_ofi5 = Array1::<f64>::zeros(n + 1);
+    let mut cum_cancel = Array1::<f64>::zeros(n + 1);
+    {
+        let mut s_ofi5 = 0.0;
+        let mut s_cancel = 0.0;
+        cum_ofi5[1] = 0.0;
+        cum_cancel[1] = 0.0;
+        for i in 1..n {
+            let mut raw_ofi5 = 0.0;
+            let mut cancel_tick = 0.0;
+            for k in 0..5 {
+                let db = bq[[i, k]] - bq[[i - 1, k]];
+                let da = aq[[i, k]] - aq[[i - 1, k]];
+                raw_ofi5 += (db - da) * ofi5_w[k];
+                if db < 0.0 {
+                    cancel_tick += -db;
+                }
+                if da < 0.0 {
+                    cancel_tick += -da;
+                }
+            }
+            s_ofi5 += raw_ofi5;
+            s_cancel += cancel_tick;
+            cum_ofi5[i + 1] = s_ofi5;
+            cum_cancel[i + 1] = s_cancel;
+        }
+    }
+
+    // --- log_mid[t] - log_mid[t-1] as y_t for Kyle; per-tick x_t for Kyle + VPIN ---
+    // Per-tick signed volume lives inside the `trades` branch below.
+    let mut log_mid = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let m = mid[i];
+        if m > 0.0 {
+            log_mid[i] = m.ln();
+        }
+    }
+
+    // Kyle cumulative sums (only populated when trades are present).
+    let (kyle_cum_xy, kyle_cum_xx) = if let Some(tr) = trades {
+        let nt = tr.len();
+        let t_ts = tr.timestamps.as_slice().unwrap();
+        let t_q = tr.quantities.as_slice().unwrap();
+        let is_sell = &tr.is_sell;
+
+        // cum_signed[i] = Σ signed up to i-th trade (exclusive).
+        let mut cum_signed = Array1::<f64>::zeros(nt + 1);
+        for i in 0..nt {
+            let signed = if is_sell[i] { -t_q[i] } else { t_q[i] };
+            cum_signed[i + 1] = cum_signed[i] + signed;
+        }
+
+        // right_cur[t] = searchsorted_right(t_ts, dts[t])
+        let mut right_cur = vec![0usize; n];
+        for (i, &ts) in d_ts.iter().enumerate() {
+            right_cur[i] = searchsorted_right_i64(t_ts, ts);
+        }
+        // x_per_tick[t] = Σ signed for trades in (dts[t-1], dts[t]];
+        // also = cum_signed[right_cur[t]] - cum_signed[right_cur[t-1]].
+        let mut xy = Array1::<f64>::zeros(n);
+        let mut xx = Array1::<f64>::zeros(n);
+        for t in 1..n {
+            let x = cum_signed[right_cur[t]] - cum_signed[right_cur[t - 1]];
+            let y = log_mid[t] - log_mid[t - 1];
+            xy[t] = x * y;
+            xx[t] = x * x;
+        }
+        let mut cxy = Array1::<f64>::zeros(n + 1);
+        let mut cxx = Array1::<f64>::zeros(n + 1);
+        let mut sxy = 0.0;
+        let mut sxx = 0.0;
+        for t in 0..n {
+            sxy += xy[t];
+            sxx += xx[t];
+            cxy[t + 1] = sxy;
+            cxx[t + 1] = sxx;
+        }
+        (Some(cxy), Some(cxx))
+    } else {
+        (None, None)
+    };
+
+    // VPIN + cancel-to-trade denominator sums (signed+abs trade cum).
+    let (vpin_ready, vpin_t_ts, vpin_cum_signed, vpin_cum_abs) = if let Some(tr) = trades {
+        let nt = tr.len();
+        let t_ts = tr.timestamps.as_slice().unwrap();
+        let t_q = tr.quantities.as_slice().unwrap();
+        let is_sell = &tr.is_sell;
+        let mut cs = Array1::<f64>::zeros(nt + 1);
+        let mut ca = Array1::<f64>::zeros(nt + 1);
+        for i in 0..nt {
+            let signed = if is_sell[i] { -t_q[i] } else { t_q[i] };
+            cs[i + 1] = cs[i] + signed;
+            ca[i + 1] = ca[i] + t_q[i].abs();
+        }
+        (true, Some(t_ts), Some(cs), Some(ca))
+    } else {
+        (false, None, None, None)
+    };
+
+    for (s_idx, &raw_idx) in indices.iter().enumerate() {
+        let t = raw_idx;
+        let ti = t as usize;
+
+        // [45] microprice_deviation
+        {
+            let b0 = bp[[ti, 0]];
+            let a0 = ap[[ti, 0]];
+            let bq0 = bq[[ti, 0]];
+            let aq0 = aq[[ti, 0]];
+            let tot = bq0 + aq0;
+            let spread = a0 - b0;
+            if tot > 0.0 && spread > 1e-12 {
+                let microprice = (aq0 * b0 + bq0 * a0) / tot;
+                let cur = mid[ti];
+                feat[[s_idx, 45]] = ((microprice - cur) / spread) as f32;
+            }
+        }
+
+        // [46] ofi_top5_weighted over 30 ticks (lagged window)
+        if t >= W3S {
+            let v = cum_ofi5[ti] - cum_ofi5[(t - W3S) as usize];
+            feat[[s_idx, 46]] = v as f32;
+        }
+
+        // [47] kyle_lambda_60s
+        if t >= W60S {
+            if let (Some(cxy), Some(cxx)) = (kyle_cum_xy.as_ref(), kyle_cum_xx.as_ref()) {
+                let num = cxy[ti] - cxy[(t - W60S) as usize];
+                let den = cxx[ti] - cxx[(t - W60S) as usize];
+                if den > 1e-18 {
+                    feat[[s_idx, 47]] = (num / den) as f32;
+                }
+            }
+        }
+
+        // [48] vpin_60s
+        if vpin_ready {
+            let t_ts_ref = vpin_t_ts.unwrap();
+            let cs = vpin_cum_signed.as_ref().unwrap();
+            let ca = vpin_cum_abs.as_ref().unwrap();
+            let sample_ts = d_ts[ti];
+            let mut sum_abs_net = 0.0_f64;
+            let mut sum_total = 0.0_f64;
+            for k in 0..VPIN_NUM_BUCKETS {
+                let hi_ts = sample_ts - k * VPIN_BUCKET_MS;
+                let lo_ts = sample_ts - (k + 1) * VPIN_BUCKET_MS;
+                let hi_idx = searchsorted_right_i64(t_ts_ref, hi_ts);
+                let lo_idx = searchsorted_right_i64(t_ts_ref, lo_ts);
+                let net = cs[hi_idx] - cs[lo_idx];
+                let tot = ca[hi_idx] - ca[lo_idx];
+                sum_abs_net += net.abs();
+                sum_total += tot;
+            }
+            if sum_total > 0.0 {
+                feat[[s_idx, 48]] = (sum_abs_net / sum_total) as f32;
+            }
+
+            // [49] cancel_to_trade_ratio_30s (only emit once cancel window saturated)
+            if t >= W30S {
+                let num = cum_cancel[ti] - cum_cancel[(t - W30S) as usize];
+                let lo = searchsorted_left_i64(t_ts_ref, sample_ts - CTR_WINDOW_MS);
+                let hi = searchsorted_right_i64(t_ts_ref, sample_ts);
+                let den = ca[hi] - ca[lo];
+                if den > 0.0 {
+                    feat[[s_idx, 49]] = (num / den) as f32;
                 }
             }
         }

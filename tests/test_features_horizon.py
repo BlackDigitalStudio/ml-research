@@ -47,9 +47,9 @@ def _stream_ref(mid: np.ndarray, indices: np.ndarray) -> np.ndarray:
     return out
 
 
-def test_ext_keys_are_eleven() -> None:
-    assert NUM_EXT_FEATURES == 11
-    assert len(EXT_FEATURE_KEYS) == 11
+def test_ext_keys_count() -> None:
+    assert NUM_EXT_FEATURES == 16
+    assert len(EXT_FEATURE_KEYS) == 16
 
 
 def test_streaming_matches_batch_dense_stage_a() -> None:

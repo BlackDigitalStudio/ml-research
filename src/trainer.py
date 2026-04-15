@@ -1460,12 +1460,16 @@ class Trainer:
                               np.asarray(trade_qty, dtype=np.float64))
         else:
             _tfi_ts, _tfi_q = None, None
-        feat[:, 34:45] = compute_ext_features_batch(
+        feat[:, 34:50] = compute_ext_features_batch(
             mid_prices, indices,
             bid_qty0=bid_vols[:, 0], ask_qty0=ask_vols[:, 0],
             depth_ts_ms=depth_ts,
             trade_ts_ms=_tfi_ts, trade_signed_qty=_tfi_q,
             funding_ts_ms=funding_ts, funding_mark=funding_mark_arr,
+            bid_prices_top5=bid_prices[:, :5],
+            bid_qtys_top5=bid_vols[:, :5],
+            ask_prices_top5=ask_prices[:, :5],
+            ask_qtys_top5=ask_vols[:, :5],
         )
 
         return feat

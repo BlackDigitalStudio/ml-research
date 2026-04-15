@@ -12,7 +12,7 @@ from src.features_ext import FeatureExtEngine, EXT_FEATURE_KEYS
 
 logger = logging.getLogger(__name__)
 
-NUM_FEATURES = 45
+NUM_FEATURES = 50
 NORM_WINDOW = 300   # 30 sec at 100ms
 EMA_SPAN = 5
 TRADE_WINDOW_SEC = 5
@@ -84,6 +84,12 @@ FEATURE_KEYS = [
     # single source of truth for stream↔batch parity.
     "ofi_60s", "ofi_120s", "trade_flow_imbalance_60s",
     "funding_time_to_next_min", "funding_basis_bps",
+    # Horizon-tier (45-49) — Stage C of the 34→49 overhaul (2026-04-15).
+    # Structural microstructure at the target horizon: microprice signal,
+    # depth-weighted OFI, Kyle's lambda (price-impact coefficient), VPIN
+    # (volume-synchronised PIN), cancel-to-trade ratio.
+    "microprice_deviation", "ofi_top5_weighted", "kyle_lambda_60s",
+    "vpin_60s", "cancel_to_trade_ratio_30s",
 ]
 
 assert len(FEATURE_KEYS) == NUM_FEATURES
@@ -370,13 +376,21 @@ class FeatureEngine:
         # Feed mid to the streaming engine, then pull the 6-vector. Engine
         # guards against non-positive mid internally; still cheap to call
         # unconditionally.
-        # Stage A+B horizon features: feed timestamp + L1 quantities so the
-        # engine can track the 60 s / 120 s OFI windows and funding-boundary
-        # timing. Bids/asks are sorted best-first, so [0, 1] is the best-level
-        # quantity; an empty side is impossible here because mid_price > 0.
-        _b0 = float(snap.bids[0, 1]) if len(snap.bids) > 0 else 0.0
-        _a0 = float(snap.asks[0, 1]) if len(snap.asks) > 0 else 0.0
-        self._ext.on_mid(int(snap.timestamp), snap.mid_price, _b0, _a0)
+        # Stage A+B+C horizon features. Feed the full top-5 price + qty
+        # arrays so the engine can track microprice, weighted OFI, cancels,
+        # Kyle's lambda, VPIN, etc. An empty side is impossible here because
+        # mid_price > 0.
+        if len(snap.bids) >= 5 and len(snap.asks) >= 5:
+            _bp5 = np.ascontiguousarray(snap.bids[:5, 0], dtype=np.float64)
+            _bq5 = np.ascontiguousarray(snap.bids[:5, 1], dtype=np.float64)
+            _ap5 = np.ascontiguousarray(snap.asks[:5, 0], dtype=np.float64)
+            _aq5 = np.ascontiguousarray(snap.asks[:5, 1], dtype=np.float64)
+            self._ext.on_depth_l5(int(snap.timestamp), snap.mid_price,
+                                   _bp5, _bq5, _ap5, _aq5)
+        else:
+            _b0 = float(snap.bids[0, 1]) if len(snap.bids) > 0 else 0.0
+            _a0 = float(snap.asks[0, 1]) if len(snap.asks) > 0 else 0.0
+            self._ext.on_mid(int(snap.timestamp), snap.mid_price, _b0, _a0)
         ext_vec = self._ext.get()
         for k, key in enumerate(EXT_FEATURE_KEYS):
             raw[key] = float(ext_vec[k])
