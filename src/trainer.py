@@ -1051,8 +1051,12 @@ class Trainer:
                 p = merged / fname
                 if p.exists():
                     feat_kwargs[label] = p
-            X_feat_raw = rust_bridge.compute_features_from_paths(
+            # Chunked path: slices merged parquets by timestamp range per
+            # chunk so feature_builder never loads the full 42 GB of depth
+            # at once. Chunk size tuned for 62 GB Contabo budget.
+            X_feat_raw = rust_bridge.compute_features_chunked(
                 indices=end_indices, **feat_kwargs,
+                chunk_samples=int(os.environ.get("SCALPER_FEATURE_CHUNK", "200000")),
             )
             logger.info("[rust-direct] feature_builder done in %.1fs "
                         "(shape=%s)", time.monotonic() - t1, X_feat_raw.shape)
