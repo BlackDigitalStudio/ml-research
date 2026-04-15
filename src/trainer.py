@@ -375,6 +375,17 @@ class Trainer:
         """
         import gc
 
+        # === Direct-Rust path opt-in (SCALPER_USE_RUST_DIRECT=1) ===
+        # Bypasses the Python pyarrow load entirely; RAM stays flat at any
+        # sample count. Requires prebuilt data/_merged/*.parquet.
+        if os.environ.get("SCALPER_USE_RUST_DIRECT", "0") in ("1", "true", "yes"):
+            logger.info("[build_samples] using direct-Rust path")
+            return self._build_samples_rust_direct(
+                hours=hours,
+                lob_output_path=lob_output_path,
+                return_sim_inputs=return_sim_inputs,
+            )
+
         # === Load depth as numpy arrays directly (mem-efficient path) ===
         # Old path went through pandas list-of-tuples, which OOMed on the full
         # 76-day Tardis dataset (~80 GB Python objects). New path: arrays
@@ -945,6 +956,264 @@ class Trainer:
             return (X_lob, X_feat, y, sample_mids, target_pnl,
                     sim_mid_paths, sim_entry_long, sim_entry_short)
         return X_lob, X_feat, y, sample_mids, target_pnl
+
+    def _build_samples_rust_direct(
+        self,
+        hours: int,
+        lob_output_path: Path | None = None,
+        return_sim_inputs: bool = False,
+    ):
+        """Direct-Rust path for build_samples.
+
+        Bypasses the Python pyarrow load of raw depth / trades entirely.
+        Reads from `data/_merged/*.parquet` through Rust binaries, keeping
+        Python peak RSS flat regardless of sample count.
+
+        Invariant: merged parquets must be fresh (same newest_mtime as the
+        raw files). For this session they're pre-built; a future commit can
+        add a streaming ingest that updates them incrementally.
+
+        Enabled by setting `SCALPER_USE_RUST_DIRECT=1`.
+        """
+        import subprocess
+        import tempfile
+        import gc
+        from pathlib import Path
+
+        from src import filters, rust_bridge
+        from src.features import KEPT_RAW_INDICES, _RAW_NUM_FEATURES
+
+        merged = self._data_dir / "_merged"
+        depth_p = merged / "depth.parquet"
+        trades_p = merged / "trades.parquet"
+        if not depth_p.exists() or not trades_p.exists():
+            raise RuntimeError(
+                f"_build_samples_rust_direct requires prebuilt merged parquets "
+                f"at {merged}. Run the legacy build_samples path once to "
+                f"materialise them."
+            )
+        for p in (depth_p, trades_p):
+            logger.info("[rust-direct] using %s (%.1f MB)", p,
+                        p.stat().st_size / 1e6)
+
+        # ---- Step 1: invoke build_samples binary ----
+        repo = Path(__file__).resolve().parents[1]
+        bs_bin = repo / "rust_ingest" / "target" / "release" / "build_samples"
+        if not bs_bin.exists():
+            raise RuntimeError(f"build_samples binary missing: {bs_bin}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            max_samples = int(os.environ.get("SCALPER_MAX_SAMPLES", "2000000"))
+            cmd = [
+                str(bs_bin),
+                "--depth", str(depth_p),
+                "--trades", str(trades_p),
+                "--out-dir", str(tmpdir),
+                "--window", str(WINDOW_SIZE),
+                "--horizon", str(SIM_HORIZON),
+                "--step", "2",
+                "--max-samples", str(max_samples),
+            ]
+            t0 = time.monotonic()
+            subprocess.run(cmd, check=True)
+            logger.info("[rust-direct] build_samples done in %.1fs",
+                        time.monotonic() - t0)
+
+            # ---- Step 2: mmap outputs; small arrays read into RAM ----
+            sample_starts = np.load(tmpdir / "sample_starts.npy")
+            end_indices = np.load(tmpdir / "end_indices.npy")
+            sample_ts_ms = np.load(tmpdir / "sample_ts.npy")
+            entry_long_full = np.load(tmpdir / "entry_long.npy")
+            entry_short_full = np.load(tmpdir / "entry_short.npy")
+            sample_mids_full = np.load(tmpdir / "mid.npy")
+            top5_bid_sample = np.load(tmpdir / "top5_bid.npy")
+            top5_ask_sample = np.load(tmpdir / "top5_ask.npy")
+            mid_paths_full = np.load(tmpdir / "mid_paths.npy", mmap_mode="r")
+            X_lob_full = np.load(tmpdir / "X_lob.npy", mmap_mode="r")
+            num_samples = len(sample_starts)
+            logger.info("[rust-direct] %d raw samples", num_samples)
+
+            # ---- Step 3: Rust feature_builder → raw 56-col X_feat ----
+            # Pass all parquets that exist for Stage D cross-exchange features.
+            t1 = time.monotonic()
+            feat_kwargs = {
+                "depth_path": depth_p,
+                "trades_path": trades_p,
+            }
+            for label, fname in (("funding_path", "funding.parquet"),
+                                 ("derivs_path", "derivs.parquet"),
+                                 ("eth_path", "eth.parquet"),
+                                 ("bybit_path", "bybit.parquet"),
+                                 ("okx_path", "okx.parquet"),
+                                 ("bitget_path", "bitget.parquet"),
+                                 ("gateio_path", "gateio.parquet")):
+                p = merged / fname
+                if p.exists():
+                    feat_kwargs[label] = p
+            X_feat_raw = rust_bridge.compute_features_from_paths(
+                indices=end_indices, **feat_kwargs,
+            )
+            logger.info("[rust-direct] feature_builder done in %.1fs "
+                        "(shape=%s)", time.monotonic() - t1, X_feat_raw.shape)
+            assert X_feat_raw.shape[1] == _RAW_NUM_FEATURES
+
+            # ---- Step 4: apply global filter on RAW 56-col indices ----
+            mask = np.ones(num_samples, dtype=bool)
+            # Time-of-day: Asia night skip [04, 07) UTC.
+            sec_of_day = (sample_ts_ms // 1000) % (24 * 3600)
+            hour_utc = sec_of_day // 3600
+            mask &= ~(
+                (hour_utc >= filters.ASIA_NIGHT_START_UTC)
+                & (hour_utc < filters.ASIA_NIGHT_END_UTC)
+            )
+            # Funding blackout ±FUNDING_GUARD_MIN.
+            min_of_day = (sample_ts_ms // 60_000) % (24 * 60)
+            funding_ok = np.ones(num_samples, dtype=bool)
+            for h in filters.FUNDING_HOURS_UTC:
+                center = h * 60
+                delta = np.abs(min_of_day - center)
+                delta = np.minimum(delta, 24 * 60 - delta)
+                funding_ok &= delta > filters.FUNDING_GUARD_MIN
+            mask &= funding_ok
+            # RAW indices: [3] spread, [21] vol_ratio, [20] spoof, [23] hurst,
+            # [1] imbalance.
+            mask &= X_feat_raw[:, 3] <= filters.MAX_SPREAD_USD
+            vol_ratio_arr = X_feat_raw[:, 21]
+            mask &= (vol_ratio_arr > filters.VOL_BAND_LOW) & (
+                vol_ratio_arr < filters.VOL_BAND_HIGH
+            )
+            mask &= top5_bid_sample >= filters.MIN_TOP5_BTC_LIQUIDITY
+            mask &= top5_ask_sample >= filters.MIN_TOP5_BTC_LIQUIDITY
+            mask &= X_feat_raw[:, 20] <= filters.SPOOF_SCORE_MAX
+            mask &= X_feat_raw[:, 23] >= filters.HURST_MEAN_REVERTING_MAX
+            imb_arr = X_feat_raw[:, 1]
+            long_allowed = imb_arr > filters.IMBALANCE_LONG_MIN
+            short_allowed = imb_arr < filters.IMBALANCE_SHORT_MAX
+            mask &= long_allowed | short_allowed
+            mask &= sample_mids_full > 0
+            mask &= entry_long_full > 0
+            mask &= entry_short_full > 0
+            mask &= entry_short_full > entry_long_full
+
+            kept_indices = np.where(mask)[0]
+            n_kept = len(kept_indices)
+            logger.info("[rust-direct] Global filter: kept %d / %d (%.1f%%)",
+                        n_kept, num_samples,
+                        100 * n_kept / max(num_samples, 1))
+            if n_kept == 0:
+                raise ValueError("No samples survived filtering")
+
+            # ---- Step 5: adaptive TP/SL/timeout per kept sample ----
+            base_tp = float(self._cfg.take_profit_pct)
+            base_sl = float(self._cfg.stop_loss_pct)
+            base_timeout_sec = float(self._cfg.position_timeout_sec)
+            comm_win = float(self._cfg.commission_win_pct)
+            comm_loss = float(self._cfg.commission_loss_pct)
+
+            kept_vol = vol_ratio_arr[kept_indices].astype(np.float64)
+            kept_tp_arr = np.empty(n_kept, dtype=np.float64)
+            kept_sl_arr = np.empty(n_kept, dtype=np.float64)
+            kept_to_arr = np.empty(n_kept, dtype=np.int64)
+            for i, vr in enumerate(kept_vol):
+                tp, sl = filters.adaptive_tp_sl(float(vr), base_tp, base_sl)
+                ts_sec = filters.dynamic_timeout_sec(
+                    avg_volatility=1.0,
+                    current_volatility=max(float(vr), 1e-9),
+                    base_timeout_sec=base_timeout_sec,
+                )
+                kept_tp_arr[i] = tp
+                kept_sl_arr[i] = sl
+                kept_to_arr[i] = int(round(ts_sec * 10.0))
+
+            kept_entry_long = entry_long_full[kept_indices].astype(np.float64)
+            kept_entry_short = entry_short_full[kept_indices].astype(np.float64)
+            # Materialise kept mid_paths from the Rust-mmap (n_kept, 1300) —
+            # acceptable size: 1M * 10.4 KB ≈ 10 GB at the hard ceiling.
+            kept_mid_paths = np.ascontiguousarray(mid_paths_full[kept_indices])
+            kept_long_allowed = long_allowed[kept_indices]
+            kept_short_allowed = short_allowed[kept_indices]
+
+            # ---- Step 6: Rust sim_labels ----
+            t_sim = time.monotonic()
+            out = rust_bridge.simulate_labels(
+                entry_long=kept_entry_long,
+                entry_short=kept_entry_short,
+                mid_paths=kept_mid_paths,
+                tp_pct=kept_tp_arr,
+                sl_pct=kept_sl_arr,
+                timeout_ticks=kept_to_arr,
+                commission_win_pct=comm_win,
+                commission_loss_pct=comm_loss,
+                fill_latency_ms=150.0,
+            )
+            y_full = np.full(num_samples, FLAT, dtype=np.int64)
+            pnl_full = np.zeros(num_samples, dtype=np.float32)
+            both = kept_long_allowed & kept_short_allowed
+            only_l = kept_long_allowed & ~kept_short_allowed
+            only_s = ~kept_long_allowed & kept_short_allowed
+            y_full[kept_indices[both]] = out["y"][both]
+            pnl_full[kept_indices[both]] = out["target_pnl"][both].astype(np.float32)
+            pnl_l = out["pnl_long"][only_l]
+            y_full[kept_indices[only_l]] = np.where(pnl_l > 0, UP, FLAT)
+            pnl_full[kept_indices[only_l]] = pnl_l.astype(np.float32)
+            pnl_s = out["pnl_short"][only_s]
+            y_full[kept_indices[only_s]] = np.where(pnl_s > 0, DOWN, FLAT)
+            pnl_full[kept_indices[only_s]] = pnl_s.astype(np.float32)
+            logger.info("[rust-direct] sim_labels: %d samples in %.1fs",
+                        n_kept, time.monotonic() - t_sim)
+
+            # ---- Step 7: compact & write X_lob to disk (never full into RAM) ----
+            # Write a fresh npy header, then stream-copy each row from the
+            # Rust-temp mmap to the final cache path via slab copies. This
+            # keeps Python peak RSS below ~1 GB regardless of sample count.
+            lob_actual_path = lob_output_path if lob_output_path is not None \
+                else self._data_dir / "_tmp_X_lob.npy"
+            shape_out = (n_kept, 3, 20, WINDOW_SIZE)
+            X_lob_out = np.lib.format.open_memmap(
+                str(lob_actual_path), mode="w+", dtype=np.float32,
+                shape=shape_out,
+            )
+            SLAB = 5_000
+            for b in range(0, n_kept, SLAB):
+                e = min(b + SLAB, n_kept)
+                # `kept_indices[b:e]` are sorted ascending (np.where returns
+                # monotone). Fancy-indexing on an mmap allocates a new array
+                # of slab size (~60 MB for 5k samples) — well within budget.
+                X_lob_out[b:e] = X_lob_full[kept_indices[b:e]]
+                X_lob_out.flush()
+            del X_lob_out, X_lob_full
+            gc.collect()
+            X_lob_mmap = np.load(str(lob_actual_path), mmap_mode="r")
+
+            # ---- Step 8: slice X_feat to 49-col + apply mask ----
+            X_feat = X_feat_raw[:, KEPT_RAW_INDICES][mask]
+            y = y_full[mask]
+            target_pnl = pnl_full[mask]
+            sample_mids = sample_mids_full[mask]
+
+            # ---- Step 9: sim_inputs sidecar ----
+            if return_sim_inputs:
+                keep_kept = np.isin(kept_indices, np.where(mask)[0])
+                sim_mid_paths = kept_mid_paths[keep_kept]
+                sim_entry_long = kept_entry_long[keep_kept]
+                sim_entry_short = kept_entry_short[keep_kept]
+
+            # Label stats log.
+            counts = {UP: int((y == UP).sum()),
+                      DOWN: int((y == DOWN).sum()),
+                      FLAT: int((y == FLAT).sum())}
+            logger.info(
+                "[rust-direct] labels: UP=%d (%.1f%%) DOWN=%d (%.1f%%) FLAT=%d (%.1f%%)",
+                counts[UP], counts[UP] / len(y) * 100,
+                counts[DOWN], counts[DOWN] / len(y) * 100,
+                counts[FLAT], counts[FLAT] / len(y) * 100,
+            )
+
+            if return_sim_inputs:
+                return (X_lob_mmap, X_feat, y, sample_mids, target_pnl,
+                        sim_mid_paths, sim_entry_long, sim_entry_short)
+            return X_lob_mmap, X_feat, y, sample_mids, target_pnl
 
     def _save_streams_for_rust(
         self,

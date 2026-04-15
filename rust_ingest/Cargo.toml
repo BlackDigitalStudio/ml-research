@@ -15,6 +15,10 @@ path = "src/bin/feature_builder.rs"
 name = "sim_labels"
 path = "src/bin/sim_labels.rs"
 
+[[bin]]
+name = "build_samples"
+path = "src/bin/build_samples.rs"
+
 [lib]
 name = "scalper_ingest"
 path = "src/lib.rs"
