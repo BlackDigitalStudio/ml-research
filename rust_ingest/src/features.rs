@@ -11,7 +11,7 @@ use ndarray::{s, Array1, Array2};
 
 use crate::{CrossExTrades, DepthData, DerivativesData, FundingData, TradesData};
 
-pub const NUM_FEATURES: usize = 40;
+pub const NUM_FEATURES: usize = 45;
 
 /// Must match `src/features.py::QUEUE_DECAY_ALPHA`.
 pub const QUEUE_DECAY_ALPHA: f64 = 0.1;
@@ -952,6 +952,148 @@ pub fn fill_horizon_features(feat: &mut Array2<f32>, depth: &DepthData, indices:
         if t >= W120 {
             let bv = cum_pair[ti] - cum_pair[(t - W120 + 1) as usize];
             feat[[s_idx, 39]] = (bv_scale * bv) as f32;
+        }
+    }
+}
+
+/// Fill cols [40..=44] — horizon-tier Stage B (OFI windows + trade flow + funding).
+///
+/// Must match `src/features_ext.py::compute_ext_features_batch` bit-for-bit
+/// in f32. Semantics:
+///
+///   [40] ofi_60s   = Σ ofi_raw[k] for k in [T-600, T-1] (lagged convention
+///                     matching ofi_1s/5s/30s on cols 26-28)
+///   [41] ofi_120s  = Σ ofi_raw[k] for k in [T-1200, T-1]
+///   [42] trade_flow_imbalance_60s
+///                   = (Σ signed_qty − 0) / Σ |qty| over trades whose ts
+///                     is in [sample_ts − 60 000, sample_ts] (ms).
+///                     signed_qty = +qty if !is_buyer_maker, else −qty.
+///   [43] funding_time_to_next_min
+///                   = minutes to the next 00/08/16 UTC funding boundary,
+///                     from depth_ts[T] in ms.
+///   [44] funding_basis_bps
+///                   = (mark − mid) / mid × 10 000 where `mark` is the
+///                     most recent mark_price at or before sample_ts
+///                     and `mid` is the mid at sample index T.
+///                     Zero when no funding row precedes sample_ts, or
+///                     when mark/mid <= 0.
+///
+/// If `trades` or `funding` is None the respective columns stay 0.
+pub fn fill_horizon_features_b(
+    feat: &mut Array2<f32>,
+    depth: &DepthData,
+    indices: &[i64],
+    trades: Option<&TradesData>,
+    funding: Option<&FundingData>,
+) {
+    const W60: i64 = 600;
+    const W120: i64 = 1200;
+    const TFI_WINDOW_MS: i64 = 60_000;
+    const FUNDING_PERIOD_MS: i64 = 8 * 3600 * 1000;
+
+    let n = depth.n_rows();
+    if n == 0 || indices.is_empty() {
+        return;
+    }
+    let bq = &depth.bid_qtys;
+    let aq = &depth.ask_qtys;
+    let mid = depth.mid_prices();
+    let d_ts = depth.timestamps.as_slice().unwrap();
+
+    // --- ofi_raw + cumulative sum for 60/120 s windows ---
+    let mut cum_ofi = Array1::<f64>::zeros(n + 1);
+    {
+        let mut s = 0.0;
+        for i in 1..n {
+            let raw = (bq[[i, 0]] - bq[[i - 1, 0]]) - (aq[[i, 0]] - aq[[i - 1, 0]]);
+            s += raw;
+            cum_ofi[i + 1] = s;
+        }
+        // cum_ofi[0] = cum_ofi[1] = 0 by construction (no ofi at t=0).
+    }
+
+    // --- trade-flow cumulative sums (signed and abs) ---
+    let (t_ts, cum_signed, cum_abs) = if let Some(tr) = trades {
+        let nt = tr.len();
+        let ts = tr.timestamps.as_slice().unwrap();
+        let q = tr.quantities.as_slice().unwrap();
+        let is_sell = &tr.is_sell;
+        let mut cs = Array1::<f64>::zeros(nt + 1);
+        let mut ca = Array1::<f64>::zeros(nt + 1);
+        for i in 0..nt {
+            let signed = if is_sell[i] { -q[i] } else { q[i] };
+            cs[i + 1] = cs[i] + signed;
+            ca[i + 1] = ca[i] + q[i].abs();
+        }
+        (Some(ts), Some(cs), Some(ca))
+    } else {
+        (None, None, None)
+    };
+
+    // --- funding mark slice (searchsorted per-sample) ---
+    let (f_ts, f_mark) = if let Some(f) = funding {
+        if f.timestamps.is_empty() {
+            (None, None)
+        } else {
+            (
+                Some(f.timestamps.as_slice().unwrap()),
+                Some(f.mark_price.as_slice().unwrap()),
+            )
+        }
+    } else {
+        (None, None)
+    };
+
+    for (s_idx, &raw_idx) in indices.iter().enumerate() {
+        let t = raw_idx;
+        let ti = t as usize;
+
+        // [40] ofi_60s — window is ofi_raw[t-W .. t-1] (t-1 inclusive).
+        if t >= W60 {
+            let v = cum_ofi[ti] - cum_ofi[(t - W60) as usize];
+            feat[[s_idx, 40]] = v as f32;
+        }
+        if t >= W120 {
+            let v = cum_ofi[ti] - cum_ofi[(t - W120) as usize];
+            feat[[s_idx, 41]] = v as f32;
+        }
+
+        // [42] trade_flow_imbalance_60s
+        if let (Some(tts), Some(cs), Some(ca)) = (t_ts, cum_signed.as_ref(), cum_abs.as_ref()) {
+            let sample_ts = d_ts[ti];
+            let lo = searchsorted_left_i64(tts, sample_ts - TFI_WINDOW_MS);
+            let hi = searchsorted_right_i64(tts, sample_ts);
+            let signed = cs[hi] - cs[lo];
+            let total = ca[hi] - ca[lo];
+            feat[[s_idx, 42]] = if total > 0.0 { (signed / total) as f32 } else { 0.0 };
+        }
+
+        // [43] funding_time_to_next_min
+        {
+            let sample_ts = d_ts[ti];
+            if sample_ts > 0 {
+                let rem = sample_ts.rem_euclid(FUNDING_PERIOD_MS);
+                let mins = if rem == 0 {
+                    0.0
+                } else {
+                    (FUNDING_PERIOD_MS - rem) as f64 / 60_000.0
+                };
+                feat[[s_idx, 43]] = mins as f32;
+            }
+        }
+
+        // [44] funding_basis_bps
+        if let (Some(fts), Some(fmark)) = (f_ts, f_mark) {
+            let sample_ts = d_ts[ti];
+            let r = searchsorted_right_i64(fts, sample_ts);
+            if r > 0 {
+                let fi = (r - 1).min(fts.len() - 1);
+                let mark = fmark[fi];
+                let m = mid[ti];
+                if mark > 0.0 && m > 0.0 {
+                    feat[[s_idx, 44]] = ((mark - m) / m * 10_000.0) as f32;
+                }
+            }
         }
     }
 }

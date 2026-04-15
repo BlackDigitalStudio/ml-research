@@ -30,23 +30,29 @@ def _synthetic_mid(n: int, seed: int = 42) -> np.ndarray:
 
 
 def _stream_ref(mid: np.ndarray, indices: np.ndarray) -> np.ndarray:
-    """Drive FeatureExtEngine tick-by-tick; sample at `indices`."""
+    """Drive FeatureExtEngine tick-by-tick; sample at `indices`.
+
+    Stage A signature: feeds only mid, skips Stage B inputs. Columns 6..10
+    (Stage B) stay at the streaming defaults (OFI zeros because bq/aq are
+    zero; TFI zero because no trades; funding_time uses ts=0 which the
+    engine gates to 0; basis zero because mark not set).
+    """
     eng = FeatureExtEngine()
     out = np.zeros((len(indices), NUM_EXT_FEATURES), dtype=np.float32)
     wanted = {int(i): k for k, i in enumerate(indices)}
     for t, m in enumerate(mid):
-        eng.on_mid(float(m))
+        eng.on_mid(0, float(m))
         if t in wanted:
             out[wanted[t]] = eng.get().copy()
     return out
 
 
-def test_ext_keys_are_six() -> None:
-    assert NUM_EXT_FEATURES == 6
-    assert len(EXT_FEATURE_KEYS) == 6
+def test_ext_keys_are_eleven() -> None:
+    assert NUM_EXT_FEATURES == 11
+    assert len(EXT_FEATURE_KEYS) == 11
 
 
-def test_streaming_matches_batch_dense() -> None:
+def test_streaming_matches_batch_dense_stage_a() -> None:
     n = 2500
     mid = _synthetic_mid(n)
     indices = np.arange(0, n, dtype=np.int64)
@@ -54,15 +60,13 @@ def test_streaming_matches_batch_dense() -> None:
     ref = _stream_ref(mid, indices)
     got = compute_ext_features_batch(mid.astype(np.float64), indices)
 
-    for col, name in enumerate(EXT_FEATURE_KEYS):
-        # Float accumulation path differs (stream uses running sums, batch
-        # uses cumsum) so we compare in f32 with a loose absolute tolerance
-        # that's still far tighter than any real signal scale.
+    # Only Stage A columns (0..5) are exercised by this helper.
+    for col in range(6):
         max_abs = float(np.max(np.abs(ref[:, col] - got[:, col])))
-        assert max_abs < 1e-6, f"column {col} ({name}) diverged: max |Δ| = {max_abs:g}"
+        assert max_abs < 1e-6, f"column {col} ({EXT_FEATURE_KEYS[col]}) diverged: max |Δ| = {max_abs:g}"
 
 
-def test_streaming_matches_batch_sparse_indices() -> None:
+def test_streaming_matches_batch_sparse_indices_stage_a() -> None:
     n = 3000
     mid = _synthetic_mid(n, seed=7)
     indices = np.array([0, 10, 299, 300, 599, 600, 1199, 1200, 2500, 2999], dtype=np.int64)
@@ -70,8 +74,8 @@ def test_streaming_matches_batch_sparse_indices() -> None:
     ref = _stream_ref(mid, indices)
     got = compute_ext_features_batch(mid.astype(np.float64), indices)
 
-    diff = np.max(np.abs(ref - got))
-    assert diff < 1e-6, f"max |Δ| across all cols = {diff:g}"
+    diff = np.max(np.abs(ref[:, :6] - got[:, :6]))
+    assert diff < 1e-6, f"max |Δ| across Stage A cols = {diff:g}"
 
 
 def test_zero_and_short_series_are_safe() -> None:

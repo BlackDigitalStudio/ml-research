@@ -33,6 +33,11 @@ MICRO_DEPTH_COLS = [20, 21, 23, 24, 25, 26, 27, 28, 29, 31, 32]
 MICRO_TRADE_COLS = [22, 33]
 # Horizon-tier — Stage A of the 34→49 overhaul. Depth-only (uses mid_prices).
 HORIZON_COLS = [34, 35, 36, 37, 38, 39]
+# Horizon-tier — Stage B (40-44). [40,41] depth-only OFI windows; [42] needs
+# trades; [43] depth-ts only; [44] needs funding (mark_price column).
+HORIZON_B_DEPTH_COLS = [40, 41, 43]
+HORIZON_B_TRADE_COLS = [42]
+HORIZON_B_FUNDING_COLS = [44]
 # Tolerances chosen generously; in practice parity is usually exact f32.
 ATOL = {
     0: 1e-4,    # OFI
@@ -78,6 +83,14 @@ ATOL = {
     37: 1e-6,   # realized_vol_60s
     38: 1e-6,   # realized_vol_120s
     39: 1e-6,   # bipower_var_120s
+    # Stage B. OFI windows accumulate over 60-120 s; absolute scale can
+    # reach 100 BTC of net depth delta, so a single-ulp f32 rounding gives
+    # ~5e-4 atol headroom. TFI/funding-time/basis are bounded ratios.
+    40: 5e-3,   # ofi_60s
+    41: 1e-2,   # ofi_120s
+    42: 1e-6,   # trade_flow_imbalance_60s
+    43: 1e-2,   # funding_time_to_next_min (480 max → 1 ulp ~ 3e-5; pad)
+    44: 1e-4,   # funding_basis_bps
 }
 
 
@@ -113,7 +126,7 @@ def load_trades(parquet_path: Path, with_price: bool = True):
 
 def python_features(depth_ts, bid_prices, bid_vols, ask_prices, ask_vols, mid_prices, indices,
                     trade_ts=None, trade_qty=None, trade_side=None, trade_price=None,
-                    funding_ts=None, funding_rate=None,
+                    funding_ts=None, funding_rate=None, funding_mark=None,
                     deriv_ts=None, deriv_oi=None, deriv_ls=None,
                     eth_ts=None, eth_price=None, eth_qty=None, eth_side=None,
                     cross_ex_data=None):
@@ -145,6 +158,7 @@ def python_features(depth_ts, bid_prices, bid_vols, ask_prices, ask_vols, mid_pr
         indices=indices,
         funding_ts=funding_ts,
         funding_rate_arr=funding_rate,
+        funding_mark_arr=funding_mark,
         deriv_ts=deriv_ts,
         deriv_oi=deriv_oi,
         deriv_ls=deriv_ls,
@@ -202,9 +216,16 @@ def main() -> int:
         trade_ts, trade_qty, trade_side, trade_price = load_trades(Path(args.trades))
         print(f"[parity] {len(trade_ts)} trade rows")
     funding_ts = funding_rate = None
+    funding_mark = None
     if args.funding:
         print(f"[parity] loading funding {args.funding}")
-        funding_ts, funding_rate = load_scalar(Path(args.funding), ["funding_rate"])
+        # mark_price is required for col 44 (funding_basis_bps); fall back to
+        # zeros if not present so older parquets still validate the rest.
+        try:
+            funding_ts, funding_rate, funding_mark = load_scalar(
+                Path(args.funding), ["funding_rate", "mark_price"])
+        except Exception:
+            funding_ts, funding_rate = load_scalar(Path(args.funding), ["funding_rate"])
         print(f"[parity] {len(funding_ts)} funding rows")
     deriv_ts = deriv_oi = deriv_ls = None
     if args.derivs:
@@ -241,6 +262,7 @@ def main() -> int:
                               trade_ts=trade_ts, trade_qty=trade_qty,
                               trade_side=trade_side, trade_price=trade_price,
                               funding_ts=funding_ts, funding_rate=funding_rate,
+                              funding_mark=funding_mark,
                               deriv_ts=deriv_ts, deriv_oi=deriv_oi, deriv_ls=deriv_ls,
                               eth_ts=eth_ts, eth_price=eth_price,
                               eth_qty=eth_qty, eth_side=eth_side,
@@ -267,11 +289,11 @@ def main() -> int:
 
     # --- Compare ---
     ok = True
-    cols = list(LOB_COLS) + MICRO_DEPTH_COLS + HORIZON_COLS
+    cols = list(LOB_COLS) + MICRO_DEPTH_COLS + HORIZON_COLS + HORIZON_B_DEPTH_COLS
     if args.trades:
-        cols += TRADE_COLS + MICRO_TRADE_COLS
+        cols += TRADE_COLS + MICRO_TRADE_COLS + HORIZON_B_TRADE_COLS
     if args.funding:
-        cols += FUNDING_COLS
+        cols += FUNDING_COLS + HORIZON_B_FUNDING_COLS
     if args.derivs:
         cols += DERIV_COLS
     if args.eth:

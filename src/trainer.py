@@ -424,10 +424,12 @@ class Trainer:
         del eth_trade_df
 
         funding_df = self._load_parquet_dir("funding", hours)
-        funding_ts = funding_rate = None
+        funding_ts = funding_rate = funding_mark = None
         if funding_df is not None and len(funding_df) > 0:
             funding_ts = funding_df["timestamp"].values.astype(np.int64).copy()
             funding_rate = funding_df["funding_rate"].values.astype(np.float64).copy()
+            if "mark_price" in funding_df.columns:
+                funding_mark = funding_df["mark_price"].values.astype(np.float64).copy()
             logger.info("Funding data loaded: %d", len(funding_ts))
         del funding_df
 
@@ -550,6 +552,7 @@ class Trainer:
                 trade_side=trade_side, trade_price=trade_price,
                 eth_ts=eth_ts, eth_price=eth_price, eth_qty=eth_qty, eth_side=eth_side,
                 funding_ts=funding_ts, funding_rate=funding_rate,
+                funding_mark=funding_mark,
                 deriv_ts=deriv_ts, deriv_oi=deriv_oi, deriv_ls=deriv_ls,
                 cross_ex_data=cross_ex_data,
             )
@@ -567,7 +570,10 @@ class Trainer:
             del bid_vols, ask_vols, bid_prices, ask_prices, mid_prices
             if trade_ts is not None: del trade_ts, trade_qty, trade_side, trade_price
             if eth_ts is not None: del eth_ts, eth_price, eth_qty, eth_side
-            if funding_ts is not None: del funding_ts, funding_rate
+            if funding_ts is not None:
+                del funding_ts, funding_rate
+                if funding_mark is not None:
+                    del funding_mark
             if deriv_ts is not None: del deriv_ts, deriv_oi, deriv_ls
             cross_ex_data = None
             gc.collect()
@@ -589,6 +595,7 @@ class Trainer:
                 trade_price=trade_price,
                 eth_ts=eth_ts, eth_price=eth_price, eth_qty=eth_qty, eth_side=eth_side,
                 funding_ts=funding_ts, funding_rate_arr=funding_rate,
+                funding_mark_arr=funding_mark,
                 deriv_ts=deriv_ts, deriv_oi=deriv_oi, deriv_ls=deriv_ls,
                 cross_ex_data=cross_ex_data,
             )
@@ -945,7 +952,7 @@ class Trainer:
         bid_vols, ask_vols, bid_prices, ask_prices, depth_ts,
         trade_ts, trade_qty, trade_side, trade_price,
         eth_ts=None, eth_price=None, eth_qty=None, eth_side=None,
-        funding_ts=None, funding_rate=None,
+        funding_ts=None, funding_rate=None, funding_mark=None,
         deriv_ts=None, deriv_oi=None, deriv_ls=None,
         cross_ex_data: dict | None = None,
     ) -> dict:
@@ -977,9 +984,10 @@ class Trainer:
 
         if funding_ts is not None and len(funding_ts) > 0:
             paths["funding_path"] = merged / "funding.parquet"
+            _mark = funding_mark if funding_mark is not None else np.zeros(len(funding_ts))
             _write_scalar_parquet(paths["funding_path"], funding_ts,
                                    {"funding_rate": funding_rate,
-                                    "mark_price": np.zeros(len(funding_ts))})
+                                    "mark_price": _mark})
 
         if deriv_ts is not None and len(deriv_ts) > 0:
             paths["derivs_path"] = merged / "derivs.parquet"
@@ -1034,7 +1042,7 @@ class Trainer:
         *,
         trade_price: np.ndarray | None = None,
         eth_ts=None, eth_price=None, eth_qty=None, eth_side=None,
-        funding_ts=None, funding_rate_arr=None,
+        funding_ts=None, funding_rate_arr=None, funding_mark_arr=None,
         deriv_ts=None, deriv_oi=None, deriv_ls=None,
         cross_ex_data: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
     ) -> np.ndarray:
@@ -1054,6 +1062,7 @@ class Trainer:
                 eth_ts=eth_ts, eth_price=eth_price,
                 eth_qty=eth_qty, eth_side=eth_side,
                 funding_ts=funding_ts, funding_rate_arr=funding_rate_arr,
+                funding_mark_arr=funding_mark_arr,
                 deriv_ts=deriv_ts, deriv_oi=deriv_oi, deriv_ls=deriv_ls,
                 cross_ex_data=cross_ex_data,
             )
@@ -1438,11 +1447,26 @@ class Trainer:
             eff_ema[i] = e_acc
         feat[:, 33] = eff_ema[indices].astype(np.float32)
 
-        # === Horizon-tier (cols 34-39) — Stage A of the 34→49 overhaul ===
+        # === Horizon-tier (cols 34-44) — Stage A + B of the 34→49 overhaul ===
         # Single source of truth for streaming↔batch parity lives in
         # `features_ext`; the Rust port must match this block column-by-column.
         from src.features_ext import compute_ext_features_batch
-        feat[:, 34:40] = compute_ext_features_batch(mid_prices, indices)
+        # Signed per-trade qty for feature 42 (trade_flow_imbalance_60s):
+        # `is_buyer_maker = True` -> aggressor was a seller -> negative signed qty.
+        if trade_ts is not None and len(trade_ts) > 0:
+            _tfi_ts = trade_ts
+            _tfi_q = np.where(np.asarray(trade_side, dtype=bool),
+                              -np.asarray(trade_qty, dtype=np.float64),
+                              np.asarray(trade_qty, dtype=np.float64))
+        else:
+            _tfi_ts, _tfi_q = None, None
+        feat[:, 34:45] = compute_ext_features_batch(
+            mid_prices, indices,
+            bid_qty0=bid_vols[:, 0], ask_qty0=ask_vols[:, 0],
+            depth_ts_ms=depth_ts,
+            trade_ts_ms=_tfi_ts, trade_signed_qty=_tfi_q,
+            funding_ts_ms=funding_ts, funding_mark=funding_mark_arr,
+        )
 
         return feat
 

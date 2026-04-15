@@ -29,10 +29,10 @@ def _synth_primaries(n: int, n_models: int = 3, acc: float = 0.60,
 
 def test_stack_inputs_concatenates_all_primaries():
     softs = [np.random.rand(100, 3).astype(np.float32) for _ in range(4)]
-    X_feat = np.random.randn(100, 40).astype(np.float32)
+    X_feat = np.random.randn(100, 45).astype(np.float32)
     X = stack_inputs(softs, X_feat=X_feat)
-    # 6 features per primary (soft 3 + max 1 + margin 1 + entropy 1) + 40 feats
-    assert X.shape == (100, 4 * 6 + 40)
+    # 6 features per primary (soft 3 + max 1 + margin 1 + entropy 1) + 45 feats
+    assert X.shape == (100, 4 * 6 + 45)
 
 
 def test_stack_inputs_without_features():

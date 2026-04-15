@@ -153,7 +153,7 @@ def compute_features(
     *,
     trade_price=None,
     eth_ts=None, eth_price=None, eth_qty=None, eth_side=None,
-    funding_ts=None, funding_rate_arr=None,
+    funding_ts=None, funding_rate_arr=None, funding_mark_arr=None,
     deriv_ts=None, deriv_oi=None, deriv_ls=None,
     cross_ex_data=None,
 ) -> np.ndarray:
@@ -183,9 +183,10 @@ def compute_features(
 
         if funding_ts is not None and len(funding_ts) > 0:
             fp = td / "funding.parquet"
+            _mark = funding_mark_arr if funding_mark_arr is not None else np.zeros(len(funding_ts))
             _write_scalar_parquet(fp, funding_ts,
                                    {"funding_rate": funding_rate_arr,
-                                    "mark_price": np.zeros(len(funding_ts))})
+                                    "mark_price": _mark})
             cmd += ["--funding", str(fp)]
 
         if deriv_ts is not None and len(deriv_ts) > 0:

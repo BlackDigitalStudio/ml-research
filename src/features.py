@@ -12,7 +12,7 @@ from src.features_ext import FeatureExtEngine, EXT_FEATURE_KEYS
 
 logger = logging.getLogger(__name__)
 
-NUM_FEATURES = 40
+NUM_FEATURES = 45
 NORM_WINDOW = 300   # 30 sec at 100ms
 EMA_SPAN = 5
 TRADE_WINDOW_SEC = 5
@@ -76,6 +76,14 @@ FEATURE_KEYS = [
     # `rust_ingest/src/features.rs::fill_horizon_features`.
     "momentum_30s", "momentum_60s", "momentum_120s",
     "realized_vol_60s", "realized_vol_120s", "bipower_var_120s",
+    # Horizon-tier (40-44) — Stage B of the 34→49 overhaul (2026-04-15).
+    # OFI extended to 60s/120s windows matches the 60-180 s holding zone;
+    # trade_flow_imbalance_60s gives the signed-volume regime at the target
+    # horizon; funding features capture the perp-vs-spot premium and the
+    # funding-boundary regime shift. See `src/features_ext.py` for the
+    # single source of truth for stream↔batch parity.
+    "ofi_60s", "ofi_120s", "trade_flow_imbalance_60s",
+    "funding_time_to_next_min", "funding_basis_bps",
 ]
 
 assert len(FEATURE_KEYS) == NUM_FEATURES
@@ -181,16 +189,22 @@ class FeatureEngine:
     # --- Data ingestion callbacks ---
 
     def on_aggtrade(self, data: dict) -> None:
-        self._trades.append({
-            "T": data.get("T", int(time.time() * 1000)),
-            "p": float(data.get("p", 0)),
-            "q": float(data.get("q", 0)),
-            "m": data.get("m", False),
-        })
+        ts = data.get("T", int(time.time() * 1000))
+        p = float(data.get("p", 0))
+        q = float(data.get("q", 0))
+        m = data.get("m", False)
+        self._trades.append({"T": ts, "p": p, "q": q, "m": m})
+        # Feed the horizon-tier trade-flow window (feature 42). is_buyer_maker
+        # True means the aggressor was a seller -> signed qty is negative.
+        if q > 0:
+            signed = -q if m else q
+            self._ext.on_trade(int(ts), signed)
 
     def on_markprice(self, data: dict) -> None:
         self.funding_rate = float(data.get("r", 0))
         self.mark_price = float(data.get("p", 0))
+        # Feature 44 (funding_basis_bps) needs the latest mark price.
+        self._ext.set_funding(self.mark_price)
 
     def on_bybit_aggtrade(self, data: dict) -> None:
         """Bybit BTCUSDT trade — leads Binance by 100-500ms.
@@ -356,7 +370,13 @@ class FeatureEngine:
         # Feed mid to the streaming engine, then pull the 6-vector. Engine
         # guards against non-positive mid internally; still cheap to call
         # unconditionally.
-        self._ext.on_mid(snap.mid_price)
+        # Stage A+B horizon features: feed timestamp + L1 quantities so the
+        # engine can track the 60 s / 120 s OFI windows and funding-boundary
+        # timing. Bids/asks are sorted best-first, so [0, 1] is the best-level
+        # quantity; an empty side is impossible here because mid_price > 0.
+        _b0 = float(snap.bids[0, 1]) if len(snap.bids) > 0 else 0.0
+        _a0 = float(snap.asks[0, 1]) if len(snap.asks) > 0 else 0.0
+        self._ext.on_mid(int(snap.timestamp), snap.mid_price, _b0, _a0)
         ext_vec = self._ext.get()
         for k, key in enumerate(EXT_FEATURE_KEYS):
             raw[key] = float(ext_vec[k])

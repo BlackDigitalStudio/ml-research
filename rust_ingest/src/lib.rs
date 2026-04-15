@@ -274,17 +274,20 @@ pub fn read_trades_parquet(path: &Path) -> Result<TradesData> {
 }
 
 /// Funding parquet — schema: {timestamp:i64, funding_rate:f64, mark_price:f64}.
-/// We only load ts + funding_rate.
+/// `mark_price` is loaded for the horizon-tier basis feature (col 44).
 pub struct FundingData {
     pub timestamps: Array1<i64>,
     pub funding_rate: Array1<f64>,
+    pub mark_price: Array1<f64>,
 }
 
 pub fn read_funding_parquet(path: &Path) -> Result<FundingData> {
-    let (ts, cols) = load_scalar_parquet(path, &["funding_rate"])?;
+    let (ts, cols) = load_scalar_parquet(path, &["funding_rate", "mark_price"])?;
+    let mut it = cols.into_iter();
     Ok(FundingData {
         timestamps: ts,
-        funding_rate: cols.into_iter().next().unwrap(),
+        funding_rate: it.next().unwrap(),
+        mark_price: it.next().unwrap(),
     })
 }
 
