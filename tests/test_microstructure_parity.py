@@ -27,15 +27,16 @@ from src.order_book import OrderBook, Snapshot, BOOK_DEPTH
 
 
 def test_num_features_constant() -> None:
-    assert NUM_FEATURES == 56
+    assert NUM_FEATURES == 49
     assert len(FEATURE_KEYS) == NUM_FEATURES
-    assert FEATURE_KEYS[31] == "queue_pressure"
-    assert FEATURE_KEYS[32] == "top3_asymmetry"
-    assert FEATURE_KEYS[33] == "effective_spread_ratio"
-    # Stage A horizon-tier additions (2026-04-15)
-    assert FEATURE_KEYS[34] == "momentum_30s"
-    assert FEATURE_KEYS[36] == "momentum_120s"
-    assert FEATURE_KEYS[39] == "bipower_var_120s"
+    # Stage E (2026-04-15) dropped raw cols {5, 17, 18, 19, 21, 22, 23}, so
+    # every slot originally above raw 23 shifts down by 7.
+    assert FEATURE_KEYS[31 - 7] == "queue_pressure"
+    assert FEATURE_KEYS[32 - 7] == "top3_asymmetry"
+    assert FEATURE_KEYS[33 - 7] == "effective_spread_ratio"
+    assert FEATURE_KEYS[34 - 7] == "momentum_30s"
+    assert FEATURE_KEYS[36 - 7] == "momentum_120s"
+    assert FEATURE_KEYS[39 - 7] == "bipower_var_120s"
 
 
 def _make_book(bid_l1: float, ask_l1: float) -> Snapshot:

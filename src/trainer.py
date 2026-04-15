@@ -1021,11 +1021,16 @@ class Trainer:
     def _run_rust_features(self, paths: dict, indices: np.ndarray) -> np.ndarray:
         """Phase 2: invoke Rust feature_builder via paths. Caller should have
         already dropped the heavy Python arrays + gc.collect() before this.
+
+        Applies the Stage E col prune so the returned array width matches
+        `src.features.NUM_FEATURES`.
         """
         from src import rust_bridge
-        return rust_bridge.compute_features_from_paths(
+        from src.features import KEPT_RAW_INDICES
+        feat_raw = rust_bridge.compute_features_from_paths(
             indices=indices, **{k: v for k, v in paths.items() if v is not None},
         )
+        return feat_raw[:, KEPT_RAW_INDICES]
 
     def _calc_features_batch(
         self,
@@ -1045,14 +1050,19 @@ class Trainer:
         funding_ts=None, funding_rate_arr=None, funding_mark_arr=None,
         deriv_ts=None, deriv_oi=None, deriv_ls=None,
         cross_ex_data: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+        _return_raw: bool = False,
     ) -> np.ndarray:
-        """Compute all NUM_FEATURES features for all sample indices at once."""
-        from src.features import NUM_FEATURES
+        """Compute all NUM_FEATURES features for all sample indices at once.
+
+        ``_return_raw=True`` bypasses the Stage E col prune and returns the
+        full 56-col raw matrix. Used by parity tests / Rust comparison.
+        """
+        from src.features import _RAW_NUM_FEATURES, KEPT_RAW_INDICES
 
         # --- Rust fast-path (default; opt out via SCALPER_USE_RUST=0) ---
         from src import rust_bridge
         if rust_bridge.use_rust():
-            return rust_bridge.compute_features(
+            feat_raw = rust_bridge.compute_features(
                 bid_vols=bid_vols, ask_vols=ask_vols,
                 bid_prices=bid_prices, ask_prices=ask_prices,
                 mid_prices=mid_prices,
@@ -1066,9 +1076,11 @@ class Trainer:
                 deriv_ts=deriv_ts, deriv_oi=deriv_oi, deriv_ls=deriv_ls,
                 cross_ex_data=cross_ex_data,
             )
+            # Stage E: drop low-value cols from the Rust-raw 56-col output.
+            return feat_raw if _return_raw else feat_raw[:, KEPT_RAW_INDICES]
 
         ns = len(indices)
-        feat = np.zeros((ns, NUM_FEATURES), dtype=np.float32)
+        feat = np.zeros((ns, _RAW_NUM_FEATURES), dtype=np.float32)
 
         # --- Pre-compute full-array quantities ---
         bv5 = bid_vols[:, :5].sum(axis=1)     # (n,)
@@ -1467,6 +1479,7 @@ class Trainer:
         gateio_ts, gateio_sq = cx.get("gateio", (None, None))
         # Bybit is priced in the CrossExTrades path only when explicitly passed
         # with a price column; skip col 50 if not available.
+        # `feat` is allocated at the raw 56-col width — see src/features.py.
         feat[:, 34:56] = compute_ext_features_batch(
             mid_prices, indices,
             bid_qty0=bid_vols[:, 0], ask_qty0=ask_vols[:, 0],
@@ -1483,7 +1496,9 @@ class Trainer:
             gateio_ts_ms=gateio_ts, gateio_signed_qty=gateio_sq,
         )
 
-        return feat
+        # Stage E: slice the raw 56-col feature matrix down to the 49 kept
+        # columns (DROP_RAW_INDICES removes low-information slots).
+        return feat if _return_raw else feat[:, KEPT_RAW_INDICES]
 
     # ---- Training ----
 

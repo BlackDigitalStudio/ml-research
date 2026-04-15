@@ -12,7 +12,21 @@ from src.features_ext import FeatureExtEngine, EXT_FEATURE_KEYS
 
 logger = logging.getLogger(__name__)
 
-NUM_FEATURES = 56
+NUM_FEATURES = 49
+
+# Stage E (2026-04-15, 34→49 overhaul): 7 low-information / laggy / duplicative
+# feature slots are dropped from the model-visible set. The Rust + Python batch
+# compute still emits a 56-wide array (cols match 1:1 across paths);
+# `DROP_RAW_INDICES` identifies the raw-slot positions that get sliced out at
+# the end of _calc_features_batch, leaving the 49-wide vector described by
+# FEATURE_KEYS below. This lets us prune without re-indexing thousands of
+# references across Rust fill functions and tests — the raw indices remain
+# stable and every consumer that needs the pruned view goes through
+# `NUM_FEATURES / FEATURE_KEYS`.
+DROP_RAW_INDICES = [5, 17, 18, 19, 21, 22, 23]
+_RAW_NUM_FEATURES = 56
+KEPT_RAW_INDICES = [i for i in range(_RAW_NUM_FEATURES) if i not in DROP_RAW_INDICES]
+assert len(KEPT_RAW_INDICES) == NUM_FEATURES
 NORM_WINDOW = 300   # 30 sec at 100ms
 EMA_SPAN = 5
 TRADE_WINDOW_SEC = 5
@@ -31,24 +45,23 @@ CROSS_EX_WINDOW_MS = 500
 # Feature vector keys (ordered, used for normalization and model input)
 # Now primary instrument = BTCUSDT, secondary = ETHUSDT
 FEATURE_KEYS = [
-    # LOB — primary BTC (0-5)
+    # LOB — primary BTC (raw 0-4)  — raw col 5 (large_order) dropped in Stage E.
     "ofi", "imbalance_ratio", "imbalance_velocity", "spread",
-    "depth_ratio_l5", "large_order",
-    # Trade flow — primary BTC (6-9)
+    "depth_ratio_l5",
+    # Trade flow — primary BTC (raw 6-9)
     "trade_flow_imbalance", "trade_intensity", "large_trade", "cvd",
-    # Derived — primary BTC (10-13)
+    # Derived — primary BTC (raw 10-13)
     "volatility_1s", "vwap_deviation", "momentum_5s", "funding_rate",
-    # ETH leading signal (14-16) — ETH sometimes moves before BTC
+    # ETH leading signal (raw 14-16)
     "eth_momentum_1s", "eth_ofi", "eth_leading_signal",
-    # Liquidation clusters (17-19)
-    "open_interest_delta", "long_short_ratio", "liquidation_proximity",
-    # Spoofing (20)
+    # Raw 17-19 (open_interest_delta, long_short_ratio, liquidation_proximity)
+    # dropped in Stage E — lag-heavy derivatives poll data.
+    # Spoofing (raw 20)
     "spoof_score",
-    # Volatility regime (21-22)
-    "volatility_ratio", "trade_intensity_ratio",
-    # Market regime (23)
-    "hurst_exponent",
-    # Sweep detection (24)
+    # Raw 21-23 (volatility_ratio, trade_intensity_ratio, hurst_exponent)
+    # dropped — regime signal belongs in a separate classifier, not the
+    # stacker input, and hurst is near-stationary on 100 ms ticks.
+    # Sweep detection (raw 24)
     "sweep_intensity",
     # Cancellation rate (25) — ask cancel - bid cancel, positive = bullish
     "cancel_rate_diff",

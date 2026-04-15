@@ -189,6 +189,7 @@ def python_features(depth_ts, bid_prices, bid_vols, ask_prices, ask_vols, mid_pr
         eth_qty=eth_qty,
         eth_side=eth_side,
         cross_ex_data=cross_ex_data,
+        _return_raw=True,
     )
     return feat
 
