@@ -1,4 +1,26 @@
 #!/bin/bash
+# ─────────────────────────────────────────────────────────────────────────────
+# STATUS: LEGACY. Do not invoke.
+#
+# This script wires `bakeoff_v2.py` → `backtest_ensemble.py`, both of which
+# were superseded by the 2026-04-15 refactor. Running it today produces a
+# broken training cache repack + uses the old f1_macro early-stop pitfall
+# and the pre-direction-aware backtest metric.
+#
+# Current pipeline (manual, explicit):
+#
+#   1. `python scripts/merge_streams.py --data-dir data --out-dir data/_merged`
+#   2. `SCALPER_USE_RUST=1 SCALPER_USE_RUST_DIRECT=1 SCALPER_MAX_SAMPLES=1000000 \
+#         python scripts/build_cache.py --hours 999 --data-dir data --model-dir models --force`
+#   3. `SCALPER_ENABLE_HEAVY_ARCHS=1 python scripts/bakeoff_v3.py \
+#         --cache-prefix data/_cache/samples_v3_999h_<mtime> --archs all --skip-on-error`
+#   4. `python scripts/infer_primaries_v3.py --cache-dir data/_cache --weights-dir <bakeoff_out>`
+#   5. Train L2 stacker + L3 meta (XGBoost, CPU) — see grid_live.py's internals.
+#   6. `python scripts/grid_live.py --cache-dir data/_cache ...` with the timing zone.
+#
+# Kept in-tree for historical reference only. See `STRATEGY.md` § 9.
+# ─────────────────────────────────────────────────────────────────────────────
+# Original header (for provenance):
 # Full research pipeline: cache → SSL pretrain → bake-off → backtest.
 # Run on the pod where SCALPER_USE_RUST=1 + GPU are available.
 #
