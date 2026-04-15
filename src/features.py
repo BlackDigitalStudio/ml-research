@@ -8,10 +8,11 @@ from typing import Any
 import numpy as np
 
 from src.order_book import OrderBook, Snapshot, BOOK_DEPTH
+from src.features_ext import FeatureExtEngine, EXT_FEATURE_KEYS
 
 logger = logging.getLogger(__name__)
 
-NUM_FEATURES = 34
+NUM_FEATURES = 40
 NORM_WINDOW = 300   # 30 sec at 100ms
 EMA_SPAN = 5
 TRADE_WINDOW_SEC = 5
@@ -67,6 +68,14 @@ FEATURE_KEYS = [
     # 33: effective_spread_ratio — |last_trade_price - mid| / spread, EMA.
     #     >0.5 = trades piercing the spread aggressively (urgency).
     "queue_pressure", "top3_asymmetry", "effective_spread_ratio",
+    # Horizon-tier (34-39) — Stage A of the 34→49 overhaul (2026-04-15).
+    # These close the frequency-mismatch between features (all < 5 s) and the
+    # 60-180 s timing zone committed on 2026-04-14. Streaming computation in
+    # `features_ext.FeatureExtEngine`; vectorised batch in
+    # `features_ext.compute_ext_features_batch`; Rust parity in
+    # `rust_ingest/src/features.rs::fill_horizon_features`.
+    "momentum_30s", "momentum_60s", "momentum_120s",
+    "realized_vol_60s", "realized_vol_120s", "bipower_var_120s",
 ]
 
 assert len(FEATURE_KEYS) == NUM_FEATURES
@@ -154,6 +163,11 @@ class FeatureEngine:
 
         # Derivatives data (set by ws_client polling)
         self._ws = None  # set via set_ws_client()
+
+        # Horizon-tier state (features 34-39). Kept in a dedicated engine
+        # so the streaming implementation and its train-time batch twin
+        # share one source of truth (`src/features_ext.py`).
+        self._ext = FeatureExtEngine()
 
         # Current feature vector
         self.features: np.ndarray = np.zeros(NUM_FEATURES, dtype=np.float64)
@@ -337,6 +351,15 @@ class FeatureEngine:
             raw["trade_intensity_ratio"] = raw["trade_intensity"] / (int_mean + 1e-10)
         else:
             raw["trade_intensity_ratio"] = 1.0
+
+        # === Horizon-tier (features 34-39) ===
+        # Feed mid to the streaming engine, then pull the 6-vector. Engine
+        # guards against non-positive mid internally; still cheap to call
+        # unconditionally.
+        self._ext.on_mid(snap.mid_price)
+        ext_vec = self._ext.get()
+        for k, key in enumerate(EXT_FEATURE_KEYS):
+            raw[key] = float(ext_vec[k])
 
         self.features_raw = raw
         self._prev_snap = snap

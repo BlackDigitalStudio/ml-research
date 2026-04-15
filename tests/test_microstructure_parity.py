@@ -27,11 +27,15 @@ from src.order_book import OrderBook, Snapshot, BOOK_DEPTH
 
 
 def test_num_features_constant() -> None:
-    assert NUM_FEATURES == 34
+    assert NUM_FEATURES == 40
     assert len(FEATURE_KEYS) == NUM_FEATURES
     assert FEATURE_KEYS[31] == "queue_pressure"
     assert FEATURE_KEYS[32] == "top3_asymmetry"
     assert FEATURE_KEYS[33] == "effective_spread_ratio"
+    # Stage A horizon-tier additions (2026-04-15)
+    assert FEATURE_KEYS[34] == "momentum_30s"
+    assert FEATURE_KEYS[36] == "momentum_120s"
+    assert FEATURE_KEYS[39] == "bipower_var_120s"
 
 
 def _make_book(bid_l1: float, ask_l1: float) -> Snapshot:

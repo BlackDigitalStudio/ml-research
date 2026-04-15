@@ -11,7 +11,7 @@ use ndarray::{s, Array1, Array2};
 
 use crate::{CrossExTrades, DepthData, DerivativesData, FundingData, TradesData};
 
-pub const NUM_FEATURES: usize = 34;
+pub const NUM_FEATURES: usize = 40;
 
 /// Must match `src/features.py::QUEUE_DECAY_ALPHA`.
 pub const QUEUE_DECAY_ALPHA: f64 = 0.1;
@@ -846,6 +846,113 @@ pub fn fill_deriv_features(
         } else {
             0.0
         };
+    }
+}
+
+/// Fill cols [34..=39] — horizon-tier momentum / realised vol / bipower.
+///
+/// Must match `src/features_ext.py::compute_ext_features_batch` bit-for-bit
+/// in f32.
+///
+///   [34] momentum_30s      = (mid[T] - mid[T-300]) / mid[T-300]
+///   [35] momentum_60s      = (mid[T] - mid[T-600]) / mid[T-600]
+///   [36] momentum_120s     = (mid[T] - mid[T-1200]) / mid[T-1200]
+///   [37] realized_vol_60s  = sqrt(Σ r[k]²) for k in [T-600, T-1]
+///   [38] realized_vol_120s = sqrt(Σ r[k]²) for k in [T-1200, T-1]
+///   [39] bipower_var_120s  = (π/2) · Σ |r[k]|·|r[k-1]| for k in [T-1199, T-1]
+///
+/// where r[k] = log(mid[k+1]) - log(mid[k]). Features emit 0 until their
+/// window is saturated (same convention as [10]/[12]).
+pub fn fill_horizon_features(feat: &mut Array2<f32>, depth: &DepthData, indices: &[i64]) {
+    const W30: i64 = 300;
+    const W60: i64 = 600;
+    const W120: i64 = 1200;
+    let bv_scale: f64 = std::f64::consts::FRAC_PI_2;
+
+    let mid = depth.mid_prices();
+    let n = mid.len();
+    if n < 2 {
+        return;
+    }
+
+    // Per-tick log-returns: r[k] = log(mid[k+1]) - log(mid[k]) for k in [0, n-2].
+    // Zero when either side is non-positive, matching the Python gate.
+    let mut r = Array1::<f64>::zeros(n - 1);
+    let mut abs_r = Array1::<f64>::zeros(n - 1);
+    for k in 0..(n - 1) {
+        let a = mid[k];
+        let b = mid[k + 1];
+        if a > 0.0 && b > 0.0 {
+            let v = b.ln() - a.ln();
+            r[k] = v;
+            abs_r[k] = v.abs();
+        }
+    }
+
+    // cum_sq[i] = Σ_{k=0}^{i-1} r[k]². Length n (so cum_sq[T] - cum_sq[T-W]
+    // is the sum over [T-W, T-1], i.e. last W returns ending at tick T).
+    let mut cum_sq = Array1::<f64>::zeros(n);
+    let mut s = 0.0;
+    for k in 0..(n - 1) {
+        s += r[k] * r[k];
+        cum_sq[k + 1] = s;
+    }
+
+    // pair[j] = |r[j+1]| · |r[j]|  for j in [0, n-3], with right-return-index (j+1).
+    // cum_pair[k] with cum_pair[0] = cum_pair[1] = 0 and, for k >= 2,
+    //   cum_pair[k] = Σ_{j=0}^{k-2} pair[j]
+    // so BV sum on window W at tick T = cum_pair[T] - cum_pair[T - W + 1].
+    let mut cum_pair = Array1::<f64>::zeros(n);
+    if n >= 3 {
+        let mut sp = 0.0;
+        for k in 2..n {
+            // pair[k-2] = |r[k-1]| * |r[k-2]|
+            sp += abs_r[k - 1] * abs_r[k - 2];
+            cum_pair[k] = sp;
+        }
+    }
+
+    for (s_idx, &raw_idx) in indices.iter().enumerate() {
+        let t = raw_idx;
+        let ti = t as usize;
+        let cur = mid[ti];
+
+        // [34] momentum_30s
+        if t >= W30 {
+            let past = mid[(t - W30) as usize];
+            if past > 0.0 && cur > 0.0 {
+                feat[[s_idx, 34]] = ((cur - past) / past) as f32;
+            }
+        }
+        // [35] momentum_60s
+        if t >= W60 {
+            let past = mid[(t - W60) as usize];
+            if past > 0.0 && cur > 0.0 {
+                feat[[s_idx, 35]] = ((cur - past) / past) as f32;
+            }
+        }
+        // [36] momentum_120s
+        if t >= W120 {
+            let past = mid[(t - W120) as usize];
+            if past > 0.0 && cur > 0.0 {
+                feat[[s_idx, 36]] = ((cur - past) / past) as f32;
+            }
+        }
+        // [37] realized_vol_60s
+        if t >= W60 {
+            let rv = cum_sq[ti] - cum_sq[(t - W60) as usize];
+            feat[[s_idx, 37]] = rv.max(0.0).sqrt() as f32;
+        }
+        // [38] realized_vol_120s
+        if t >= W120 {
+            let rv = cum_sq[ti] - cum_sq[(t - W120) as usize];
+            feat[[s_idx, 38]] = rv.max(0.0).sqrt() as f32;
+        }
+        // [39] bipower_var_120s
+        if t >= W120 {
+            let bv = cum_pair[ti] - cum_pair[(t - W120 + 1) as usize];
+            feat[[s_idx, 39]] = (bv_scale * bv) as f32;
+        }
     }
 }
 

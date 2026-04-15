@@ -1438,6 +1438,12 @@ class Trainer:
             eff_ema[i] = e_acc
         feat[:, 33] = eff_ema[indices].astype(np.float32)
 
+        # === Horizon-tier (cols 34-39) — Stage A of the 34→49 overhaul ===
+        # Single source of truth for streaming↔batch parity lives in
+        # `features_ext`; the Rust port must match this block column-by-column.
+        from src.features_ext import compute_ext_features_batch
+        feat[:, 34:40] = compute_ext_features_batch(mid_prices, indices)
+
         return feat
 
     # ---- Training ----

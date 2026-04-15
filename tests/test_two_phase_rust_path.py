@@ -115,7 +115,7 @@ def test_run_rust_features_end_to_end(synth_streams, tmp_path):
     # Pick indices in the middle (avoid edges / warm-up)
     indices = np.arange(500, 4500, 100, dtype=np.int64)
     feats = trainer._run_rust_features(paths, indices)
-    assert feats.shape == (len(indices), 34)
+    assert feats.shape == (len(indices), 40)
     assert feats.dtype == np.float32
     # Some columns should be non-zero (real features on real data)
     assert feats[:, :12].std() > 0   # depth-only features vary

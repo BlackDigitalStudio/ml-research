@@ -31,6 +31,8 @@ CROSS_COLS = [30]
 # Microstructure (always on; [22]/[33] require trades)
 MICRO_DEPTH_COLS = [20, 21, 23, 24, 25, 26, 27, 28, 29, 31, 32]
 MICRO_TRADE_COLS = [22, 33]
+# Horizon-tier — Stage A of the 34→49 overhaul. Depth-only (uses mid_prices).
+HORIZON_COLS = [34, 35, 36, 37, 38, 39]
 # Tolerances chosen generously; in practice parity is usually exact f32.
 ATOL = {
     0: 1e-4,    # OFI
@@ -67,6 +69,15 @@ ATOL = {
     32: 1e-7,   # top3 asymmetry
     33: 1e-6,   # effective spread EMA
     30: 0.0,    # cross-ex count (integer)
+    # Horizon-tier (Stage A). streaming↔batch parity is bit-identical in
+    # float64; the Rust port downcasts the same f64 accumulators to f32, so
+    # divergence is pure rounding noise (< 1 ulp at f32 scale).
+    34: 1e-7,   # momentum_30s
+    35: 1e-7,   # momentum_60s
+    36: 1e-7,   # momentum_120s
+    37: 1e-6,   # realized_vol_60s
+    38: 1e-6,   # realized_vol_120s
+    39: 1e-6,   # bipower_var_120s
 }
 
 
@@ -256,7 +267,7 @@ def main() -> int:
 
     # --- Compare ---
     ok = True
-    cols = list(LOB_COLS) + MICRO_DEPTH_COLS
+    cols = list(LOB_COLS) + MICRO_DEPTH_COLS + HORIZON_COLS
     if args.trades:
         cols += TRADE_COLS + MICRO_TRADE_COLS
     if args.funding:

@@ -23,8 +23,8 @@ use ndarray_npy::{read_npy, write_npy};
 use scalper_ingest::{
     features::{
         compute_lob_features, fill_cross_ex_feature, fill_deriv_features, fill_eth_features,
-        fill_funding_features, fill_microstructure_depth, fill_microstructure_trades,
-        fill_trade_features,
+        fill_funding_features, fill_horizon_features, fill_microstructure_depth,
+        fill_microstructure_trades, fill_trade_features,
     },
     read_cross_ex_parquet, read_depth_parquet, read_derivatives_parquet, read_funding_parquet,
     read_trades_parquet,
@@ -83,6 +83,7 @@ fn main() -> Result<()> {
     let t1 = Instant::now();
     let mut feat = compute_lob_features(&depth, is);
     fill_microstructure_depth(&mut feat, &depth, is);
+    fill_horizon_features(&mut feat, &depth, is);
     if let Some(tr) = trades.as_ref() {
         fill_trade_features(&mut feat, &depth, is, tr);
         fill_microstructure_trades(&mut feat, &depth, is, tr);
