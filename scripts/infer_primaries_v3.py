@@ -97,8 +97,29 @@ def main() -> int:
           f"X_feat={c['X_feat'].shape}")
 
     wdir = Path(args.weights_dir)
+    # Resume: if the out file already exists from a prior (preempted) run,
+    # load its soft_ entries and skip those archs on this pass. Modal's
+    # detached functions can be preempted mid-run; combined with the
+    # per-arch incremental save below this lets us resume near-zero-cost.
     results = {"y": c["y"], "pnl_val": c["pnl"]}
+    already = set()
+    if Path(args.out).exists():
+        try:
+            existing = np.load(args.out, allow_pickle=False)
+            for k in existing.files:
+                if k.startswith("soft_"):
+                    results[k] = existing[k]
+                    already.add(k[len("soft_"):])
+            if already:
+                print(f"[infer] resume: {len(already)} arch softmaxes already on disk "
+                      f"({sorted(already)[:3]}...); will skip")
+        except Exception as e:
+            print(f"[infer] could not resume from {args.out}: {e}")
+
     for arch in [a.strip() for a in args.archs.split(",") if a.strip()]:
+        if arch in already:
+            print(f"[infer] skip {arch}: already inferred (resume)")
+            continue
         # bakeoff_v3 writes `{tag}_best.pt`; fall back to legacy `{tag}.pt`
         # (written by bakeoff_v1/v2) to keep older weight dirs loadable.
         pt = wdir / f"{arch}_best.pt"
