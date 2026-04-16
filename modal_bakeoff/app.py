@@ -300,7 +300,11 @@ TIER_FN = {
 @app.function(
     volumes={CACHE_MOUNT: cache_volume, RUNS_MOUNT: runs_volume},
     secrets=[hf_secret],
-    gpu="A10",
+    # Upgraded from A10 (22 GB) to A100-40 after OOM on time_llm_7b_4bit
+    # during the 2026-04-16 leak-free infer. time_llm_7b holds ~16 GB of
+    # weights alone; with fp16 activations + cache overhead it needs the
+    # 40 GB tier. Cost difference is negligible on 30-min wall time.
+    gpu="A100-40GB",
     timeout=3 * 3600,
     cpu=4.0,
     memory=32 * 1024,
@@ -335,7 +339,8 @@ def infer_primaries(
         "--weights-dir", weights_dir,
         "--archs", archs,
         "--out", str(out),
-        "--batch-size", "256",
+        # 128 is safe for time_llm_7b_4bit on A100-40 (256 OOM'd on A10).
+        "--batch-size", "128",
         "--device", "cuda",
     ]
     env = _os.environ.copy()

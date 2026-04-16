@@ -112,15 +112,14 @@ def main() -> int:
         except ValueError as e:
             print(f"[infer] skip {arch}: {e}")
             continue
+        # Wrap load + infer in a single try/except so a per-arch OOM or
+        # bad checkpoint doesn't abort the whole run — we still save softs
+        # for the archs that did succeed.
+        model = None
         try:
             model = factory(n_feat)
             ckpt = torch.load(pt, map_location="cpu", weights_only=True)
-            # bakeoff_v3 wraps state_dict in {"state_dict": ..., "metrics": ...};
-            # legacy bakeoff_v1/v2 saved the state_dict directly.
             sd = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
-            # Some archs saved via PEFT add `base_model.model.` prefix; also
-            # some training runs leave `_orig_mod.` from torch.compile. Strip
-            # known prefixes so they load into the fresh factory model.
             def _strip(k):
                 for p in ("_orig_mod.", "module."):
                     if k.startswith(p):
@@ -128,26 +127,57 @@ def main() -> int:
                 return k
             sd = {_strip(k): v for k, v in sd.items()}
             model.load_state_dict(sd, strict=False)
+
+            t0 = time.time()
+            # Inference memory: some archs (time_llm_7b_4bit, moment_large_multi)
+            # are big; retry with halved batch on CUDA OOM.
+            bs = args.batch_size
+            for attempt in range(3):
+                try:
+                    soft = _infer(model, c["X_lob"], c["X_feat"],
+                                    batch_size=bs, device=args.device)
+                    break
+                except torch.cuda.OutOfMemoryError:
+                    torch.cuda.empty_cache()
+                    bs = max(8, bs // 2)
+                    print(f"[infer] {arch}: OOM — retry bs={bs}")
+                    if attempt == 2:
+                        raise
+            dt = time.time() - t0
+
+            pred = soft.argmax(-1)
+            non_fl = pred != 2
+            y_nf = c["y"] != 2
+            dir_correct = int(((pred == c["y"]) & non_fl & y_nf).sum())
+            dir_total = int((non_fl & y_nf).sum())
+            wrong_dir = int(((pred != c["y"]) & non_fl & y_nf).sum())
+            print(f"[infer] {tag}: softmax {soft.shape} "
+                  f"non_fl_pred={int(non_fl.sum())} "
+                  f"dir_acc_on_nf={dir_correct / max(dir_total, 1):.3f} "
+                  f"({dir_correct}/{dir_total}, wrong={wrong_dir}) "
+                  f"time={dt:.1f}s")
+            results[f"soft_{tag}"] = soft.astype(np.float32)
+            # Incremental save after EACH successful arch so a later OOM /
+            # container eviction doesn't lose earlier successes.
+            try:
+                Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(args.out, **results)
+            except Exception as e:
+                print(f"[infer] WARN incremental save failed: {e}")
         except Exception as e:
-            print(f"[infer] skip {arch}: load failed — {e}")
-            continue
-        t0 = time.time()
-        soft = _infer(model, c["X_lob"], c["X_feat"],
-                       batch_size=args.batch_size, device=args.device)
-        dt = time.time() - t0
-        pred = soft.argmax(-1)
-        non_fl = pred != 2
-        # Directional accuracy only on samples where y is non-FLAT.
-        y_nf = c["y"] != 2
-        dir_correct = ((pred == c["y"]) & non_fl & y_nf).sum()
-        dir_total = (non_fl & y_nf).sum()
-        wrong_dir = ((pred != c["y"]) & non_fl & y_nf).sum()
-        print(f"[infer] {tag}: softmax {soft.shape} "
-              f"non_fl_pred={int(non_fl.sum())} "
-              f"dir_acc_on_nf={dir_correct / max(dir_total, 1):.3f} "
-              f"({dir_correct}/{dir_total}, wrong={wrong_dir}) "
-              f"time={dt:.1f}s")
-        results[f"soft_{tag}"] = soft.astype(np.float32)
+            print(f"[infer] skip {arch}: {type(e).__name__}: {str(e)[:150]}")
+        finally:
+            # Free CUDA memory before loading the next arch.
+            if model is not None:
+                try:
+                    del model
+                except Exception:
+                    pass
+            try:
+                if args.device.startswith("cuda"):
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
 
     if len([k for k in results if k.startswith("soft_")]) == 0:
         print("[infer] no primaries inferred — abort")
