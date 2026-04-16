@@ -29,11 +29,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.bakeoff_v1 import build_factory  # noqa: E402
 
 
-def _load_v3(cache_dir: Path) -> dict:
-    cand = sorted(cache_dir.glob("samples_v3_*_y.npy"))
-    if not cand:
-        raise FileNotFoundError(f"No v3 cache in {cache_dir}")
-    prefix = str(cand[-1])[: -len("_y.npy")]
+def _load_v3(cache_dir: Path, prefix_override: str | None = None) -> dict:
+    """Load the v3 cache. If `prefix_override` is set, use that exact
+    prefix (absolute or relative to cache_dir). Otherwise pick the
+    LARGEST cache (by row count) present — this avoids the lex-sort
+    accidentally preferring `samples_v3_leakfree70k_...` over the full
+    `samples_v3_999h_...` cache, as happened in the 2026-04-16 leakfree
+    pipeline.
+    """
+    if prefix_override:
+        prefix = str(cache_dir / prefix_override) if not str(prefix_override).startswith("/") else str(prefix_override)
+    else:
+        cand = sorted(cache_dir.glob("samples_v3_*_y.npy"))
+        if not cand:
+            raise FileNotFoundError(f"No v3 cache in {cache_dir}")
+        # Pick the one with the most samples (largest y.npy) — most general.
+        cand.sort(key=lambda p: p.stat().st_size, reverse=True)
+        prefix = str(cand[0])[: -len("_y.npy")]
+    print(f"[infer] using cache prefix: {prefix}")
     return {
         "prefix": prefix,
         "X_lob":  np.load(f"{prefix}_X_lob.npy", mmap_mode="r"),
@@ -64,6 +77,9 @@ def _infer(model, X_lob, X_feat, batch_size: int = 512,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache-dir", default="/home/scalper/scalper-bot/data/_cache")
+    ap.add_argument("--cache-prefix", default=None,
+                    help="Explicit cache prefix (overrides cache_dir picking). "
+                    "E.g. 'samples_v3_999h_1776165949' to force full 93k cache.")
     ap.add_argument("--weights-dir",
                     default="/home/scalper/backups/pod/recover_v2")
     ap.add_argument("--archs", default="transformer,tcn",
@@ -75,7 +91,7 @@ def main() -> int:
     args = ap.parse_args()
 
     print(f"[infer] loading v3 cache from {args.cache_dir}")
-    c = _load_v3(Path(args.cache_dir))
+    c = _load_v3(Path(args.cache_dir), prefix_override=args.cache_prefix)
     n_feat = c["X_feat"].shape[1]
     print(f"[infer] N={len(c['y'])}, X_lob={c['X_lob'].shape}, "
           f"X_feat={c['X_feat'].shape}")

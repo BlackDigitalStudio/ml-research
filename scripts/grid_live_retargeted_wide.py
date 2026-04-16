@@ -59,7 +59,11 @@ MIN_TRADES = 30
 
 def _load_cache():
     cand = sorted(CACHE_DIR.glob("samples_v3_*_mid_paths.npy"))
-    prefix = str(cand[-1])[: -len("_mid_paths.npy")]
+    if not cand:
+        raise FileNotFoundError(f"No v3 cache in {CACHE_DIR}")
+    cand.sort(key=lambda p: p.stat().st_size, reverse=True)
+    prefix = str(cand[0])[: -len("_mid_paths.npy")]
+    print(f"[gridw] using cache prefix: {prefix}")
     return {
         "prefix": prefix,
         "y": np.load(f"{prefix}_y.npy"),
@@ -79,6 +83,12 @@ def main():
     n_tr = int(d["n_train"])
     N = c["y"].shape[0]
 
+    import os as _os
+    honest_start = int(_os.environ.get("GRID_HONEST_START", n_tr))
+    if honest_start != n_tr:
+        print(f"[gridw] eval boundary: n_tr={n_tr} → using honest_start={honest_start}")
+    eval_lo = honest_start
+
     primary_pred = stacker_soft.argmax(axis=-1)
     primary_max = stacker_soft.max(axis=-1)
     non_flat = primary_pred != 2
@@ -88,7 +98,7 @@ def main():
     fill_masks = {fp: (rng.random(N) < fp if fp < 1.0 else np.ones(N, dtype=bool))
                    for fp in FILL_PROB_GRID}
 
-    print(f"[gridw] N={N:,}  tail={N - n_tr:,}  non_flat_tail={int((non_flat[n_tr:]).sum()):,}")
+    print(f"[gridw] N={N:,}  tail={N - eval_lo:,}  non_flat_tail={int((non_flat[eval_lo:]).sum()):,}")
     print(f"[gridw] non_flat_tail_pass_minprob {int(((non_flat & (primary_max >= 0.45)) [n_tr:]).sum()):,}")
 
     outer_combos = list(itertools.product(TP_GRID, SL_GRID, TIMEOUT_GRID,
@@ -121,7 +131,7 @@ def main():
             gate = non_flat & (primary_max >= min_p) & (meta_prob >= thr)
             take = gate & fill_masks[fp]
             take_tail = take.copy()
-            take_tail[:n_tr] = False
+            take_tail[:eval_lo] = False
             n_trades = int(take_tail.sum())
             if n_trades < MIN_TRADES:
                 continue

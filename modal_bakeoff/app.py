@@ -327,6 +327,11 @@ def infer_primaries(
     cmd = [
         "python", "/root/scalper-bot/scripts/infer_primaries_v3.py",
         "--cache-dir", f"{CACHE_MOUNT}",
+        # Force the full 93k cache so softmaxes cover the held-out [70k, 93k]
+        # tail that grid_live evaluates on. Without this override the script
+        # picks lexicographically last, which is the leakfree 70k slice if
+        # both caches are present on the Volume.
+        "--cache-prefix", "samples_v3_999h_1776165949",
         "--weights-dir", weights_dir,
         "--archs", archs,
         "--out", str(out),

@@ -41,7 +41,12 @@ COMMISSION_LOSS = 0.07
 
 def _load_cache():
     cand = sorted(CACHE_DIR.glob("samples_v3_*_y.npy"))
-    prefix = str(cand[-1])[: -len("_y.npy")]
+    if not cand:
+        raise FileNotFoundError(f"No v3 cache in {CACHE_DIR}")
+    # Pick largest (avoids leakfree70k being picked over full 999h).
+    cand.sort(key=lambda p: p.stat().st_size, reverse=True)
+    prefix = str(cand[0])[: -len("_y.npy")]
+    print(f"[smo3] using cache prefix: {prefix}")
     return {
         "prefix": prefix,
         "y": np.load(f"{prefix}_y.npy"),

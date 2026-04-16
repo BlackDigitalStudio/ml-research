@@ -49,7 +49,14 @@ COMMISSION_LOSS = 0.07
 
 def _load_cache():
     cand = sorted(CACHE_DIR.glob("samples_v3_*_y.npy"))
-    prefix = str(cand[-1])[: -len("_y.npy")]
+    if not cand:
+        raise FileNotFoundError(f"No v3 cache in {CACHE_DIR}")
+    # Pick the LARGEST cache by file size — avoids lex-sort preferring
+    # `samples_v3_leakfree70k_*` over the full `samples_v3_999h_*` (which
+    # holds the complete 93k including the eval tail we want softs for).
+    cand.sort(key=lambda p: p.stat().st_size, reverse=True)
+    prefix = str(cand[0])[: -len("_y.npy")]
+    print(f"[smo2] using cache prefix: {prefix}")
     return {
         "prefix": prefix,
         "y": np.load(f"{prefix}_y.npy"),

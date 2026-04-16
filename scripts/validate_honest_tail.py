@@ -40,7 +40,11 @@ HONEST_START = int(os.environ.get("HONEST_START", "74000"))
 
 def _load_cache():
     cand = sorted(CACHE_DIR.glob("samples_v3_*_mid_paths.npy"))
-    prefix = str(cand[-1])[: -len("_mid_paths.npy")]
+    if not cand:
+        raise FileNotFoundError(f"No v3 cache in {CACHE_DIR}")
+    cand.sort(key=lambda p: p.stat().st_size, reverse=True)
+    prefix = str(cand[0])[: -len("_mid_paths.npy")]
+    print(f"[val] using cache prefix: {prefix}")
     return {
         "y": np.load(f"{prefix}_y.npy"),
         "mid_paths": np.load(f"{prefix}_mid_paths.npy"),
