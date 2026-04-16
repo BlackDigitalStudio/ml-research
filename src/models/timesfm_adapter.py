@@ -152,6 +152,13 @@ class TimesFMClassifier(nn.Module):
         patches = series.view(B, N, patch_len)
         masks = torch.zeros_like(patches)  # no padding
         inp = torch.cat([patches, masks], dim=-1)  # (B, N, 2*patch_len)
+        # TimesFM's `load_checkpoint()` populates internal tensors that
+        # aren't all registered as nn.Module parameters, so `.to(device)`
+        # at training time misses them. Force device sync per-forward —
+        # no-op after the first call.
+        device = inp.device
+        self.tokenizer.to(device)
+        self.stacked_xf.to(device)
         emb = self.tokenizer(inp)                  # (B, N, d_model)
         h = emb
         for layer in self.stacked_xf:

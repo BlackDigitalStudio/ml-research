@@ -112,27 +112,52 @@ _LORA_UNFROZEN = Recipe(
 # T5 variant for Chronos-Bolt (T5 encoder uses q/v/k/o bare names). Wiring
 # the wrong suffix raises "Target modules not found" in peft on the first
 # call to `get_peft_model` — 2026-04-16 Modal sweep had this.
-_LORA_UNFROZEN_T5 = Recipe(
+# `root_attr` targets the encoder sub-module only; wrapping the full
+# classifier forced PEFT to pass `input_ids` into our custom `forward(lob,
+# feat)` which doesn't accept it.
+_LORA_UNFROZEN_T5_CHRONOS = Recipe(
     epochs=8, lr=5e-5, warmup_steps=500, early_stop_patience=3,
     head_lr_mult=5.0, layerwise_lr_decay=0.9,
     lora_cfg={"r": 16, "alpha": 32, "dropout": 0.05,
-              "target_modules": ["q", "v", "k", "o"]},
+              "target_modules": ["q", "v", "k", "o"],
+              "root_attr": "encoder"},
     batch_size_target=256,
 )
 
-# Time-LLM — LoRA, low LR.
+# MOMENT variant — MOMENTPipeline backbone. Same T5 target module names.
+_LORA_UNFROZEN_T5_MOMENT = Recipe(
+    epochs=8, lr=5e-5, warmup_steps=500, early_stop_patience=3,
+    head_lr_mult=5.0, layerwise_lr_decay=0.9,
+    lora_cfg={"r": 16, "alpha": 32, "dropout": 0.05,
+              "target_modules": ["q", "v", "k", "o"],
+              "root_attr": "backbone"},
+    batch_size_target=256,
+)
+
+# TimesFM unfrozen — the internal `stacked_xf` uses Google's custom layer
+# names that PEFT can't auto-target. Fall back to full fine-tune: the
+# adapter's `unfreeze_encoder()` is invoked by setting `freeze_encoder=False`
+# on the factory; no LoRA wrapping needed.
+_FULL_UNFROZEN_NO_LORA = Recipe(
+    epochs=8, lr=2e-5, warmup_steps=500, early_stop_patience=3,
+    head_lr_mult=5.0, layerwise_lr_decay=0.9,
+    lora_cfg=None,
+    batch_size_target=128,
+)
+
+# Time-LLM — the adapter applies LoRA INTERNALLY in _build_llm(), so
+# lora_cfg must be None to avoid double-wrapping. The internal LoRA
+# config comes from TimeLLMConfig(apply_lora=True, lora_r=16, ...).
 _LLM_LORA = Recipe(
     epochs=5, lr=5e-5, warmup_steps=300, early_stop_patience=2,
     head_lr_mult=10.0, layerwise_lr_decay=0.95,
-    lora_cfg={"r": 8, "alpha": 16, "dropout": 0.05,
-              "target_modules": ["q_proj", "v_proj"]},
+    lora_cfg=None,
     batch_size_target=128,
 )
 _LLM_LORA_4BIT = Recipe(
     epochs=4, lr=3e-5, warmup_steps=200, early_stop_patience=2,
     head_lr_mult=10.0, layerwise_lr_decay=0.95,
-    lora_cfg={"r": 8, "alpha": 16, "dropout": 0.05,
-              "target_modules": ["q_proj", "v_proj"]},
+    lora_cfg=None,
     batch_size_target=64,
 )
 
@@ -154,13 +179,13 @@ ARCH_RECIPES: dict[str, Recipe] = {
     "chronos_bolt_small":    _FROZEN_FOUND,
     "chronos_bolt_base":     _FROZEN_FOUND,
     "chronos_base_multi":    _FROZEN_FOUND,
-    "chronos_base_unfrozen": _LORA_UNFROZEN_T5,
+    "chronos_base_unfrozen": _LORA_UNFROZEN_T5_CHRONOS,
     "timesfm_2p5_200m":      _FROZEN_FOUND,
     "timesfm_2p5_multi":     _FROZEN_FOUND,
-    "timesfm_2p5_unfrozen":  _LORA_UNFROZEN,
+    "timesfm_2p5_unfrozen":  _FULL_UNFROZEN_NO_LORA,
     "moment_large":          _FROZEN_FOUND,
     "moment_large_multi":    _FROZEN_FOUND,
-    "moment_large_unfrozen": _LORA_UNFROZEN_T5,
+    "moment_large_unfrozen": _LORA_UNFROZEN_T5_MOMENT,
     "time_llm_0p5b":         _LLM_LORA,
     "time_llm_1p5b":         _LLM_LORA,
     "time_llm_7b_4bit":      _LLM_LORA_4BIT,
