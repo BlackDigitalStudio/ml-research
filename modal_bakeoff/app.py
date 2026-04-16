@@ -45,8 +45,8 @@ image = (
     )
     .apt_install("git", "build-essential", "ninja-build")
     .uv_pip_install(
-        # core — torch 2.5.1 required for torch.float8_e8m0fnu (Qwen/Time-LLM dep)
-        "torch==2.5.1",
+        # torch >=2.6: float8_e8m0fnu (Qwen), CUDA 12.1 compat
+        "torch>=2.6,<2.9",
         "numpy==2.2.4",
         "pandas==2.2.3",
         "pyarrow==19.0.1",
@@ -62,8 +62,6 @@ image = (
         "chronos-forecasting",
         # foundation model packages (missing in v1 image; caused 9/21 failures)
         "mambapy",      # mamba, hybrid_mamba_attn — Python fallback alongside mamba-ssm CUDA kernels
-        "timesfm",      # timesfm_2p5_{200m, multi, unfrozen}
-        "momentfm",     # moment_large{, _multi, _unfrozen}
         # observability
         "tqdm",
     )
@@ -74,6 +72,12 @@ image = (
         "pip install packaging wheel",
         "pip install mamba-ssm==2.2.2 causal-conv1d==1.4.0 --no-build-isolation "
         "|| echo '[image] mamba-ssm failed — mamba/hybrid_mamba_attn will skip'",
+        # timesfm: PyPI has 1.0.0 only; our adapter needs 2.0.0 (TimesFM_2p5_200M_torch).
+        "pip install git+https://github.com/google-research/timesfm.git "
+        "|| echo '[image] timesfm git failed — timesfm_* will skip'",
+        # momentfm: PyPI 0.1.4 pins transformers==4.33.3; git HEAD is relaxed.
+        "pip install git+https://github.com/moment-timeseries-foundation-model/moment.git "
+        "|| echo '[image] momentfm git failed — moment_* will skip'",
     )
     .env({
         "PYTHONPATH": "/root/scalper-bot",

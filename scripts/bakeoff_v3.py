@@ -160,7 +160,7 @@ ARCH_RECIPES: dict[str, Recipe] = {
     "timesfm_2p5_unfrozen":  _LORA_UNFROZEN,
     "moment_large":          _FROZEN_FOUND,
     "moment_large_multi":    _FROZEN_FOUND,
-    "moment_large_unfrozen": _LORA_UNFROZEN,
+    "moment_large_unfrozen": _LORA_UNFROZEN_T5,
     "time_llm_0p5b":         _LLM_LORA,
     "time_llm_1p5b":         _LLM_LORA,
     "time_llm_7b_4bit":      _LLM_LORA_4BIT,
