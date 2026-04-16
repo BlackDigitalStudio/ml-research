@@ -42,7 +42,7 @@ def _load_cache():
     cand.sort(key=lambda p: p.stat().st_size, reverse=True)
     prefix = str(cand[0])[: -len("_mid_paths.npy")]
     print(f"[grid_rt] using cache prefix: {prefix}")
-    return {
+    out = {
         "prefix": prefix,
         "y": np.load(f"{prefix}_y.npy"),
         "pnl": np.load(f"{prefix}_pnl.npy"),
@@ -50,6 +50,25 @@ def _load_cache():
         "entry_long": np.load(f"{prefix}_entry_long.npy"),
         "entry_short": np.load(f"{prefix}_entry_short.npy"),
     }
+    # Book-aware upgrades: present only for caches built with the new
+    # build_samples (post-2026-04-16). When present, the grid drops the
+    # mid-path assumption and runs the realistic simulate_trade_book — entry
+    # fills against opposite side, stops pay spread+level slippage, TP fills
+    # at limit exactly. Legacy caches fall back silently.
+    bp_path = Path(f"{prefix}_book_paths.npy")
+    eb_path = Path(f"{prefix}_entry_book.npy")
+    lat_path = Path(f"{prefix}_fill_latency_ms.npy")
+    if bp_path.exists():
+        out["book_paths"] = np.load(bp_path, mmap_mode="r")
+        print(f"[grid_rt] book_paths found → book-aware simulator active "
+              f"(shape={out['book_paths'].shape})")
+    if eb_path.exists():
+        out["entry_book"] = np.load(eb_path)
+    if lat_path.exists():
+        out["fill_latency_ms"] = np.load(lat_path)
+        print(f"[grid_rt] per-sample latency array found "
+              f"(shape={out['fill_latency_ms'].shape})")
+    return out
 
 
 def main():
@@ -84,6 +103,18 @@ def main():
     print(f"[grid_rt] {len(combos)} outer configs × {len(META_THR_GRID)*len(MIN_PROB_GRID)*len(SPREAD_BPS_GRID)*len(FILL_PROB_GRID)} inner")
 
     rng = np.random.default_rng(42)
+    # Hoist book-aware kwargs out of the per-combo call site — identical across
+    # all (tp, sl, to) combos. When book_paths exists the spread_bps axis in
+    # the inner grid becomes redundant (realistic spread is already in the
+    # book), but we keep it to measure its effect and for parity debugging.
+    _book_kwargs = {}
+    if "book_paths" in c:
+        _book_kwargs["book_paths"] = c["book_paths"]
+    if "entry_book" in c:
+        _book_kwargs["entry_book"] = c["entry_book"]
+    if "fill_latency_ms" in c:
+        _book_kwargs["fill_latency_ms_array"] = c["fill_latency_ms"]
+
     for i_combo, (tp, sl, to_ticks) in enumerate(combos):
         tp_arr = np.full(N, tp, dtype=np.float64)
         sl_arr = np.full(N, sl, dtype=np.float64)
@@ -93,6 +124,7 @@ def main():
             tp_arr, sl_arr, to_arr,
             commission_win_pct=0.04, commission_loss_pct=0.07,
             partial_enabled=True, trailing_enabled=True, fill_latency_ms=150.0,
+            **_book_kwargs,
         )
         pnl_long = out["pnl_long"].astype(np.float64)
         pnl_short = out["pnl_short"].astype(np.float64)

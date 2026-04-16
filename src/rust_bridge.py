@@ -457,9 +457,20 @@ def simulate_labels(
     commission_win_pct=0.04, commission_loss_pct=0.07,
     partial_enabled=True, trailing_enabled=True,
     fill_latency_ms=150.0,
+    book_paths=None, entry_book=None, fill_latency_ms_array=None,
 ):
     """Rust drop-in for the LONG/SHORT forward-sim loop. Returns dict of arrays:
        y (u8), target_pnl (f64), reason_long/short (u8), pnl_long/short (f64).
+
+    Optional book-aware path (0-gap vs live trading):
+        book_paths           : (N, H, 2) f64 [best_bid, best_ask] per forward tick
+        entry_book           : (N, 2)    f64 [bid_at_entry, ask_at_entry]
+        fill_latency_ms_array: (N,)      f64 per-sample RTT, overrides scalar
+
+    When book_paths is provided the Rust simulator uses simulate_trade_book —
+    entry fills against opposite side, stops pay realistic slippage, TP limits
+    fill at the target exactly. At spread=0 byte-identical to the legacy path
+    (guaranteed by test_parity_spread_zero_timeout in live_sim.rs).
     """
     if not _SIM_BIN.exists():
         raise RuntimeError(f"Rust sim_labels not built: {_SIM_BIN}")
@@ -485,6 +496,30 @@ def simulate_labels(
                "--trailing-enabled", str(trailing_enabled).lower(),
                "--fill-latency-ms", str(fill_latency_ms),
                "--out-prefix", str(prefix)]
+        if book_paths is not None:
+            bp_arr = np.ascontiguousarray(book_paths, dtype=np.float64)
+            if bp_arr.ndim != 3 or bp_arr.shape[2] != 2:
+                raise ValueError(
+                    f"book_paths must be (N, H, 2) f64, got {bp_arr.shape}"
+                )
+            np.save(td / "book.npy", bp_arr)
+            cmd += ["--book-paths", str(td / "book.npy")]
+        if entry_book is not None:
+            eb_arr = np.ascontiguousarray(entry_book, dtype=np.float64)
+            if eb_arr.ndim != 2 or eb_arr.shape[1] != 2:
+                raise ValueError(
+                    f"entry_book must be (N, 2) f64, got {eb_arr.shape}"
+                )
+            np.save(td / "eb.npy", eb_arr)
+            cmd += ["--entry-book", str(td / "eb.npy")]
+        if fill_latency_ms_array is not None:
+            lat_arr = np.ascontiguousarray(fill_latency_ms_array, dtype=np.float64)
+            if lat_arr.ndim != 1:
+                raise ValueError(
+                    f"fill_latency_ms_array must be 1D f64, got {lat_arr.shape}"
+                )
+            np.save(td / "lat.npy", lat_arr)
+            cmd += ["--fill-latency-ms-array", str(td / "lat.npy")]
         subprocess.run(cmd, check=True)
         return {
             "y": np.load(f"{prefix}_y.npy"),

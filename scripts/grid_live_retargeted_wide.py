@@ -64,7 +64,7 @@ def _load_cache():
     cand.sort(key=lambda p: p.stat().st_size, reverse=True)
     prefix = str(cand[0])[: -len("_mid_paths.npy")]
     print(f"[gridw] using cache prefix: {prefix}")
-    return {
+    out = {
         "prefix": prefix,
         "y": np.load(f"{prefix}_y.npy"),
         "pnl": np.load(f"{prefix}_pnl.npy"),
@@ -72,6 +72,20 @@ def _load_cache():
         "entry_long": np.load(f"{prefix}_entry_long.npy"),
         "entry_short": np.load(f"{prefix}_entry_short.npy"),
     }
+    # Book-aware auto-upgrade (same convention as grid_live_retargeted.py).
+    bp_path = Path(f"{prefix}_book_paths.npy")
+    eb_path = Path(f"{prefix}_entry_book.npy")
+    lat_path = Path(f"{prefix}_fill_latency_ms.npy")
+    if bp_path.exists():
+        out["book_paths"] = np.load(bp_path, mmap_mode="r")
+        print(f"[gridw] book_paths found → book-aware simulator "
+              f"(shape={out['book_paths'].shape})")
+    if eb_path.exists():
+        out["entry_book"] = np.load(eb_path)
+    if lat_path.exists():
+        out["fill_latency_ms"] = np.load(lat_path)
+        print(f"[gridw] per-sample latency array found")
+    return out
 
 
 def main():
@@ -109,6 +123,14 @@ def main():
 
     rows = []
     t_start = time.monotonic()
+    _book_kwargs = {}
+    if "book_paths" in c:
+        _book_kwargs["book_paths"] = c["book_paths"]
+    if "entry_book" in c:
+        _book_kwargs["entry_book"] = c["entry_book"]
+    if "fill_latency_ms" in c:
+        _book_kwargs["fill_latency_ms_array"] = c["fill_latency_ms"]
+
     for i_combo, (tp, sl, to_ticks, partial, trailing) in enumerate(outer_combos):
         tp_arr = np.full(N, tp, dtype=np.float64)
         sl_arr = np.full(N, sl, dtype=np.float64)
@@ -118,6 +140,7 @@ def main():
             tp_arr, sl_arr, to_arr,
             commission_win_pct=0.04, commission_loss_pct=0.07,
             partial_enabled=partial, trailing_enabled=trailing, fill_latency_ms=150.0,
+            **_book_kwargs,
         )
         pnl_long = out["pnl_long"].astype(np.float64)
         pnl_short = out["pnl_short"].astype(np.float64)
