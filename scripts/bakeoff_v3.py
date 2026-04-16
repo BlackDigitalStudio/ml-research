@@ -97,11 +97,26 @@ _FROZEN_FOUND = Recipe(epochs=12, lr=1e-3, warmup_steps=500,
                         batch_size_target=512)
 
 # Unfrozen foundation — LoRA + layer-wise LR decay.
+# target_modules is arch-specific: T5-family (Chronos-Bolt) uses bare `q/v/k/o`
+# without the `_proj` suffix HF's default attention layers carry. We branch
+# below per-arch; this recipe stays as the "standard" default for
+# MOMENT/TimesFM which expose q_proj/v_proj.
 _LORA_UNFROZEN = Recipe(
     epochs=8, lr=5e-5, warmup_steps=500, early_stop_patience=3,
     head_lr_mult=5.0, layerwise_lr_decay=0.9,
     lora_cfg={"r": 16, "alpha": 32, "dropout": 0.05,
               "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"]},
+    batch_size_target=256,
+)
+
+# T5 variant for Chronos-Bolt (T5 encoder uses q/v/k/o bare names). Wiring
+# the wrong suffix raises "Target modules not found" in peft on the first
+# call to `get_peft_model` — 2026-04-16 Modal sweep had this.
+_LORA_UNFROZEN_T5 = Recipe(
+    epochs=8, lr=5e-5, warmup_steps=500, early_stop_patience=3,
+    head_lr_mult=5.0, layerwise_lr_decay=0.9,
+    lora_cfg={"r": 16, "alpha": 32, "dropout": 0.05,
+              "target_modules": ["q", "v", "k", "o"]},
     batch_size_target=256,
 )
 
@@ -139,7 +154,7 @@ ARCH_RECIPES: dict[str, Recipe] = {
     "chronos_bolt_small":    _FROZEN_FOUND,
     "chronos_bolt_base":     _FROZEN_FOUND,
     "chronos_base_multi":    _FROZEN_FOUND,
-    "chronos_base_unfrozen": _LORA_UNFROZEN,
+    "chronos_base_unfrozen": _LORA_UNFROZEN_T5,
     "timesfm_2p5_200m":      _FROZEN_FOUND,
     "timesfm_2p5_multi":     _FROZEN_FOUND,
     "timesfm_2p5_unfrozen":  _LORA_UNFROZEN,
