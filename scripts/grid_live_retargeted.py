@@ -153,12 +153,14 @@ def main():
         print("\n=== TOP 10 BY NET ===")
         print(f"{'tp':>5} {'sl':>5} {'to_s':>5} {'thr':>5} {'mp':>4} {'spb':>4} {'fp':>4} "
               f"{'n':>5} {'WR%':>6} {'net%':>7} {'DD%':>6} {'sharpe':>7}")
+        # net_pct is already in percent units (sum of trade pnl_pct * kelly,
+        # each trade pnl_pct is 0.15 = 0.15 %). Do not *100.
         for r in rows[:10]:
             print(f"{r['tp']:>5.2f} {r['sl']:>5.2f} {r['timeout']/10:>4.0f}s "
                   f"{r['meta_thr']:>5.2f} {r['min_prob']:>4.2f} {r['spread_bps']:>4.0f} "
                   f"{r['fill_prob']:>4.1f} {r['n_trades']:>5d} "
-                  f"{r['win_rate_pct']:>5.1f}% {r['net_pct']*100:>+6.2f}% "
-                  f"{r['max_dd_pct']*100:>5.2f}% {r['sharpe']:>+7.2f}")
+                  f"{r['win_rate_pct']:>5.1f}% {r['net_pct']:>+6.2f}% "
+                  f"{r['max_dd_pct']:>5.2f}% {r['sharpe']:>+7.2f}")
 
 
 if __name__ == "__main__":

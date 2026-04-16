@@ -47,13 +47,29 @@ class RegimeConfig:
     colsample_bytree: float = 0.8
     seed: int = 42
 
-    # Which X_feat columns the regime classifier pays attention to — we
-    # pick features that capture regime rather than direction. The model
-    # is free to weight them; listing here documents intent.
-    #  3=spread, 10=volatility_1s, 13=funding_rate, 17=oi_delta,
-    #  21=vol_ratio, 23=hurst, 22=trade_intensity_ratio,
-    #  25=cancel_rate_diff, 27=ofi_5s, 28=ofi_30s
-    feat_columns: tuple[int, ...] = (3, 10, 13, 17, 21, 22, 23, 25, 27, 28)
+    # Which X_feat columns the regime classifier pays attention to on the
+    # post-Stage-E 49-feature set. Stage E pruned raw indices 5/17/18/19/
+    # 21/22/23 — removing the features the pre-Stage-E regime classifier
+    # relied on (oi_delta, vol_ratio, hurst, trade_intensity_ratio).
+    # Replacement uses richer Stage-A..D horizon-tier features that were
+    # specifically designed to match the 60-180 s holding zone.
+    #
+    #   3  = spread                     (raw 3, unchanged)
+    #   9  = volatility_1s              (raw 10 - 1 drop before it)
+    #   12 = funding_rate               (raw 13)
+    #   18 = cancel_rate_diff           (raw 25)
+    #   20 = ofi_5s                     (raw 27)
+    #   21 = ofi_30s                    (raw 28)
+    #   30 = realized_vol_60s           (Stage A — replaces vol_ratio)
+    #   31 = realized_vol_120s          (Stage A)
+    #   32 = bipower_var_120s           (Stage A — jump-robust variation)
+    #   33 = ofi_60s                    (Stage B — horizon OFI)
+    #   34 = ofi_120s                   (Stage B)
+    #   40 = kyle_lambda_60s            (Stage C — price-impact regime)
+    #   41 = vpin_60s                   (Stage C — toxic flow proxy)
+    #   48 = eth_btc_corr_30s           (Stage D — cross-asset regime)
+    feat_columns: tuple[int, ...] = (3, 9, 12, 18, 20, 21,
+                                       30, 31, 32, 33, 34, 40, 41, 48)
 
 
 def _time_of_day_features(timestamps_ms: np.ndarray) -> np.ndarray:

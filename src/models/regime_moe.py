@@ -41,26 +41,46 @@ import torch
 import torch.nn as nn
 
 
-# Feature indices in X_feat (from src/features.py:FEATURE_KEYS)
-FEAT_VOL_RATIO = 21
-FEAT_HURST = 23
+# Feature indices in X_feat (from src/features.py::FEATURE_KEYS after the
+# 2026-04-15 Stage-E prune). The original regime_moe used raw indices
+# 21 (volatility_ratio) and 23 (hurst_exponent) which were BOTH dropped in
+# Stage E as "regime signal belongs in a separate classifier". Replacement
+# features from Stage A / B are horizon-tier and specifically designed
+# for the 60-180 s holding zone.
+FEAT_REALIZED_VOL_60S = 30    # post-prune index of "realized_vol_60s"
+FEAT_REALIZED_VOL_120S = 31   # "realized_vol_120s"
+FEAT_MOMENTUM_120S = 29       # "momentum_120s" — signed directional strength
 
 
 def compute_regime_hard(feat: torch.Tensor,
-                         vol_thresh_hi: float = 1.5,
-                         vol_thresh_lo: float = 0.5,
-                         hurst_trend_band: float = 0.15) -> torch.Tensor:
+                         vol_hi_pctile: float = 0.75,
+                         vol_lo_pctile: float = 0.25,
+                         momentum_thresh: float = 0.0015) -> torch.Tensor:
     """Return (B,) int64 regime id ∈ {0: high_vol, 1: low_vol, 2: trending, 3: mean_rev}.
 
-    Priority order: high_vol > low_vol > trending > mean_rev.
-    A sample with high_vol AND trending routes to high_vol (single expert).
-    """
-    vol_ratio = feat[:, FEAT_VOL_RATIO]
-    hurst = feat[:, FEAT_HURST]
+    Uses Stage-A horizon-tier features instead of the pruned vol_ratio/hurst.
+    Priority order: high_vol > low_vol > trending > mean_rev. A sample with
+    high_vol AND trending routes to high_vol (single expert).
 
-    high_vol = vol_ratio > vol_thresh_hi
-    low_vol = (vol_ratio < vol_thresh_lo) & ~high_vol
-    trending = (torch.abs(hurst - 0.5) > hurst_trend_band) & ~high_vol & ~low_vol
+    Thresholds use percentile cuts over the batch rather than fixed
+    ratios — realized_vol_120s is already in log-return space (not a
+    ratio), so the original 1.5×/0.5× cutoffs don't apply.
+    """
+    vol_120 = feat[:, FEAT_REALIZED_VOL_120S]
+    mom_120 = feat[:, FEAT_MOMENTUM_120S]
+
+    # Batch quantiles as volatility thresholds (robust to scaling shifts).
+    if vol_120.numel() > 1:
+        hi = torch.quantile(vol_120, vol_hi_pctile)
+        lo = torch.quantile(vol_120, vol_lo_pctile)
+    else:
+        hi = vol_120.mean() + 1e-6
+        lo = vol_120.mean() - 1e-6
+
+    high_vol = vol_120 > hi
+    low_vol = (vol_120 < lo) & ~high_vol
+    # Trending: strong |momentum_120s| (log-return over 12 s / 600 ticks).
+    trending = (torch.abs(mom_120) > momentum_thresh) & ~high_vol & ~low_vol
 
     regime = torch.full(feat.shape[:1], 3, dtype=torch.long, device=feat.device)
     regime[high_vol] = 0

@@ -28,6 +28,10 @@ import numpy as np
 
 @dataclass
 class StackerConfig:
+    # Backend — "xgboost" (original) or "catboost" (ordered boosting,
+    # stronger calibration, native NaN handling, better on correlated
+    # primary softmaxes which XGBoost tree-greedy over-splits).
+    backend: str = "xgboost"
     n_estimators: int = 500
     max_depth: int = 5
     learning_rate: float = 0.05
@@ -38,6 +42,10 @@ class StackerConfig:
     use_feats: bool = True          # concat handcrafted feats with softmaxes
     objective: str = "multi:softprob"
     num_class: int = 3
+    # CatBoost-only knobs
+    l2_leaf_reg: float = 3.0
+    bagging_temperature: float = 1.0
+    border_count: int = 128
 
 
 def stack_inputs(
@@ -68,34 +76,56 @@ def train_stacker(
     val_frac: float = 0.25,
     seed: int = 42,
 ):
-    """Train XGBoost meta-learner with time-ordered val split."""
-    import xgboost as xgb
+    """Train L2 stacker with time-ordered val split.
 
+    Backend: cfg.backend ∈ {"xgboost", "catboost"}. Both implement the
+    same (fit → predict_proba) sklearn-style API so downstream code
+    (grid_live, stacker_meta_v2) is backend-agnostic.
+    """
     X_stack = stack_inputs(primary_softmaxes, X_feat=X_feat if cfg.use_feats else None)
     n = len(y_true)
     n_val = int(n * val_frac)
     n_tr = n - n_val
 
-    model = xgb.XGBClassifier(
-        n_estimators=cfg.n_estimators,
-        max_depth=cfg.max_depth,
-        learning_rate=cfg.learning_rate,
-        subsample=cfg.subsample,
-        colsample_bytree=cfg.colsample_bytree,
-        reg_alpha=cfg.reg_alpha,
-        reg_lambda=cfg.reg_lambda,
-        objective=cfg.objective,
-        num_class=cfg.num_class,
-        early_stopping_rounds=40,
-        random_state=seed,
-        n_jobs=-1,
-        verbosity=0,
-    )
-    model.fit(
-        X_stack[:n_tr], y_true[:n_tr],
-        eval_set=[(X_stack[n_tr:], y_true[n_tr:])],
-        verbose=False,
-    )
+    if cfg.backend == "catboost":
+        from catboost import CatBoostClassifier
+        model = CatBoostClassifier(
+            iterations=cfg.n_estimators,
+            depth=min(cfg.max_depth, 10),
+            learning_rate=cfg.learning_rate,
+            l2_leaf_reg=cfg.l2_leaf_reg,
+            bagging_temperature=cfg.bagging_temperature,
+            border_count=cfg.border_count,
+            loss_function="MultiClass",
+            od_type="Iter",
+            od_wait=40,
+            random_seed=seed,
+            thread_count=-1,
+            verbose=False,
+        )
+        model.fit(X_stack[:n_tr], y_true[:n_tr],
+                   eval_set=(X_stack[n_tr:], y_true[n_tr:]),
+                   verbose=False)
+    else:
+        import xgboost as xgb
+        model = xgb.XGBClassifier(
+            n_estimators=cfg.n_estimators,
+            max_depth=cfg.max_depth,
+            learning_rate=cfg.learning_rate,
+            subsample=cfg.subsample,
+            colsample_bytree=cfg.colsample_bytree,
+            reg_alpha=cfg.reg_alpha,
+            reg_lambda=cfg.reg_lambda,
+            objective=cfg.objective,
+            num_class=cfg.num_class,
+            early_stopping_rounds=40,
+            random_state=seed,
+            n_jobs=-1,
+            verbosity=0,
+        )
+        model.fit(X_stack[:n_tr], y_true[:n_tr],
+                   eval_set=[(X_stack[n_tr:], y_true[n_tr:])],
+                   verbose=False)
 
     # Metrics on held-out tail.
     val_soft = model.predict_proba(X_stack[n_tr:])
