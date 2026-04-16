@@ -564,7 +564,9 @@ class BinanceWSClient:
 
 
 class _StreamHandler:
-    """Manages a single WebSocket stream with auto-reconnect."""
+    """Manages a single WebSocket stream with auto-reconnect + staleness watchdog."""
+
+    IDLE_MAX = 60.0  # force-reconnect if no data for this many seconds
 
     def __init__(self, name: str, url: str, callback: Callback, client: BinanceWSClient) -> None:
         self.name = name
@@ -572,6 +574,7 @@ class _StreamHandler:
         self.callback = callback
         self._client = client
         self._running = True
+        self.last_data_time: float = time.monotonic()
 
     def stop(self) -> None:
         self._running = False
@@ -579,22 +582,38 @@ class _StreamHandler:
     async def run(self) -> None:
         backoff = 1
         while self._running:
+            watchdog: asyncio.Task | None = None
             try:
                 async with self._client._session.ws_connect(self.url) as ws:
                     logger.info("WS %s connected", self.name)
                     backoff = 1
+                    self.last_data_time = time.monotonic()
+                    watchdog = asyncio.create_task(
+                        self._client._data_staleness_watchdog(
+                            ws, [self.last_data_time], self.IDLE_MAX, self.name
+                        )
+                    )
+                    last_ts_ref = [self.last_data_time]
                     async for msg in ws:
                         if not self._running:
                             break
                         if msg.type == aiohttp.WSMsgType.TEXT:
+                            now = time.monotonic()
+                            self.last_data_time = now
+                            last_ts_ref[0] = now
                             data = orjson.loads(msg.data)
                             await self.callback(data)
                         elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
                             break
             except asyncio.CancelledError:
+                if watchdog:
+                    watchdog.cancel()
                 break
             except Exception as e:
                 logger.error("WS %s error: %r", self.name, e)
+            finally:
+                if watchdog:
+                    watchdog.cancel()
 
             if not self._running:
                 break

@@ -134,6 +134,39 @@ async def main() -> None:
     # Start derivatives recorder
     deriv_task = asyncio.create_task(derivatives_recorder())
 
+    # --- Stream health watchdog ---
+    # Checks that critical streams (BTC depth, BTC trades) are receiving
+    # data. If both are stale for >90s, exits the process — systemd
+    # Restart=always brings it back within 5s, total recovery < 10s.
+    STALE_WARN_SEC = 60
+    STALE_CRITICAL_SEC = 90
+
+    async def stream_watchdog() -> None:
+        await asyncio.sleep(30)  # grace period for initial connections
+        while not shutdown.is_set():
+            await asyncio.sleep(30)
+            now = time.monotonic()
+            depth_handler = ws._streams.get("depth")
+            trade_handler = ws._streams.get("aggtrade")
+            depth_idle = (now - depth_handler.last_data_time) if depth_handler else 999
+            trade_idle = (now - trade_handler.last_data_time) if trade_handler else 999
+
+            if depth_idle > STALE_WARN_SEC or trade_idle > STALE_WARN_SEC:
+                logger.warning(
+                    "STREAM STALE: depth=%.0fs trade=%.0fs (warn=%ds)",
+                    depth_idle, trade_idle, STALE_WARN_SEC,
+                )
+            if depth_idle > STALE_CRITICAL_SEC and trade_idle > STALE_CRITICAL_SEC:
+                logger.critical(
+                    "BOTH BTC STREAMS DEAD for >%ds (depth=%.0fs trade=%.0fs) — "
+                    "exiting for systemd restart",
+                    STALE_CRITICAL_SEC, depth_idle, trade_idle,
+                )
+                shutdown.set()
+                return
+
+    watchdog_task = asyncio.create_task(stream_watchdog())
+
     # Stats loop
     while not shutdown.is_set():
         await asyncio.sleep(60)
@@ -151,17 +184,29 @@ async def main() -> None:
         # Exchange counts
         ex_str = " ".join(f"{k.replace('ex_','')}={v}" for k, v in sorted(counts.items()) if k.startswith("ex_"))
 
+        # Stream health status
+        now = time.monotonic()
+        health_parts = []
+        for sname in ("depth", "aggtrade", "markprice", "secondary_depth", "secondary_aggtrade"):
+            h = ws._streams.get(sname)
+            if h:
+                idle = now - h.last_data_time
+                status = "OK" if idle < STALE_WARN_SEC else f"STALE({idle:.0f}s)"
+                health_parts.append(f"{sname}={status}")
+
         logger.info(
-            "Stats: %.1fh | depth=%d trade=%d eth_d=%d eth_t=%d bybit=%d fund=%d deriv=%d | %s | %.1f MB",
+            "Stats: %.1fh | depth=%d trade=%d eth_d=%d eth_t=%d bybit=%d fund=%d deriv=%d | %s | %.1f MB | %s",
             hours,
             counts["depth"], counts["trade"],
             counts["eth_depth"], counts["eth_trade"],
             counts["bybit"], counts["funding"], counts["deriv"],
             ex_str or "exchanges=connecting",
             total_mb,
+            " ".join(health_parts),
         )
 
     deriv_task.cancel()
+    watchdog_task.cancel()
     logger.info("Flushing final data...")
     await rec.stop()
     await ws.stop()

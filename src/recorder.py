@@ -17,10 +17,12 @@ from src.config import Config
 
 logger = logging.getLogger(__name__)
 
-FLUSH_INTERVAL = 60  # flush to disk every 60 seconds
-RETENTION_HOURS = 72
+FLUSH_INTERVAL = 15  # flush every 15s — max data loss on crash is one interval
+RETENTION_HOURS = 168  # 7 days (was 72h — safe on 62 GB Contabo, ~1.5 GB/day depth)
 PARTS_SUBDIR = ".parts"
 DEPTH_LEVELS = 20
+_TARDIS_SUFFIX = "_tardis"  # files matching *_tardis*.parquet are historical and must not be rotated
+HEALTH_FILE = "/tmp/scalper_recorder_health"  # mtime = last successful flush; external monitoring can stat this
 
 
 def _snapshot_to_flat_row(snapshot) -> dict:
@@ -270,6 +272,7 @@ class Recorder:
             try:
                 await asyncio.sleep(FLUSH_INTERVAL)
                 self._flush_all()
+                Path(HEALTH_FILE).write_text(str(time.time()))
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -445,7 +448,11 @@ class Recorder:
         count = 0
         for d in self._hourly_dirs:
             for f in d.iterdir():
-                if f.is_file() and f.suffix == ".parquet" and f.stat().st_mtime < cutoff:
+                if not f.is_file() or f.suffix != ".parquet":
+                    continue
+                if _TARDIS_SUFFIX in f.stem:
+                    continue
+                if f.stat().st_mtime < cutoff:
                     try:
                         f.unlink()
                         count += 1
