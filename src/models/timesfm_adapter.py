@@ -47,9 +47,14 @@ class TimesFMAdapterConfig:
     early_stop_patience: int = 6
 
 
-def _load_timesfm_backbone(repo: str) -> tuple[nn.Module, nn.ModuleList]:
-    """Download weights, load inner model, return (tokenizer, stacked_xf).
-    Caller uses these as fixed encoder; no dependency on forecast/output heads.
+def _load_timesfm_backbone(repo: str) -> nn.Module:
+    """Download weights, load inner model, return the full `wrapper.model`
+    nn.Module. We keep the whole TimesFM module as a single sub-module on
+    the classifier so `.to(device)` correctly moves every registered
+    parameter, and we additionally patch its internal `self.device`
+    attribute because timesfm caches device as a string at construction
+    time (see timesfm_2p5_torch.py:73-83) and its forward uses that
+    string for new-tensor allocation.
     """
     import timesfm
     from huggingface_hub import hf_hub_download
@@ -57,9 +62,11 @@ def _load_timesfm_backbone(repo: str) -> tuple[nn.Module, nn.ModuleList]:
     wrapper = timesfm.TimesFM_2p5_200M_torch()
     wrapper.model.load_checkpoint(path=weights, torch_compile=False)
     # Discard forecast heads — we use encoder only.
-    del wrapper.model.output_projection_point
-    del wrapper.model.output_projection_quantiles
-    return wrapper.model.tokenizer, wrapper.model.stacked_xf
+    if hasattr(wrapper.model, "output_projection_point"):
+        del wrapper.model.output_projection_point
+    if hasattr(wrapper.model, "output_projection_quantiles"):
+        del wrapper.model.output_projection_quantiles
+    return wrapper.model
 
 
 class TimesFMClassifier(nn.Module):
@@ -75,19 +82,19 @@ class TimesFMClassifier(nn.Module):
         self.cfg = cfg
         self.lob_time_dim = lob_time_dim
 
-        tokenizer, stacked_xf = _load_timesfm_backbone(cfg.model_repo)
-        self.tokenizer = tokenizer
-        self.stacked_xf = stacked_xf
+        # Keep the entire TimesFM module so .to(device) walks the whole
+        # parameter tree via PyTorch's standard machinery.
+        self.timesfm_model = _load_timesfm_backbone(cfg.model_repo)
         # Infer d_model from tokenizer output dim (1280 for 2.5-200M).
         with torch.no_grad():
-            self.d_model = int(self.tokenizer(
+            self.d_model = int(self.timesfm_model.tokenizer(
                 torch.zeros(1, 1, 2 * cfg.patch_len)
             ).shape[-1])
 
         if cfg.freeze_encoder:
-            for p in self.tokenizer.parameters():
+            for p in self.timesfm_model.tokenizer.parameters():
                 p.requires_grad = False
-            for p in self.stacked_xf.parameters():
+            for p in self.timesfm_model.stacked_xf.parameters():
                 p.requires_grad = False
 
         # Feature tower
@@ -152,18 +159,21 @@ class TimesFMClassifier(nn.Module):
         patches = series.view(B, N, patch_len)
         masks = torch.zeros_like(patches)  # no padding
         inp = torch.cat([patches, masks], dim=-1)  # (B, N, 2*patch_len)
-        # TimesFM's `load_checkpoint()` populates internal tensors that
-        # aren't all registered as nn.Module parameters, so `.to(device)`
-        # at training time misses them. Force device sync per-forward —
-        # no-op after the first call.
+        # Sync timesfm's internal `device` attribute with the actual
+        # device its parameters now live on. timesfm caches device at
+        # construction time and uses that string for new-tensor allocs
+        # inside its forward — without this patch any training-time
+        # `.to("cuda:0")` leaves `self.device == "cpu"` and the next
+        # internal `torch.zeros(..., device=self.device)` lands on CPU,
+        # triggering "mat1 is on cpu" during the first matmul.
         device = inp.device
-        self.tokenizer.to(device)
-        self.stacked_xf.to(device)
-        emb = self.tokenizer(inp)                  # (B, N, d_model)
+        if getattr(self.timesfm_model, "device", None) != device:
+            self.timesfm_model.device = device
+        emb = self.timesfm_model.tokenizer(inp)     # (B, N, d_model)
         h = emb
-        for layer in self.stacked_xf:
+        for layer in self.timesfm_model.stacked_xf:
             h, _ = layer(h, torch.zeros(B, N, dtype=torch.long, device=h.device), None)
-        return h.mean(dim=1)                       # (B, d_model)
+        return h.mean(dim=1)                        # (B, d_model)
 
     def forward(self, lob: torch.Tensor, feat: torch.Tensor, **_kwargs):
         # **_kwargs absorbs PEFT-injected kwargs when LoRA wraps the encoder.
@@ -186,7 +196,7 @@ class TimesFMClassifier(nn.Module):
         return total, trainable
 
     def unfreeze_encoder(self) -> None:
-        for p in self.tokenizer.parameters():
+        for p in self.timesfm_model.tokenizer.parameters():
             p.requires_grad = True
-        for p in self.stacked_xf.parameters():
+        for p in self.timesfm_model.stacked_xf.parameters():
             p.requires_grad = True

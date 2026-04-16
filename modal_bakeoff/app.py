@@ -152,9 +152,12 @@ GPU_TIERS = {
     "timesfm_2p5_200m":      "L40S",
     "timesfm_2p5_multi":     "L40S",
     "moment_large":          "L40S",
-    "moment_large_multi":    "L40S",
+    # moment_large_multi OOMed on L40S at bs=135 (341M params × full 60-ch
+    # input). Move to A100-80 for headroom.
+    "moment_large_multi":    "A100-80GB",
     # Unfrozen foundation — LoRA + backbone gradients. A100-40 matches the
-    # bakeoff_v1 reference (PRO 6000 48 GB equivalent).
+    # bakeoff_v1 reference (PRO 6000 48 GB equivalent). TimesFM unfrozen
+    # is full fine-tune (200M params trainable) — needs A100-40 for grads.
     "chronos_base_unfrozen": "A100-40GB",
     "timesfm_2p5_unfrozen":  "A100-40GB",
     "moment_large_unfrozen": "A100-40GB",
