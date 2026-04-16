@@ -10,3 +10,4 @@ venv/
 config.env
 _tmp_*
 .claude/
+catboost_info/

@@ -122,6 +122,7 @@ hf_secret = modal.Secret.from_name("huggingface")
 CACHE_MOUNT = "/vol/cache"
 RUNS_MOUNT = "/vol/runs"
 CACHE_PREFIX_DEFAULT = "/vol/cache/samples_v3_999h_1776165949"
+CACHE_PREFIX_LEAKFREE = "/vol/cache/samples_v3_leakfree70k_1776165949"
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +369,8 @@ def smoke():
 # Full 22-arch orchestrator.
 # ---------------------------------------------------------------------------
 @app.local_entrypoint()
-def full_sweep(archs: str = "all", wait: bool = True):
+def full_sweep(archs: str = "all", wait: bool = True,
+                 cache_prefix: str = CACHE_PREFIX_DEFAULT):
     """Kick off every arch in parallel, tiered by GPU class.
 
     Progress logged per-completion. Final `aggregated_summary.json` lands on
@@ -387,7 +389,7 @@ def full_sweep(archs: str = "all", wait: bool = True):
     for arch in arch_list:
         gpu = GPU_TIERS[arch]
         fn = TIER_FN[gpu]
-        call = fn.spawn(arch=arch, cache_prefix=CACHE_PREFIX_DEFAULT)
+        call = fn.spawn(arch=arch, cache_prefix=cache_prefix)
         call_by_arch[arch] = call
         print(f"[orchestrate] spawned {arch}  gpu={gpu}  call_id={call.object_id}")
 
