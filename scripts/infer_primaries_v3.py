@@ -98,8 +98,20 @@ def main() -> int:
             continue
         try:
             model = factory(n_feat)
-            sd = torch.load(pt, map_location="cpu", weights_only=True)
-            model.load_state_dict(sd)
+            ckpt = torch.load(pt, map_location="cpu", weights_only=True)
+            # bakeoff_v3 wraps state_dict in {"state_dict": ..., "metrics": ...};
+            # legacy bakeoff_v1/v2 saved the state_dict directly.
+            sd = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+            # Some archs saved via PEFT add `base_model.model.` prefix; also
+            # some training runs leave `_orig_mod.` from torch.compile. Strip
+            # known prefixes so they load into the fresh factory model.
+            def _strip(k):
+                for p in ("_orig_mod.", "module."):
+                    if k.startswith(p):
+                        k = k[len(p):]
+                return k
+            sd = {_strip(k): v for k, v in sd.items()}
+            model.load_state_dict(sd, strict=False)
         except Exception as e:
             print(f"[infer] skip {arch}: load failed — {e}")
             continue
