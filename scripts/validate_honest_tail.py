@@ -23,11 +23,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src import rust_bridge      # noqa: E402
 
 
+import os
+
 CACHE_DIR = Path("/home/scalper/scalper-bot/data/_cache")
-V2_PATH = Path("/home/scalper/scalper-bot/models/stacker_meta_v2.npz")
-GRID_PATH = Path("/home/scalper/scalper-bot/models/grid_live_v5_retarget.json")
-# Primary train-end for leak boundary (bakeoff_v3 trained on [0, 74k)).
-HONEST_START = 74000
+V2_PATH = Path(os.environ.get("V2_PATH",
+                                "/home/scalper/scalper-bot/models/stacker_meta_v2.npz"))
+GRID_PATH = Path(os.environ.get("GRID_PATH",
+                                  "/home/scalper/scalper-bot/models/grid_live_v5_retarget.json"))
+# Primary train-end for leak boundary. Depends on which bakeoff trained
+# the primaries whose softs fed V2_PATH:
+#    - pre-leakfree: primaries trained on [0, 74k) → HONEST_START = 74000
+#    - leakfree: primaries trained on [0, 70k) → HONEST_START = 70000
+# Override via env: HONEST_START=70000 python scripts/validate_honest_tail.py
+HONEST_START = int(os.environ.get("HONEST_START", "74000"))
 
 
 def _load_cache():
