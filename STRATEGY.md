@@ -197,17 +197,20 @@ Invariants (enforced by `tests/test_business_metrics.py`):
 
 ---
 
-## 8. Current state (honest)
+## 8. Current state (honest, 2026-04-16)
 
-- **Feature overhaul** — 49 features landed with Rust↔Python parity.
-- **RAM refactor** — 1 M samples fit the 62 GB Contabo via the direct-Rust path.
-- **Efficient trainer** — `bakeoff_v3` with per-arch recipes, per-epoch checkpoint, OOM retry.
-- **1 M cache** — partially built: `samples_v3_999h_<mtime>_X_feat.npy` exists, full sidecar set (`X_lob`, `y`, `pnl`, `mid_paths`, `entry_long`, `entry_short`) does NOT. Must be rebuilt before the next bake-off.
-- **Deployable weights** — none. `recover_v2` is invalid against the 49-feature cache. A fresh bake-off → infer → stacker + meta → grid is the remaining P0.
-- **Live bot** — still runs the old CNN + 5-model ensemble. Research winners are NOT deployable until the train→live plumbing is written.
+- **14 primary architectures trained** on Modal (~$6 of $30 monthly credit). All weights on Modal Volume + mirrored to `/tmp/metrics/bakeoff_v3/` on Contabo.
+- **L2 XGBoost stacker + L3 meta + timing-zone grid** ran end-to-end for the first time with direction-aware `pnl_long`/`pnl_short` via Rust `simulate_labels`.
+- **Meta AUC = 0.883** (precision 0.873, recall 0.633) on 4,513-sample val. Strong classification-level signal.
+- **0 / 46,080 profitable configs** in the zone grid (TP 0.15-0.30, SL 0.10-0.15).
+- **0 / 36,864 profitable configs** in the wide grid (TP 0.25-0.50). But the break-even gap at R:R 2:1 is now **+7.5 pp** (was +14.6 pp on 63k / 34-feature baseline — halved) and at **R:R ≥ 2.67 it is negative** (WR > nominal BE).
+- **Net is still ≈ −0.86 % on the best configs** because fixed `(TP, SL, timeout)` let timeout-exits dominate. The live executor's `_adaptive_tp_sl` + `dynamic_timeout_ticks_from_vol_ratio` were NEVER invoked in the grid — the research and execution strategies have diverged at the policy level, not just the weights level.
+- **1 M cache** — only `X_feat.npy` partially built; we trained on the 93 k-sample 50 h cache. Rebuilding the 1 M cache is deprioritised against structural upgrades (see §11).
+- **No live bot** — `main.py` has never executed trades. `src/model.py::HybridModel` has no loadable weights. No paper-trade ever happened. The "train↔live gap" is **not** a blocker until a profitable policy exists; once it does, we swap `HybridModel` for a new inference module.
 
-See `/root/.claude/projects/-root/memory/READ_FIRST_NEXT_STEPS.md` for
-the current prioritised checklist.
+Full numbers: `docs/SESSION_2026_04_16_RESULTS.md`.
+
+See the 2026-04-16 memo in `/root/.claude/projects/-root/memory/session_2026_04_16_iql_pivot.md` for the pivot plan.
 
 ---
 
@@ -255,7 +258,36 @@ not add features to them; flag as stale if you read them.
 
 ---
 
-## 10. Further reading
+## 11. Next architecture — offline RL (IQL) for per-trade adaptive policy
+
+**Why** — the grid's fixed `(TP, SL, timeout, kelly)` leave profit on the table. At R:R 3:1 with `TP = 0.45 %, timeout = 120 s`, the dominant exit is `timeout_*` which captures tiny mid-moves, not the full TP. WR can exceed nominal BE and still net negative. Adaptive per-trade parameters are a structural upgrade, not a hyper-parameter tweak.
+
+**Architecture** (committed 2026-04-16, carte blanche):
+
+```
+(lob, feat)
+    ↓
+[regime_moe] — hard-gate into 1 of 4 expert ensembles (high-vol / low-vol / trending / mean-rev)
+    ↓
+[14 primaries × 3 softmaxes per ensemble] → (B, 42)
+    ↓
+[L2 CatBoost stacker] → P(UP|DOWN|FLAT) + uncertainty  (replaces XGBoost on L2)
+    ↓
+[L3 neural meta, retarget net_pnl > 0] — target is realised profit not TB-label match
+    ↓
+[IQL policy head] — state = [softs 42 + feat 49 + regime_id + uncertainty],
+                   action = (TP_bucket × SL_bucket × timeout_bucket × kelly_bucket × direction),
+                   reward = realised net PnL via Rust simulate_labels
+    ↓
+[simulate_trade()] — single parameterised simulator (grid + live use the same one)
+```
+
+**Day 1 (2026-04-16):** meta retarget + (state, action, reward) dataset generator + CatBoost L2.
+**Day 2-3:** IQL implementation + training, walk-forward eval.
+**Day 4:** `regime_moe` rewire onto Stage A-D features (Stage E pruned `vol_ratio` / `hurst` which the old regime_moe used), retrain regime-specialists, retrain regime_classifier.
+**Day 5:** final end-to-end grid with the IQL policy head driving parameters.
+
+## 12. Further reading
 
 The authoritative prioritised-work memos live in
 `/root/.claude/projects/-root/memory/` on Contabo:
