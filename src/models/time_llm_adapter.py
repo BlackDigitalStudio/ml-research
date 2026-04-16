@@ -163,7 +163,8 @@ class TimeLLMClassifier(nn.Module):
             for p in self.llm.parameters():
                 p.requires_grad = False
 
-    def forward(self, lob: torch.Tensor, feat: torch.Tensor):
+    def forward(self, lob: torch.Tensor, feat: torch.Tensor, **_kwargs):
+        # **_kwargs absorbs PEFT-injected kwargs (input_ids/attention_mask).
         B = lob.shape[0]
         # (B, 3, 20, T) → (B, 60, T) → (B, T, 60)
         x = lob.reshape(B, self.lob_channels, self.lob_time_dim)

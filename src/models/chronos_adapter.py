@@ -221,8 +221,11 @@ class ChronosClassifier(nn.Module):
         return pooled
 
     def forward(
-        self, lob: torch.Tensor, feat: torch.Tensor,
+        self, lob: torch.Tensor, feat: torch.Tensor, **_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # **_kwargs absorbs input_ids / labels / attention_mask injected by
+        # PEFT wrappers — we only use positional (lob, feat) for our custom
+        # training loop in train_efficient.py.
         series = self._lob_to_series(lob)                # (B, C, T)
         B, C, T = series.shape
         # Channel-independent encoding: flatten channel into batch dim,

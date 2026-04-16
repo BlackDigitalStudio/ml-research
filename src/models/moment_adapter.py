@@ -143,7 +143,9 @@ class MOMENTClassifier(nn.Module):
         emb = out.embeddings.view(B, C, -1).mean(dim=1)
         return emb
 
-    def forward(self, lob: torch.Tensor, feat: torch.Tensor):
+    def forward(self, lob: torch.Tensor, feat: torch.Tensor, **_kwargs):
+        # **_kwargs absorbs PEFT-injected input_ids / attention_mask when the
+        # unfrozen variant wraps the backbone with LoRA.
         series = self._lob_to_series(lob)
         emb = self._encode(series)
         lob_tok = self.lob_proj(emb)

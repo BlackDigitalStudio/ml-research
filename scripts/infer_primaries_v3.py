@@ -83,7 +83,11 @@ def main() -> int:
     wdir = Path(args.weights_dir)
     results = {"y": c["y"], "pnl_val": c["pnl"]}
     for arch in [a.strip() for a in args.archs.split(",") if a.strip()]:
-        pt = wdir / f"{arch}.pt"
+        # bakeoff_v3 writes `{tag}_best.pt`; fall back to legacy `{tag}.pt`
+        # (written by bakeoff_v1/v2) to keep older weight dirs loadable.
+        pt = wdir / f"{arch}_best.pt"
+        if not pt.exists():
+            pt = wdir / f"{arch}.pt"
         if not pt.exists():
             print(f"[infer] skip {arch}: no {pt}")
             continue

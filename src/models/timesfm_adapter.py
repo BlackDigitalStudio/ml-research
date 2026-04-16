@@ -165,7 +165,8 @@ class TimesFMClassifier(nn.Module):
             h, _ = layer(h, torch.zeros(B, N, dtype=torch.long, device=h.device), None)
         return h.mean(dim=1)                       # (B, d_model)
 
-    def forward(self, lob: torch.Tensor, feat: torch.Tensor):
+    def forward(self, lob: torch.Tensor, feat: torch.Tensor, **_kwargs):
+        # **_kwargs absorbs PEFT-injected kwargs when LoRA wraps the encoder.
         series = self._lob_to_series(lob)                # (B, C, T)
         B, C, T = series.shape
         # Channel-independent: run TimesFM encoder per channel, mean-pool.
