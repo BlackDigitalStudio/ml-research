@@ -226,6 +226,11 @@ class BinanceWSClient:
         key = data.get("listenKey", "")
         if key:
             logger.info("Obtained listenKey: %s...", key[:8])
+            return key
+        # -2015 = invalid API-key / IP / permissions. Unrecoverable without
+        # a config change, so raise to let the caller disable the stream.
+        if data.get("code") in (-2014, -2015):
+            raise PermissionError(f"listenKey denied ({data.get('code')}): {data.get('msg')}")
         return key
 
     async def _keepalive_listen_key(self) -> None:
@@ -263,6 +268,9 @@ class BinanceWSClient:
                         elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
                             break
 
+            except PermissionError as e:
+                logger.warning("User data stream disabled: %s", e)
+                return
             except Exception as e:
                 logger.error("User data stream error: %r", e)
 
@@ -587,13 +595,13 @@ class _StreamHandler:
                 async with self._client._session.ws_connect(self.url) as ws:
                     logger.info("WS %s connected", self.name)
                     backoff = 1
-                    self.last_data_time = time.monotonic()
+                    last_ts_ref = [time.monotonic()]
+                    self.last_data_time = last_ts_ref[0]
                     watchdog = asyncio.create_task(
                         self._client._data_staleness_watchdog(
-                            ws, [self.last_data_time], self.IDLE_MAX, self.name
+                            ws, last_ts_ref, self.IDLE_MAX, self.name
                         )
                     )
-                    last_ts_ref = [self.last_data_time]
                     async for msg in ws:
                         if not self._running:
                             break
