@@ -35,6 +35,7 @@ import pyarrow.parquet as pq
 _REPO = Path(__file__).resolve().parents[1]
 _FEATURE_BIN = _REPO / "rust_ingest" / "target" / "release" / "feature_builder"
 _SIM_BIN = _REPO / "rust_ingest" / "target" / "release" / "sim_labels"
+_GRID_BIN = _REPO / "rust_ingest" / "target" / "release" / "grid_sim"
 
 
 class RustBinariesMissing(RuntimeError):
@@ -451,6 +452,28 @@ def save_flat_depth_parquet(
                           chunk_rows=chunk_rows)
 
 
+def _stage_npy(name, val, td: Path, dtype, ndim_check=None):
+    """Stage an array argument for sim_labels. Two modes:
+      - val is np.ndarray: write to <td>/<name>.npy with the requested dtype,
+        avoiding extra copies when val is already contiguous + correct dtype.
+      - val is str/Path:   pass the existing .npy path straight through.
+        Caller is responsible for matching dtype (f64 / i64) — sim_labels.rs
+        will fail loudly on mismatch, no silent cast.
+    Returns the path string the Rust binary should read.
+    """
+    if isinstance(val, (str, Path)):
+        p = str(val)
+        if not Path(p).exists():
+            raise FileNotFoundError(f"{name}: path does not exist: {p}")
+        return p
+    arr = np.ascontiguousarray(val, dtype=dtype)
+    if ndim_check is not None:
+        ndim_check(arr)
+    out = td / f"{name}.npy"
+    np.save(out, arr)
+    return str(out)
+
+
 def simulate_labels(
     entry_long, entry_short, mid_paths, tp_pct, sl_pct, timeout_ticks,
     *,
@@ -462,34 +485,34 @@ def simulate_labels(
     """Rust drop-in for the LONG/SHORT forward-sim loop. Returns dict of arrays:
        y (u8), target_pnl (f64), reason_long/short (u8), pnl_long/short (f64).
 
+    Each large-array argument accepts either a numpy array (legacy: gets
+    serialized to a tempfile each call) OR a str/Path pointing to an existing
+    .npy file. The Path mode is the fast path — Rust mmap's the file and skips
+    a 15 GB write+read cycle per call. mid_paths benefits the most.
+
     Optional book-aware path (0-gap vs live trading):
         book_paths           : (N, H, 2) f64 [best_bid, best_ask] per forward tick
         entry_book           : (N, 2)    f64 [bid_at_entry, ask_at_entry]
         fill_latency_ms_array: (N,)      f64 per-sample RTT, overrides scalar
-
-    When book_paths is provided the Rust simulator uses simulate_trade_book —
-    entry fills against opposite side, stops pay realistic slippage, TP limits
-    fill at the target exactly. At spread=0 byte-identical to the legacy path
-    (guaranteed by test_parity_spread_zero_timeout in live_sim.rs).
     """
     if not _SIM_BIN.exists():
         raise RuntimeError(f"Rust sim_labels not built: {_SIM_BIN}")
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        np.save(td / "el.npy", entry_long.astype(np.float64))
-        np.save(td / "es.npy", entry_short.astype(np.float64))
-        np.save(td / "mid.npy", mid_paths.astype(np.float64))
-        np.save(td / "tp.npy", tp_pct.astype(np.float64))
-        np.save(td / "sl.npy", sl_pct.astype(np.float64))
-        np.save(td / "to.npy", timeout_ticks.astype(np.int64))
+        el_path = _stage_npy("el", entry_long, td, np.float64)
+        es_path = _stage_npy("es", entry_short, td, np.float64)
+        mid_path = _stage_npy("mid", mid_paths, td, np.float64)
+        tp_path = _stage_npy("tp", tp_pct, td, np.float64)
+        sl_path = _stage_npy("sl", sl_pct, td, np.float64)
+        to_path = _stage_npy("to", timeout_ticks, td, np.int64)
         prefix = td / "out"
         cmd = [str(_SIM_BIN),
-               "--entry-long", str(td / "el.npy"),
-               "--entry-short", str(td / "es.npy"),
-               "--mid-paths", str(td / "mid.npy"),
-               "--tp-pct", str(td / "tp.npy"),
-               "--sl-pct", str(td / "sl.npy"),
-               "--timeout-ticks", str(td / "to.npy"),
+               "--entry-long", el_path,
+               "--entry-short", es_path,
+               "--mid-paths", mid_path,
+               "--tp-pct", tp_path,
+               "--sl-pct", sl_path,
+               "--timeout-ticks", to_path,
                "--commission-win-pct", str(commission_win_pct),
                "--commission-loss-pct", str(commission_loss_pct),
                "--partial-enabled", str(partial_enabled).lower(),
@@ -497,29 +520,23 @@ def simulate_labels(
                "--fill-latency-ms", str(fill_latency_ms),
                "--out-prefix", str(prefix)]
         if book_paths is not None:
-            bp_arr = np.ascontiguousarray(book_paths, dtype=np.float64)
-            if bp_arr.ndim != 3 or bp_arr.shape[2] != 2:
-                raise ValueError(
-                    f"book_paths must be (N, H, 2) f64, got {bp_arr.shape}"
-                )
-            np.save(td / "book.npy", bp_arr)
-            cmd += ["--book-paths", str(td / "book.npy")]
+            def _check_book(a):
+                if a.ndim != 3 or a.shape[2] != 2:
+                    raise ValueError(f"book_paths must be (N, H, 2) f64, got {a.shape}")
+            book_path = _stage_npy("book", book_paths, td, np.float64, _check_book)
+            cmd += ["--book-paths", book_path]
         if entry_book is not None:
-            eb_arr = np.ascontiguousarray(entry_book, dtype=np.float64)
-            if eb_arr.ndim != 2 or eb_arr.shape[1] != 2:
-                raise ValueError(
-                    f"entry_book must be (N, 2) f64, got {eb_arr.shape}"
-                )
-            np.save(td / "eb.npy", eb_arr)
-            cmd += ["--entry-book", str(td / "eb.npy")]
+            def _check_eb(a):
+                if a.ndim != 2 or a.shape[1] != 2:
+                    raise ValueError(f"entry_book must be (N, 2) f64, got {a.shape}")
+            eb_path = _stage_npy("eb", entry_book, td, np.float64, _check_eb)
+            cmd += ["--entry-book", eb_path]
         if fill_latency_ms_array is not None:
-            lat_arr = np.ascontiguousarray(fill_latency_ms_array, dtype=np.float64)
-            if lat_arr.ndim != 1:
-                raise ValueError(
-                    f"fill_latency_ms_array must be 1D f64, got {lat_arr.shape}"
-                )
-            np.save(td / "lat.npy", lat_arr)
-            cmd += ["--fill-latency-ms-array", str(td / "lat.npy")]
+            def _check_lat(a):
+                if a.ndim != 1:
+                    raise ValueError(f"fill_latency_ms_array must be 1D f64, got {a.shape}")
+            lat_path = _stage_npy("lat", fill_latency_ms_array, td, np.float64, _check_lat)
+            cmd += ["--fill-latency-ms-array", lat_path]
         subprocess.run(cmd, check=True)
         return {
             "y": np.load(f"{prefix}_y.npy"),
@@ -529,3 +546,118 @@ def simulate_labels(
             "pnl_long": np.load(f"{prefix}_pnl_long.npy"),
             "pnl_short": np.load(f"{prefix}_pnl_short.npy"),
         }
+
+
+def simulate_labels_grid(
+    entry_long, entry_short, mid_paths, configs,
+    *,
+    commission_win_pct=0.04, commission_loss_pct=0.07,
+    fill_latency_ms=150.0,
+    book_paths=None, entry_book=None, fill_latency_ms_array=None,
+    # Inner sweep — when ALL of (pred, max_prob, inner_*) are passed, Rust runs
+    # the realise() loop too and returns inner_results.
+    pred=None, max_prob=None,
+    holdout_start=0, n_eff_days=1.0,
+    inner_min_probs=None, inner_spreads=None,
+    inner_fill_probs=None, inner_kelly_fracs=None,
+    inner_kelly_cap=19.0, inner_initial_capital=100.0, inner_seed=42,
+):
+    """Fused outer-grid sim. One Rust call walks all `configs` in a single
+    sample-major sweep — mid_paths.row(i) stays in cache across all configs
+    for sample i.
+
+    Args:
+        entry_long, entry_short, mid_paths, book_paths, entry_book,
+        fill_latency_ms_array: same array-or-path conventions as simulate_labels.
+        configs: list of dicts with keys {tp, sl, to, par, tr}. tp/sl are
+                 percent (e.g. 0.20 = 0.20%), to is timeout in ticks.
+        pred, max_prob: optional (n_samples,) i64 / f64 arrays-or-paths. When
+                 given (with the inner_* sweeps), Rust additionally runs the
+                 realise() inner sweep on the holdout slice and returns
+                 `inner_results` — a list of dicts ranked-ready for Python.
+
+    Returns: dict with
+        pnl_long: (n_configs, n_samples) f64
+        pnl_short: (n_configs, n_samples) f64
+        inner_results: list of dicts (only when pred + max_prob given)
+    """
+    import json
+    if not _GRID_BIN.exists():
+        raise RuntimeError(f"Rust grid_sim not built: {_GRID_BIN}")
+    if not configs:
+        raise ValueError("configs list is empty")
+    for i, c in enumerate(configs):
+        for k in ("tp", "sl", "to"):
+            if k not in c:
+                raise ValueError(f"configs[{i}] missing key: {k}")
+
+    do_inner = pred is not None and max_prob is not None
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        el_path = _stage_npy("el", entry_long, td, np.float64)
+        es_path = _stage_npy("es", entry_short, td, np.float64)
+        mid_path = _stage_npy("mid", mid_paths, td, np.float64)
+        cfg_path = td / "configs.json"
+        cfg_path.write_text(json.dumps(configs))
+        prefix = td / "out"
+        cmd = [str(_GRID_BIN),
+               "--entry-long", el_path,
+               "--entry-short", es_path,
+               "--mid-paths", mid_path,
+               "--configs", str(cfg_path),
+               "--commission-win-pct", str(commission_win_pct),
+               "--commission-loss-pct", str(commission_loss_pct),
+               "--fill-latency-ms", str(fill_latency_ms),
+               "--out-prefix", str(prefix)]
+        if book_paths is not None:
+            def _check_book(a):
+                if a.ndim != 3 or a.shape[2] != 2:
+                    raise ValueError(f"book_paths must be (N, H, 2) f64, got {a.shape}")
+            book_path = _stage_npy("book", book_paths, td, np.float64, _check_book)
+            cmd += ["--book-paths", book_path]
+        if entry_book is not None:
+            def _check_eb(a):
+                if a.ndim != 2 or a.shape[1] != 2:
+                    raise ValueError(f"entry_book must be (N, 2) f64, got {a.shape}")
+            eb_path = _stage_npy("eb", entry_book, td, np.float64, _check_eb)
+            cmd += ["--entry-book", eb_path]
+        if fill_latency_ms_array is not None:
+            def _check_lat(a):
+                if a.ndim != 1:
+                    raise ValueError(f"fill_latency_ms_array must be 1D f64, got {a.shape}")
+            lat_path = _stage_npy("lat", fill_latency_ms_array, td, np.float64, _check_lat)
+            cmd += ["--fill-latency-ms-array", lat_path]
+
+        inner_out = None
+        if do_inner:
+            pred_path = _stage_npy("pred", pred, td, np.int64)
+            mp_path = _stage_npy("mp", max_prob, td, np.float64)
+            inner_out = td / "inner.json"
+            cmd += [
+                "--pred", pred_path,
+                "--max-prob", mp_path,
+                "--holdout-start", str(int(holdout_start)),
+                "--n-eff-days", str(float(n_eff_days)),
+                "--inner-kelly-cap", str(float(inner_kelly_cap)),
+                "--inner-initial-capital", str(float(inner_initial_capital)),
+                "--inner-seed", str(int(inner_seed)),
+                "--inner-out", str(inner_out),
+            ]
+            if inner_min_probs is not None:
+                cmd += ["--inner-min-probs", ",".join(str(x) for x in inner_min_probs)]
+            if inner_spreads is not None:
+                cmd += ["--inner-spreads", ",".join(str(x) for x in inner_spreads)]
+            if inner_fill_probs is not None:
+                cmd += ["--inner-fill-probs", ",".join(str(x) for x in inner_fill_probs)]
+            if inner_kelly_fracs is not None:
+                cmd += ["--inner-kelly-fracs", ",".join(str(x) for x in inner_kelly_fracs)]
+
+        subprocess.run(cmd, check=True)
+        result = {
+            "pnl_long": np.load(f"{prefix}_pnl_long.npy"),
+            "pnl_short": np.load(f"{prefix}_pnl_short.npy"),
+        }
+        if inner_out is not None:
+            with open(inner_out) as f:
+                result["inner_results"] = json.load(f)
+        return result

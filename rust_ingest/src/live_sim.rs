@@ -231,6 +231,10 @@ pub fn simulate_trade(
     let sl_dist = entry_px * sl_pct_eff / 100.0;
     let tp_px = entry_px + sign * tp_dist;
     let mut sl_px = entry_px - sign * sl_dist;
+    // Partial-fill ограничивается limit ценой = entry + partial_tp_progress * tp_dist.
+    // Симметрично simulate_trade_book — fill всегда по этому уровню, не по
+    // текущему mid в момент активации (jump-protection).
+    let partial_target_px = entry_px + sign * tp_dist * cfg.partial_tp_progress;
 
     let max_mon_ticks = (mid_path.len() as i64 - cfg.timeout_limit_ticks).max(0);
     let timeout_ticks = cfg.timeout_ticks.min(max_mon_ticks);
@@ -307,7 +311,18 @@ pub fn simulate_trade(
                 cfg,
             );
         }
-        // progress checks, largest-first so a single tick can jump both.
+
+        // Partial — независимо от trailing, активируется когда
+        // progress пересёк partial_tp_progress.
+        if cfg.partial_enabled
+            && !partial_filled
+            && progress >= cfg.partial_tp_progress
+        {
+            partial_px = Some(partial_target_px);
+            partial_filled = true;
+        }
+
+        // Trailing шаги — largest-first.
         if cfg.trailing_enabled
             && progress >= cfg.trailing_step2_progress
             && trailing_step < 2
@@ -315,18 +330,15 @@ pub fn simulate_trade(
             let sl_offset = tp_dist * cfg.trailing_step2_sl_ratio;
             sl_px = entry_px + sign * sl_offset;
             trailing_step = 2;
-        } else if progress >= cfg.trailing_step1_progress && trailing_step < 1 {
-            if cfg.partial_enabled && !partial_filled {
-                partial_px = Some(px);
-                partial_filled = true;
-            }
-            if cfg.trailing_enabled {
-                let min_offset = entry_px * (cfg.trailing_step1_sl_floor_pct / 100.0);
-                let ratio_offset = tp_dist * cfg.trailing_step1_sl_ratio;
-                let sl_offset = min_offset.max(ratio_offset);
-                sl_px = entry_px + sign * sl_offset;
-                trailing_step = 1;
-            }
+        } else if cfg.trailing_enabled
+            && progress >= cfg.trailing_step1_progress
+            && trailing_step < 1
+        {
+            let min_offset = entry_px * (cfg.trailing_step1_sl_floor_pct / 100.0);
+            let ratio_offset = tp_dist * cfg.trailing_step1_sl_ratio;
+            let sl_offset = min_offset.max(ratio_offset);
+            sl_px = entry_px + sign * sl_offset;
+            trailing_step = 1;
         }
     }
 
@@ -602,6 +614,16 @@ pub fn simulate_trade_book(
             );
         }
 
+        // Partial — независимо от trailing, maker fill по partial_target_px.
+        if cfg.partial_enabled
+            && !partial_filled
+            && progress >= cfg.partial_tp_progress
+        {
+            partial_px = Some(partial_target_px);
+            partial_filled = true;
+        }
+
+        // Trailing шаги — largest-first.
         if cfg.trailing_enabled
             && progress >= cfg.trailing_step2_progress
             && trailing_step < 2
@@ -609,19 +631,15 @@ pub fn simulate_trade_book(
             let sl_offset = tp_dist * cfg.trailing_step2_sl_ratio;
             sl_px = entry_fill_px + sign * sl_offset;
             trailing_step = 2;
-        } else if progress >= cfg.trailing_step1_progress && trailing_step < 1 {
-            if cfg.partial_enabled && !partial_filled {
-                // Maker: half of position filled at limit target, not at current bid.
-                partial_px = Some(partial_target_px);
-                partial_filled = true;
-            }
-            if cfg.trailing_enabled {
-                let min_offset = entry_fill_px * (cfg.trailing_step1_sl_floor_pct / 100.0);
-                let ratio_offset = tp_dist * cfg.trailing_step1_sl_ratio;
-                let sl_offset = min_offset.max(ratio_offset);
-                sl_px = entry_fill_px + sign * sl_offset;
-                trailing_step = 1;
-            }
+        } else if cfg.trailing_enabled
+            && progress >= cfg.trailing_step1_progress
+            && trailing_step < 1
+        {
+            let min_offset = entry_fill_px * (cfg.trailing_step1_sl_floor_pct / 100.0);
+            let ratio_offset = tp_dist * cfg.trailing_step1_sl_ratio;
+            let sl_offset = min_offset.max(ratio_offset);
+            sl_px = entry_fill_px + sign * sl_offset;
+            trailing_step = 1;
         }
     }
 
