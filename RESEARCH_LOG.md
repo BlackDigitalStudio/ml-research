@@ -2,7 +2,7 @@
 
 **Single source of truth for experiment results.** Memory files in `/root/.claude/projects/-root/memory/` remain as append-only audit trail; this file is the canonical reference. Updated after every research session.
 
-**Last updated:** 2026-05-12 (synthesis of all prior sessions, no new experiments).
+**Last updated:** 2026-05-12 (synthesis of all prior sessions; +hypothesis #2 added: inner PT/TS params via fused grid).
 
 ---
 
@@ -97,15 +97,16 @@
 | # | Hypothesis | Expected lift on EV/tr | Cost |
 |---|---|---|---|
 | 1 | **Mamba/sequence models on lookback=10K-100K** | unknown; SSM strength emerges at long-context, untested | $50-100 |
-| 2 | **Cross-symbol BTC-lead features for alts** (BTC depth/aggTrade as feature for SOL/LINK/etc. models) | OLD: eth_features 6.68% combined gain on s2 → similar order for BTC-lead | cache rebuild |
-| 3 | **Multi-axis ensemble**: Mamba + TCN + Transformer + XGB → L2 stacker | low ensemble diversity historically, but archs are different families | model training |
-| 4 | **MAKER-first labels integrated in build pipeline** (currently a P0 blocker: cache `pl/ps` are TAKER by default) | aligns backtest to live execution — likely reveals losses we currently hide | code change ~30 min + cache rebuild |
-| 5 | **Wider TP/SL with longer timeout** (e.g. 0.30/0.15/600s) — reduces timeout-asymmetry bias | unknown; tested only narrowly | cache rebuild |
-| 6 | **SSL pretraining on raw LOB** → fine-tune triple-barrier | unknown, novel for this dataset | $150-250 (8× H100) |
-| 7 | **Cross-pair attention** (Mamba on alt + BTC LOB simultaneously) | unknown | $50+ |
-| 8 | **Liquidation data — higher-fidelity** (current is frequency-only, not maker/taker-side breakdown) | likely 1-2 pp WR | data procurement |
-| 9 | **Dynamic TP/SL per regime** (wide TP when liq-imbalance high) | structural fix for asymmetric loss | medium |
-| 10 | **VIP fee tier** (0.04 maker / 0.07 taker) | +0.03% per trade (mechanically) — moves break-even WR down 2-3 pp | requires $1B+/month volume = downstream |
+| 2 | **Inner PT/TS params via fused grid_sim** (partial_tp_progress, trailing_step{1,2}_progress/_sl_ratio, trailing_step1_sl_floor_pct). Structurally addresses the main 2026-05-09 bottleneck — full-SL losses (-0.14% net) dominate timeout-wins (+0.005-0.06%). Partial TP locks gain on winning side, trailing SL closes earlier on losing side → asymmetric tail compresses. **Not tested on Cryptolake-era data or under MAKER-first labels.** Fused `grid_sim` binary already supports the 11-param sweep (~30s per 100K configs on Contabo). Wrapper: `src/rust_bridge.py::simulate_labels_grid`. | likely 0.02-0.05% per trade if winning-side avg moves from timeout-drift (~0.04%) toward TP-hit (~0.16%) on subset of trades | model already trained → eval only, ~1 hr Contabo |
+| 3 | **Cross-symbol BTC-lead features for alts** (BTC depth/aggTrade as feature for SOL/LINK/etc. models) | OLD: eth_features 6.68% combined gain on s2 → similar order for BTC-lead | cache rebuild |
+| 4 | **Multi-axis ensemble**: Mamba + TCN + Transformer + XGB → L2 stacker | low ensemble diversity historically, but archs are different families | model training |
+| 5 | **MAKER-first labels integrated in build pipeline** (currently a P0 blocker: cache `pl/ps` are TAKER by default) | aligns backtest to live execution — likely reveals losses we currently hide | code change ~30 min + cache rebuild |
+| 6 | **Wider TP/SL with longer timeout** (e.g. 0.30/0.15/600s) — reduces timeout-asymmetry bias | unknown; tested only narrowly | cache rebuild |
+| 7 | **SSL pretraining on raw LOB** → fine-tune triple-barrier | unknown, novel for this dataset | $150-250 (8× H100) |
+| 8 | **Cross-pair attention** (Mamba on alt + BTC LOB simultaneously) | unknown | $50+ |
+| 9 | **Liquidation data — higher-fidelity** (current is frequency-only, not maker/taker-side breakdown) | likely 1-2 pp WR | data procurement |
+| 10 | **Dynamic TP/SL per regime** (wide TP when liq-imbalance high) | structural fix for asymmetric loss | medium |
+| 11 | **VIP fee tier** (0.04 maker / 0.07 taker) | +0.03% per trade (mechanically) — moves break-even WR down 2-3 pp | requires $1B+/month volume = downstream |
 
 ## 8. Cache inventory
 
