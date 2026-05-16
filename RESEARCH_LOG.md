@@ -1,8 +1,23 @@
 # Research Log — scalper-bot
 
-**Single source of truth for experiment results.** Memory files in `/root/.claude/projects/-root/memory/` remain as append-only audit trail; this file is the canonical reference. Updated after every research session.
+**Structured source of truth is now `research/` (JSONL ledger + SQLite).**
+This file is the human narrative; the queryable asset is
+`research/experiments.jsonl` + `research/hypotheses.jsonl`, contract in
+`research/schema.sql`, plan in `research/PLAN.md`. §3 below is regenerable
+via `python3 research/ledger.py frontier` — do not hand-maintain it once
+new results land. The ledger *refuses* a result without its fee regime /
+cache / split provenance (the chaos that cost us 3 false positives).
 
-**Last updated:** 2026-05-12 (synthesis of all prior sessions; +hypothesis #2 added: inner PT/TS params via fused grid).
+> **Infra state 2026-05-16 (critical — do not lose):** Contabo
+> `root@84.247.154.229` is **LOST**. Every "LIVE on Contabo" cache (§8) and
+> the entire `/root/.claude/projects/-root/memory/*.md` archive are **gone**
+> — the §10 memory pointers and STRATEGY.md host references are historical.
+> New topology: this repo's container = planning node (stdlib only); GCP
+> `blackdigital.kz` 96 vCPU VM = compute node; `gs://blackdigital-scalper-data`
+> (Cryptolake, 287.9 GB, persistent) + `gs://scalper-bot-research-data` =
+> the only durable data. See `research/README.md` → *Infra reality*.
+
+**Last updated:** 2026-05-16 (research ledger shipped + history backfilled + Contabo-loss/GCP migration recorded; prior synthesis 2026-05-12).
 
 ---
 
