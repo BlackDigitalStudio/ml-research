@@ -17,7 +17,22 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > (Cryptolake, 287.9 GB, persistent) + `gs://scalper-bot-research-data` =
 > the only durable data. See `research/README.md` → *Infra reality*.
 
-**Last updated:** 2026-05-16 (research ledger shipped + history backfilled + Contabo-loss/GCP migration recorded; prior synthesis 2026-05-12).
+> **GCP recon verified 2026-05-16** (ADC as `blackdigital.kz@gmail.com`,
+> project `project-26a24ad0-1059-4f73-93b` "My First Project"):
+> - `gs://blackdigital-scalper-data` — **ALIVE**, `EUROPE-WEST1`, owned by
+>   this project. Layout `features_v1/symbol=<SYM>/dt=<YYYY-MM-DD>/{features.npy,indices.npy}`;
+>   symbols are Tardis-style (`BNB-USDT-PERP`, not `BNBUSDT`). The Cryptolake
+>   feature asset **survived the Contabo loss**.
+> - `gs://scalper-bot-research-data` — **403 / no access** for this account
+>   (volaware checkpoints/oof; volaware was refuted — not blocking).
+> - Compute europe-west1: `CPUS=200` (usage 0), `N2_CPUS=200`,
+>   `DISKS_TOTAL_GB=2458`, **`PREEMPTIBLE_CPUS=0` → no spot** (on-demand
+>   only), `C2_CPUS=8` (use **N2** for the 96 vCPU box).
+> - Connection: ADC user creds in the ephemeral container's
+>   `/root/.config/gcloud` — works this session, **not durable** across
+>   container death (re-auth or move to SA-secret to persist).
+
+**Last updated:** 2026-05-16 (GCP connected + recon verified; research ledger shipped + history backfilled + Contabo-loss/GCP migration recorded; prior synthesis 2026-05-12).
 
 ---
 
