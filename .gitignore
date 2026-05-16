@@ -12,3 +12,4 @@ _tmp_*
 .claude/
 catboost_info/
 research/research.db
+.gcp/
