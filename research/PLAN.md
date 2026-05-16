@@ -50,22 +50,29 @@ Exit criterion: Rust binaries built, GCS readable, repo at known commit.
 
 ### Step 1 — H5: MAKER-first label gate (TRUST GATE)
 
-Problem (RESEARCH_LOG §4, code state §9): `scripts/build_cryptolake_cache.py`
-writes **TAKER** labels by default; the maker-first relabel exists but is
-never copied back into the cache `pl/ps`. `sim_labels.rs` already has
-`--entry-taker-long/short` for the maker-first hybrid — the gap is
-pipeline wiring, not new math.
+**Reality correction (2026-05-16):** `scripts/build_cryptolake_cache.py`
+is **NOT in the repo** — it died with Contabo. RESEARCH_LOG's "~30 min
+edit" was stale info. The builder must be **reconstructed** against the
+now-decoded GCS schema (`research/CRYPTOLAKE_SCHEMA.md`). Good news: raw
+LOB survived and the path is fully specified there. MAKER-first is built
+in **by construction**, not bolted on.
 
-Work (~30 min code + cache rebuild):
-1. Wire the maker-first relabel into `build_cryptolake_cache.py` so cache
-   `pl/ps` are maker-first by construction (entry maker, exit hybrid;
-   fees `commission_win_pct=0.04` / `commission_loss_pct=0.07` are the
-   maker-first round-trip, vs TAKER no-VIP `0.07 / 0.10`).
-2. Add a parity assertion: a known sample's `pl/ps` differs between
-   TAKER and MAKER_FIRST builds (catches the "relabel not copied" bug
-   structurally).
-3. Rebuild the relevant cache(s) from `gs://blackdigital-scalper-data`
-   (30–45 min/symbol, workers=32).
+Work (cost-safe split — Python here at $0, Rust+rebuild on the VM):
+1. Write `scripts/build_cryptolake_cache.py` per `CRYPTOLAKE_SCHEMA.md`:
+   read `raw/book` parquet, decimate by `indices.npy`, build
+   `entry_long/entry_short` (maker-first: long=bid_0, short=ask_0) +
+   `mid_path`/`book_path` over a wall-clock horizon (gaps! use
+   `timestamp`), align X = `features.npy`. `fee_regime` is an explicit
+   arg: MAKER_FIRST `0.04/0.07` (gate) vs TAKER `0.07/0.10` (A/B).
+2. **Validate the data-prep here on 1 BTC symbol-day at $0** (shapes,
+   index alignment, entry/mid sanity vs the parquet). The rust
+   `sim_labels` call is the only part that can't run in the planning
+   container (crates.io 403).
+3. Parity assertion: same sample's `pl/ps` must differ MAKER_FIRST vs
+   TAKER (structurally proves the regime is wired, not defaulted).
+4. **Only after 1-2 above pass**, provision the VM, `cargo build`, run
+   `sim_labels` MAKER-first on a date-range subset (NOT 8×546 by
+   default — that is a later deliberate spend).
 4. Re-evaluate the **current best** (LINK TCN −0.040% TAKER) under
    MAKER_FIRST. This is the new honest baseline.
 
