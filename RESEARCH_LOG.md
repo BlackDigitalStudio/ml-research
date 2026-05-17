@@ -139,7 +139,22 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > absent axis was cross-asset, untested. Decode reopens H3/HA3/HD1 with
 > real names.
 
-**Last updated:** 2026-05-17 (FEATURES DECODED: 56/59 = documented raw layout, ~10 dead incl ALL cross-asset → prior negatives on ~46-live degraded set; H3 concretely actionable; "opaque" retracted; prior: HA5/HA6 scope correction, symmetry wall, HA1, Phase B, H5).
+> **H3 BTC-lead — clean test, refuted 2026-05-17 (`phaseb-20260517-142815`,
+> 8 alpha rows).** Filled the empty cross-asset dimension with 8 causal
+> BTC-lead aggs (ret 5/30/60/120s, signed-flow 30/60s, rv60s, cumsgn60s);
+> `btc_cols_live=1.00` (valid test, isolated base vs +BTC). Δ(rank-IC)
+> nil: only LINK h30 +0.009 (< pre-reg 0.01 bar, not on SOL +0.0009),
+> 4/8 cells negative, `economic_pass_strict=0` every cell (btc top|move|
+> 0.038-0.102% < 0.13% floor; eL=1 only at h180 where IC≈noise). Old
+> "eth +6.68%" does not carry to MAKER-first LINK/SOL here. **Now all
+> three snapshot-GBT direction axes are negative: intra-asset
+> microstructure (HA1) · event/regime (HA5) · cross-asset (H3).** The
+> single never-varied axis = **representation: temporal/sequence model**
+> (snapshot discards LOB dynamics; the only prior HONEST best was a TCN,
+> never reproduced MAKER-first) → **HD1 rev3 priority 1**. Do NOT
+> re-claim "no directional alpha" until the temporal axis is tested.
+
+**Last updated:** 2026-05-17 (H3 BTC-lead clean test REFUTED — all 3 snapshot-GBT axes negative [HA1·HA5·H3]; remaining lever = temporal/sequence representation [HD1 p1], the conspicuous never-varied axis & only prior honest best; prior: features decoded, HA5/HA6 scope correction, symmetry wall, HA1).
 
 ---
 
