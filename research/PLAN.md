@@ -19,9 +19,16 @@ Goal is **not** net 0/+15 % now — it is a **sensitivity map**: which
 prediction axis (if any) yields OOS signal that clears the cost floor.
 Hypotheses are ~∞ (combinatorial); the job is direction-finding.
 
-**Alpha testbed (fixed control):** Cryptolake LINK + SOL, 90 d,
-`features_v1` X (59 cols), XGB, MAKER_FIRST labels (H5 done), honest
-val→test, per symbol. Cache already built → screens are ~$0, small/no VM.
+**Alpha testbed (fixed control) — CANONICAL `baseline_ref` is HM6
+rev4** (supersedes the old "LINK+SOL 90 d"): Cryptolake
+{SOL,BTC,ETH,LTC}-USDT-PERP, common-aligned ~360 d
+(2025-05-13..2026-05-07), `features_v1`+events, XGB, honest
+val→test per symbol. Objective is FIXED = R1 only, no R0–R4 sweep
+(HM5 rev3); judge vs the frozen HM6 12-cell (sym,H) R1
+AUC/placebo/rank-IC distribution. LINK dropped (genuine 119 d
+source outage 2025-12-11..2026-04-10, see CRYPTOLAKE_SCHEMA.md).
+Authoritative state lives in `hypotheses.jsonl` (HM5/HM6/HD1) +
+RESEARCH_LOG; this line must not contradict it.
 
 **Metric — NOT EV/tr** (that conflates signal with execution+cost).
 Execution-neutral, on honest OOS, per symbol:

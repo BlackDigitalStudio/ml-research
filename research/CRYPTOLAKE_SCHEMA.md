@@ -36,6 +36,13 @@ gs://blackdigital-scalper-data/
   All end ≈2026-05-05..08. **BTC/ETH are the SHORTEST (~1 yr); LTC/LINK
   the deepest.** Top-level: `features_v1/ raw/ research_runs/`;
   `raw/{book,trades,funding,liquidations,open_interest}/`.
+- **LINK-USDT-PERP has a GENUINE ~119-day source outage
+  2025-12-11 → 2026-04-10** — absent in `features_v1` AND `raw/book`
+  AND `raw/trades` (verified 2026-05-17), NOT recoverable. This is why
+  LINK was dropped from the HM6 canonical `baseline_ref` set
+  ({SOL,BTC,ETH,LTC}; LTC = clean + deepest). Any future LINK use must
+  account for this hole. SOL/BTC/ETH/LTC are gap-free in
+  2025-05-09..2026-05-07 (verified).
 - `scalper-bot-research-data` (volaware ckpts) → 403, no access. Volaware
   is refuted; non-blocking.
 
