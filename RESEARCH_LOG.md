@@ -376,7 +376,7 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > (sequence/temporal, under R1); not a 4-way deliberation.] No
 > compute launched.
 
-**Last updated:** 2026-05-17 (HD1 rev18 — SELF-CORRECTION #2, user forced verification of real data usage/availability: rev17's "BTC/ETH=546d uniform" was schema-CONTRACT not record; research.db shows modern program used ONLY LINK 2025-10-12..2026-05-08 ~208d + SOL 2026-02-08..2026-05-08 ~89d [unequal, not "~90 each"], BTC/ETH lead-features-only never train symbols, legacy 8-sym caches lost; true per-symbol availability NOT verifiable from sandbox, uniform-546 unverified & contradicted by build windows -> build-scope must verify real coverage, not trust CRYPTOLAKE_SCHEMA.md; prior: HD1 rev15-strike, HM5, HM3).
+**Last updated:** 2026-05-17 (HD1 rev19 — LIVE-VERIFIED bucket inventory, gs://blackdigital-scalper-data read via Python+ADC FROM the sandbox [rev18's "needs GCP VM" superseded]. Coverage kx-uneven, "546 uniform" REFUTED & CRYPTOLAKE_SCHEMA.md fixed: features_v1 days BTC 363 / ETH 362 [SHORTEST, from 2025-05-09] vs LINK 788 / LTC 1243 [trades 1612, ~4.4yr, DEEPEST], BNB/DOGE/SOL/XRP ~545. Decision inversion: BTC/ETH are the data-POOREST not a path to "more data" — depth lives in LTC/LINK; modern LINK~208d/SOL~89d windows were build-choices not limits; research_runs/ persists in bucket. 3rd doc-vs-record correction; prior: HD1 rev18, rev17, HM5, HM3).
 
 ---
 

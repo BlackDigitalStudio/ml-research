@@ -18,7 +18,24 @@ gs://blackdigital-scalper-data/
 
 - **8 symbols** (Tardis naming, `-USDT-PERP`): BNB, BTC, DOGE, ETH, LINK,
   LTC, SOL, XRP.
-- **546 date partitions / symbol: 2024-11-09 → 2026-05-08** (~18 months).
+- **Date coverage is NOT uniform** (the earlier "546/symbol" claim was
+  WRONG — empirically verified live 2026-05-17 via google-cloud-storage
+  + ADC, listing real `dt=` partitions; gap-accounted actual counts):
+
+  | symbol | features_v1 | raw/book | raw/trades | earliest |
+  |---|---|---|---|---|
+  | BTC-USDT-PERP | 363 | 363 | 361 | 2025-05-09 |
+  | ETH-USDT-PERP | 362 | 362 | 361 | 2025-05-09 |
+  | BNB-USDT-PERP | 546 | 546 | 545 | 2024-11-09 |
+  | DOGE-USDT-PERP | 545 | 545 | 545 | 2024-11-09 |
+  | SOL-USDT-PERP | 544 | 545 | 545 | 2024-11-09 |
+  | XRP-USDT-PERP | 545 | 545 | 545 | 2024-11-09 |
+  | LINK-USDT-PERP | 788 | 788 | 795 | 2023-01-11 (trades) |
+  | LTC-USDT-PERP | 1243 | 1244 | 1612 | 2021-12-06 (trades) |
+
+  All end ≈2026-05-05..08. **BTC/ETH are the SHORTEST (~1 yr); LTC/LINK
+  the deepest.** Top-level: `features_v1/ raw/ research_runs/`;
+  `raw/{book,trades,funding,liquidations,open_interest}/`.
 - `scalper-bot-research-data` (volaware ckpts) → 403, no access. Volaware
   is refuted; non-blocking.
 
