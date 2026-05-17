@@ -88,7 +88,9 @@ def cmd_launch(a) -> int:
     from google.cloud import compute_v1
 
     git = _sh(["git", "rev-parse", "--short", "HEAD"])
-    run_id = time.strftime("phaseb_%Y%m%dT%H%M%SZ", time.gmtime())
+    # GCE instance names must match [a-z]([-a-z0-9]{0,61}[a-z0-9])? —
+    # lowercase, hyphens only. run_id doubles as the instance name.
+    run_id = time.strftime("phaseb-%Y%m%d-%H%M%S", time.gmtime())
     print(f"run_id={run_id} git={git}")
 
     # 1. source tarball (tracked files only) -> GCS
@@ -103,7 +105,7 @@ def cmd_launch(a) -> int:
     img = compute_v1.ImagesClient().get_from_family(
         project="debian-cloud", family="debian-12").self_link
     inst = compute_v1.Instance(
-        name=run_id.replace("_", "-"),
+        name=run_id,
         machine_type=f"zones/{ZONE}/machineTypes/{MACHINE}",
         disks=[compute_v1.AttachedDisk(
             boot=True, auto_delete=True,
