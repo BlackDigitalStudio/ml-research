@@ -75,8 +75,9 @@ if [ "$NEED_RUST" = "true" ]; then
   cd /opt/app/rust_ingest && cargo build --release --bins
 fi
 cd /opt/app
+export SCALPER_USE_RUST=1 RUN_ID GIT
 RUNNER=$(md instance/attributes/runner_cmd)
-SCALPER_USE_RUST=1 bash -c "$RUNNER"
+eval "$RUNNER"          # eval (not bash -c): $RUN_ID/$GIT resolve here
 echo "PHASE_B_RUNNER_EXIT=$? $(date -u)"
 """
 

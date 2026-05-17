@@ -114,7 +114,9 @@ CREATE TABLE experiments (
     kelly_frac        REAL,                   -- never compare nets across k
     win_rate_pct      REAL,                   -- direction-aware realised
     base_rate_pct     REAL,                   -- P(pl_long>0), per-symbol
-    n_trades          INTEGER NOT NULL,
+    n_trades          INTEGER,                -- NULL for kind='alpha';
+                                              -- ledger.py requires it for
+                                              -- kind='strategy' (STRATEGY_REQUIRED)
     sharpe            REAL,
     max_dd_pct        REAL,
     exit_hist_json    TEXT,                   -- {reason: count} all 12

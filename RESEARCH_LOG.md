@@ -44,7 +44,20 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > baseline). **Next bottleneck = model selectivity / trade selection
 > (logged as H12, $0 eval-only).** Over-trading, not PT/TS, is the wall.
 
-**Last updated:** 2026-05-17 (Phase B first end-to-end: pipeline restored on GCP, H5 gate landed + parity verified, over-trading bottleneck found → H12; prior: GCP connected + ledger shipped 2026-05-16).
+> **HA1 alpha screen 2026-05-17 (`phaseb-20260517-123148`, 8 alpha rows
+> in `v_alpha`):** First execution-neutral signal map. `features_v1` is
+> **leak-free** (placebo rank-IC ≈ 0 everywhere). Signal is **real but
+> ultra-short-lived**: OOS rank-IC ≈ **0.087/0.073 @30 s** (LINK/SOL),
+> decaying monotonically to ≈0.02 by 120-180 s; CI excludes 0 for 7/8.
+> **Economically dead as a 60-180 s point prediction:** top-decile
+> |move| = 3-10 bp, below even the loose 8 bp maker floor (7/8) and far
+> below the 13 bp strict floor (8/8); `decile_monotonic = 0` everywhere.
+> RL cannot manufacture 13 bp from a 3-4 bp edge → HA1 **refuted as
+> posed**. Decisive redirect: the edge lives **faster than the 24 s
+> sampling** — promote **HA4 (sub-24 s cadence)** + HA2 (target form);
+> NOT execution/RL. (Run salvaged from an empty-id harness bug, fixed.)
+
+**Last updated:** 2026-05-17 (HA1 alpha screen: features_v1 leak-free but signal sub-cost & short-lived → HA4 cadence promoted; prior: Phase B pipeline restored + H5 gate + ledger shipped).
 
 ---
 
