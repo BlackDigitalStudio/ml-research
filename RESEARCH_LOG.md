@@ -57,7 +57,30 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > sampling** — promote **HA4 (sub-24 s cadence)** + HA2 (target form);
 > NOT execution/RL. (Run salvaged from an empty-id harness bug, fixed.)
 
-**Last updated:** 2026-05-17 (HA1 alpha screen: features_v1 leak-free but signal sub-cost & short-lived → HA4 cadence promoted; prior: Phase B pipeline restored + H5 gate + ledger shipped).
+> **The symmetry wall 2026-05-17 (MFE/MAE study, $0, LINK+SOL 5d).**
+> Decisive structural result. Median max-favorable excursion: 60 s = 3 bp,
+> 180 s = 6 bp, **600 s = 13 bp** (≈ strict floor only at 10 min). At
+> 60 s only ~5-6 % of windows ever reach ±13 bp. AND it is ~symmetric:
+> `P(MFE≥+13bp) ≈ P(MAE≤−13bp)` at every H (180 s: .235/.220; 600 s:
+> .506/.462). → Wider TP/SL + longer timeout (why the old grid always
+> "won" wider, and why the feature set is volatility-heavy) **scales the
+> win and loss tails equally — it creates no edge**; that is why every
+> wide-grid config netted ≈0 − costs. The bind: where moves clear cost
+> (≥300-600 s) **direction is unpredictable** (HA1 IC→~0 by 180 s);
+> where direction is weakly predictable (≤60 s) **moves are 2-4× below
+> cost**. The two never overlap. No TP/SL/timeout/execution/RL fixes a
+> symmetric-diffusion-vs-fixed-cost gap. Reconciles HA1 (short-horizon
+> IC) with old research (TB-barrier favoured long/wide): different
+> targets, both true. **Only escape consistent with the data:
+> conditional asymmetry — a rare event/regime that breaks the MFE/MAE
+> symmetry on the ≥cost subset (→ HA5).** HA4 (faster cadence) CLOSED:
+> √t-trap (shorter window ⇒ smaller move ⇒ worse vs fixed cost).
+> Cryptolake event data confirmed available at full fidelity for HA5:
+> liquidations (side+qty+price, ~246/d), open_interest (~15k/d), funding
+> (rate+mark+index, 1/s), trades (~242k/d) — see
+> `research/CRYPTOLAKE_SCHEMA.md`.
+
+**Last updated:** 2026-05-17 (symmetry wall found: wide TP/SL scales both tails equally, predictable≠large; HA4 closed √t-trap, HA5 conditional-asymmetry opened; prior: HA1 leak-free-but-sub-cost, Phase B + H5 + ledger).
 
 ---
 

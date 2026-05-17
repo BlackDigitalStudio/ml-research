@@ -37,7 +37,35 @@ gs://blackdigital-scalper-data/
 `raw/trades`: `side, amount, price, id, timestamp, receipt_timestamp`
 (~598k/BTC-day) — aggressor side for order-flow / maker-taker features.
 
+## raw event streams (the HA5 conditional-asymmetry inputs)
+
+Verified 2026-05-17 on LINK (full fidelity, all symbols, ns timestamps):
+
+- **`raw/liquidations`** — `side, quantity, price, id, status, timestamp`.
+  ~246 rows/day (sparse — these ARE the rare events). `side` present:
+  `buy` = short liquidation (forced buy → up pressure), `sell` = long
+  liquidation (down pressure). **Note: H9's premise ("frequency-only, no
+  side") is partly outdated — raw side IS available**; open question is
+  whether `features_v1` used it.
+- **`raw/open_interest`** — `open_interest, timestamp`. ~15k/day (~4 s).
+  OI Δ = positioning regime.
+- **`raw/funding`** — `mark_price, rate, next_funding_time, index_price,
+  timestamp`. 86 400/day (1 s). `rate` = funding; `mark−index` = basis;
+  funding flips = regime events.
+- **`raw/trades`** — see above; ~242k/day on LINK.
+
+These are the candidate symmetry-breaking conditioners for HA5
+(does a liquidation cascade / OI shock / funding flip make the ≥cost
+forward excursion directionally skewed, vs the ~symmetric baseline).
+
 ## features_v1 (the model input X)
+
+NB: `features_v1` is the **lost pipeline's** 59-col build; exact column
+names are unrecoverable. Families are inferred from `src/features.py
+FEATURE_KEYS` (LOB/OFI multi-window, imbalance, trade-flow/CVD,
+microprice, Kyle λ, VPIN, realized-vol, sweep, cancel, ETH/cross-exch,
+funding/OI/liquidation-proximity, horizon 30-120 s momentum/vol). Treat
+the 59 cols as opaque X; per-column provenance is a known gap.
 
 - `features.npy` `(3602, 59) float32` — the per-decision-point feature
   matrix. **59 cols** (≠ repo `src/features.py` 49/55 — a different/newer
