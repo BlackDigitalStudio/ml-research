@@ -333,13 +333,25 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > axis. The cheap high-EV snapshot search is now **earned-closed across
 > three independent pre-registered axes** (feature HA1/H3/HA5 · scope
 > HA7 · reward HR1), uniformly ≈0.51 with only retained weak marginals
-> (R1·T2_asym·H3). The single unspent **axis** is representation
-> (sequence) = HM3 accepted prior (adopt, don't test). ⇒ the project is
-> now **legitimately at the strategic fork** (all pre-registered
-> contingencies discharged, HD1 rev13): adopt-sequence-and-build /
-> class·instrument pivot / re-scope testbed / accept-no-cheap-alpha.
-> A human decision, not another screen. (Only remaining cheap
-> experiment = stack the 3 retained weak marginals — low prior;
+> (R1·T2_asym·H3).
+>
+> **[The "4-way strategic fork" framing of HD1 rev13/14 is STRUCK —
+> HD1 rev15, user 2026-05-17.]** It re-opened a question HM3 already
+> closed and contradicted HM3's own corollary. HM3 (confirmed, user)
+> = sequence/temporal representation adds lift, *accepted prior, do
+> NOT test*. Therefore "accept-no-cheap-alpha" is **not** an option
+> (HM3 corollary: snapshot ≈0.51 ≠ alpha-absent), and "adopt sequence"
+> is **not** an option among equals — with the cheap snapshot search
+> earned-closed and HM3 confirmed, the next representation is
+> **DECIDED: build the sequence/temporal candidate, under R1 (HM5)**.
+> The only genuinely open items are (i) *scope of that build* —
+> architecture family / symbols·H / compute budget (a narrow scoping
+> call), and (ii) one level up, whether the project's GOAL stays
+> "directional alpha on this testbed" at all vs. shelve/pivot the
+> whole objective (a goal-level call the user owns — distinct from,
+> not a branch of, the struck intra-goal fork). (Only remaining cheap
+> experiment = stack the 3 retained weak marginals — explicitly
+> dominated by the sequence path per HM3; optional side-check,
 > offered, not assumed.) VM auto-deleted (hard cap).
 
 > **HM5 — default objective standardized 2026-05-17 (user decision).**
@@ -358,11 +370,13 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > on untradeable sub-cost wiggles. **Bounded:** R1 is a *baseline
 > upgrade, NOT a lever/alpha* (won't alone make a strategy); reversible.
 > R2/R3/R4 rejected as defaults (R2 SOL-degenerate, R3 SOL-negative,
-> R4 null). The strategic fork (sequence-build / re-scope / stack-weak
-> / accept-no-alpha) **remains open**; whatever is chosen now runs
-> under R1. No compute launched.
+> R4 null). [The "fork remains open" line here is **superseded by
+> HD1 rev15** — see the STRUCK-fork note above: with HM3 confirmed +
+> snapshot search earned-closed, the next representation is DECIDED
+> (sequence/temporal, under R1); not a 4-way deliberation.] No
+> compute launched.
 
-**Last updated:** 2026-05-17 (HM5 — default directional objective standardized to R1 [|move|-weighted logloss], baseline_ref=R1+HA1, per user "which reward do we keep for all research"; justified by HR1 sign-test 6/6 p≈0.016, bounded as baseline-upgrade-not-lever, reversible; R2/R3/R4 rejected as defaults; strategic fork STILL OPEN, runs under R1; prior: HR1-result, HM4, HA7-result, HM3, HM1).
+**Last updated:** 2026-05-17 (HD1 rev15 — STRUCK the "4-way strategic fork" framing as a self-correction: it re-opened the HM3-closed sequence question and contradicted HM3's corollary; with snapshot search earned-closed + HM3 confirmed, next representation is DECIDED = build sequence/temporal candidate under R1[HM5]; "accept-no-alpha" struck as an option; only open = build-scope + the goal-level shelve/pivot call the user owns; prior: HM5-objective-standard, HR1-result, HM4, HM3, HM1).
 
 ---
 
