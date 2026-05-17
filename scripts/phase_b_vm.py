@@ -227,11 +227,13 @@ def cmd_ingest(a) -> int:
     # alpha runner emits a flat res["records"]; phase_b emits
     # res["symbols"][sym]["ledger_record"]. Handle both.
     recs = list(res.get("records", []))
-    for sym, r in res.get("symbols", {}).items():
-        if r.get("ledger_record"):
-            recs.append(r["ledger_record"])
-        elif r.get("error"):
-            print(f"{sym}: no record ({r.get('error')})")
+    _syms = res.get("symbols", {})
+    if isinstance(_syms, dict):           # phase_b emits a dict; the
+        for sym, r in _syms.items():      # baseline emits a flat list
+            if r.get("ledger_record"):    # in res["records"] + a plain
+                recs.append(r["ledger_record"])   # symbol list — guard.
+            elif r.get("error"):
+                print(f"{sym}: no record ({r.get('error')})")
     n = 0
     for rec in recs:
         if "error" in rec or "experiment_id" not in rec:

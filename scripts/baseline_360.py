@@ -9,23 +9,36 @@ Reuses the FROZEN ``hr1_screen.run()`` numeric logic VERBATIM (data
 load, honest_val_test split, R0-R4 fit, placebo, paired-boot SE).
 The ONLY differences vs HR1:
   * symbol set = {LINK, SOL, BTC, ETH}-USDT-PERP (4)
-  * a COMMON ALIGNED day-window (same calendar dates for all 4),
+  * a COMMON ALIGNED calendar range (same [start,end] for all 4),
     not hr1's per-symbol latest-N
   * record labels (hypothesis_id / experiment_id / setup / repro_cmd)
 
 baseline_ref := R1 (HM5 standard) primary + R0 plain-logloss anchor,
 per (symbol, H). DESCRIPTIVE reference, NOT a lever pass/fail.
 
-Window rule (frozen): day-list = intersection of features_v1 dt=
-partitions across ALL 4 symbols, filtered >= 2025-05-09 (BTC/ETH
-availability bound), last 360. Effective per-symbol N self-reported
-(run() skips days missing book/event parquet — no fabrication).
+Symbol set (canon HM6 rev3 — user decision): LINK-USDT-PERP DROPPED
+and replaced by LTC-USDT-PERP. LINK has a genuine, non-recoverable
+~119-day source outage (2025-12-11..2026-04-10, absent in raw AND
+features_v1) — unfit for a canonical baseline_ref. LTC chosen:
+verified ZERO-gap full coverage in-window across features_v1 / book /
+trades, AND it is the deepest-history symbol in the bucket
+(features 1243d, raw/trades ~4.4yr) — a built-in long-window
+extension path for the sequence build (HD1 rev19 "depth lives in
+LTC/LINK"). All 4 of {SOL,BTC,ETH,LTC} are complete in-window.
+
+Window rule (canon HM6 rev2): common ALIGNED CALENDAR range, NOT a
+strict dt= intersection. start = max(symbol mins, floor 2025-05-09);
+end = min(symbol maxes); take the last N_DAYS=360 CALENDAR days; give
+EACH symbol its OWN available partitions in that range (run() skips
+days a symbol lacks — defensive; with this set the per-symbol N is
+~uniform ~360, no fabrication).
 
 Execution: 96-vCPU VM via scripts/gcp_bootstrap.sh (NOT the ledger
 sandbox). Results -> gs://.../research_runs/{run_id}/results.json
 -> appended to research/experiments.jsonl -> research.db.
 """
 import argparse
+import datetime as dt
 import json
 import sys
 import time
@@ -38,19 +51,32 @@ sys.path.insert(0, str(REPO))
 from scripts.build_cryptolake_cache import _gcs_bucket, _list_days  # noqa: E402
 from scripts.hr1_screen import run  # noqa: E402  (frozen logic, reused)
 
-SYMS = ["LINK-USDT-PERP", "SOL-USDT-PERP",
-        "BTC-USDT-PERP", "ETH-USDT-PERP"]
-WIN_START = "2025-05-09"   # BTC/ETH availability floor (HD1 rev19)
+SYMS = ["SOL-USDT-PERP", "BTC-USDT-PERP",
+        "ETH-USDT-PERP", "LTC-USDT-PERP"]   # LINK dropped (HM6 rev3)
+FLOOR = "2025-05-09"       # BTC/ETH availability floor (HD1 rev19)
 N_DAYS = 360
 GCP_PROJECT = "project-26a24ad0-1059-4f73-93b"
 
 
-def _common_days(bk):
-    """Common aligned window = dt= intersection across all 4 syms."""
-    per = {s: set(_list_days(bk, s)) for s in SYMS}
-    pool = sorted(d for d in set.intersection(*per.values())
-                  if d >= WIN_START)
-    return pool[-N_DAYS:], {s: len(per[s]) for s in SYMS}, len(pool)
+def _window(bk):
+    """Common ALIGNED CALENDAR range; per-symbol available days.
+
+    NOT a strict dt= intersection (canon HM6 rev2): start =
+    max(symbol mins, FLOOR); end = min(symbol maxes); last N_DAYS
+    calendar days; each symbol uses its OWN partitions in [winlo,end]
+    (run() skips days it lacks). LINK's genuine 119-day outage stays
+    LINK-only instead of truncating SOL/BTC/ETH.
+    """
+    per = {s: _list_days(bk, s) for s in SYMS}          # sorted lists
+    if not all(per.values()):
+        return None, None, {}, {s: len(per[s]) for s in SYMS}
+    start = max([FLOOR] + [d[0] for d in per.values()])
+    end = min(d[-1] for d in per.values())
+    lo_cal = (dt.date.fromisoformat(end)
+              - dt.timedelta(days=N_DAYS - 1)).isoformat()
+    winlo = max(start, lo_cal)
+    psd = {s: [d for d in per[s] if winlo <= d <= end] for s in SYMS}
+    return winlo, end, psd, {s: len(per[s]) for s in SYMS}
 
 
 def _relabel(rec, run_id):
@@ -67,8 +93,9 @@ def _relabel(rec, run_id):
         rec["cache_id"] = rec["cache_id"].replace(
             "features_v1+events_", "features_v1+events_BASELINE360_")
     p = rec.get("params") or {}
-    p.update(baseline=True, baseline_window="common-aligned",
-             baseline_canon="HM6")
+    p.update(baseline=True,
+             baseline_window="common-calendar-range",
+             baseline_canon="HM6-rev2")
     rec["params"] = p
     return rec
 
@@ -83,24 +110,27 @@ def main(argv=None) -> int:
     from google.cloud import storage
     sc = storage.Client(project=GCP_PROJECT)
 
-    days, avail, n_pool = _common_days(bk)
-    if not days:
-        print("FATAL: empty common window (no dt= intersection >= "
-              f"{WIN_START})", file=sys.stderr)
+    winlo, winhi, psd, avail = _window(bk)
+    if not winlo or not any(psd.values()):
+        print("FATAL: empty common calendar window", file=sys.stderr)
         return 2
-    print(f"[HM6] common-aligned window {days[0]}..{days[-1]} "
-          f"N={len(days)} (intersection pool={n_pool}; "
-          f"per-sym features_v1 avail={avail})", flush=True)
+    n_by = {s: len(psd[s]) for s in SYMS}
+    print(f"[HM6] aligned calendar window {winlo}..{winhi} "
+          f"(<= {N_DAYS} cal days); per-symbol available days={n_by}; "
+          f"full-history counts={avail}", flush=True)
 
     out = {"run_id": a.run_id, "baseline": "HM6",
-           "symbols": SYMS, "window": [days[0], days[-1]],
-           "n_days": len(days), "intersection_pool": n_pool,
-           "per_symbol_available": avail,
+           "symbol_set": SYMS, "window": [winlo, winhi],
+           "n_days_per_symbol": n_by,
+           "per_symbol_full_available": avail,
+           "window_rule": ("common-calendar-range; per-symbol "
+                           "available days; canon HM6 rev2 "
+                           "(NOT a strict dt= intersection)"),
            "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
            "records": []}
     for sym in SYMS:
         try:
-            recs = run(bk, sc, sym, days, a.run_id, a.git_commit)
+            recs = run(bk, sc, sym, psd[sym], a.run_id, a.git_commit)
             out["records"] += [_relabel(r, a.run_id) for r in recs]
         except Exception as e:                       # noqa: BLE001
             out["records"].append({"symbol": sym, "error": repr(e),
