@@ -250,7 +250,31 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > genuinely closed (still not "no alpha"). Pre-registered & committed
 > **before** the run (HA7 rev1, HM2 rev3, HD1 rev9).
 
-**Last updated:** 2026-05-17 (HA7 pre-registered: scope axis re-opened — HM3-block "exhausted" was a SCOPE over-claim [user challenge]; 3-axis sweep [regime-bucket / alt-barrier / head1-gated], strict Bonferroni+both-symbol bar, GBT feature-inclusion≥subset prior recorded; HM3 sequence-descope & corollary UNCHANGED & orthogonal; prior: HM3, HA2/HM2, HM1, H3/HA5/HA1).
+> **HA7 RESULT — REFUTED as posed 2026-05-17 (`phaseb-20260517-173640`,
+> 6 alpha rows, well-powered: LINK n_oos in thousands).** The strict
+> pre-registered both-symbol bar (same axis·cell on LINK&SOL, Bonferroni
+> z\*≈2.94–2.96, placebo≈0.5, AUC>0.5) is met by **0 of ~90 cells**.
+> **(A) regime buckets:** none cross-symbol; best are single-symbol
+> sub-Bonferroni (SOL `oishock=0` z≈2.4–2.76); the genuine rare-regime
+> `liqburst=1` was **underpowered every symbol×H** (n_oos 19–315) — too
+> rare to train at this cadence, itself informative. **(B):** T1±0.25
+> SOL-H180 looked huge (z=3.40) but **placebo 0.538 → guard rejected**
+> (the sentinel worked); **T2 asym +0.13/−0.20** is a *weak
+> cross-symbol-consistent* sub-threshold marginal (LINK&SOL H300–600
+> z 2.07–2.87, clean placebo, AUC≈0.522–0.531, ΔIC≈+0.02–0.03 vs T0) —
+> **retained for stacking per HM1, NOT a lever**. **(C) cascade:** lone
+> SOL-H600 pass (z=3.36, placebo clean) with **no LINK mirror at any H**
+> → isolated, within false-positive expectation for the family; the bar
+> correctly blocks it. **Conclusion (matches HD1-rev9 contingency
+> verbatim):** the pooled ≈0.51 is **not** a pooling artifact; scope
+> conditioning does not recover cross-symbol directional alpha on
+> LINK/SOL snapshot+events. The "exhausted" framing is now **earned**
+> (systematic, not the 1-point over-claim). HM3 corollary **intact**:
+> representation-bound, NOT "no alpha". No cheap directional screen
+> remains → genuinely the strategic fork (adopt-sequence-and-build /
+> class·instrument pivot / re-scope testbed). VM auto-deleted (hard cap).
+
+**Last updated:** 2026-05-17 (HA7 REFUTED as posed — strict both-symbol Bonferroni bar met by 0/~90 cells; pooled ≈0.51 not a pooling artifact; T2_asym = weak cross-symbol marginal retained per HM1; rare-regime liqburst structurally underpowered; snapshot-scope axis now EARNED-closed; HM3 corollary intact [representation-bound, not "no alpha"]; HD1 rev10 → strategic fork, no cheap screen left; prior: HA7-prereg, HM3, HA2/HM2, HM1).
 
 ---
 
