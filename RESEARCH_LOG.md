@@ -80,7 +80,30 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > (rate+mark+index, 1/s), trades (~242k/d) — see
 > `research/CRYPTOLAKE_SCHEMA.md`.
 
-**Last updated:** 2026-05-17 (symmetry wall found: wide TP/SL scales both tails equally, predictable≠large; HA4 closed √t-trap, HA5 conditional-asymmetry opened; prior: HA1 leak-free-but-sub-cost, Phase B + H5 + ledger).
+> **HA5/HA6 — decisive negative 2026-05-17 (`phaseb-20260517-132629`,
+> 6 alpha rows).** On the ≥cost subset (first-passage to ±0.13% within
+> H∈{180,300,600}s), LINK+SOL: base `P(up|≥cost) ≈ 0.51-0.52` (symmetry
+> confirmed). **head2 directional AUC 0.496-0.522 ≈ placebo 0.48-0.52 —
+> indistinguishable from chance** for every conditioner (raw liquidation
+> side/qty/count, ΔOI, funding rate/basis, all 59 microstructure feats)
+> at every H. (`economic_pass_strict=1` on some rows is a NOISE ARTIFACT
+> — cap-sign at AUC≈placebo is meaningless; status forced `refuted`.)
+> **head1 ≥cost-feasibility AUC ≈ 0.68-0.71 — strong: volatility/regime
+> (WHEN a big move comes) IS predictable, but DIRECTIONLESS (WHICH WAY
+> is not).** → HA5 refuted; HA6 refuted (cascade head-2 has nothing to
+> predict). **Triple-confirmed (HA1 sub-cost direction · MFE symmetry ·
+> HA5 no conditional asymmetry): LINK/SOL LOB+event data contains
+> predictable volatility but NO predictable direction at any
+> horizon/conditioner.** A directional scalp here is structurally
+> non-viable — not fixable by model/features/RL/execution. The cheap
+> LOB-directional search space on these alts is **mapped and empty**.
+> Open decision **HZ1** (strategy-class pivot, priority 1): non-
+> directional vol-harvest (needs options / both-sided MM = different
+> instrument), different signal source (cross-asset lead-lag / longer
+> timeframe / higher-fidelity events), different asset class, or accept
+> no directional alpha here. **Needs a human decision before more compute.**
+
+**Last updated:** 2026-05-17 (HA5/HA6 decisive negative: vol predictable / direction NOT, directional scalp on LINK/SOL non-viable, triple-confirmed → HZ1 strategy-class pivot decision; prior: symmetry wall, HA1, Phase B, H5, ledger).
 
 ---
 
