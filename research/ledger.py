@@ -55,13 +55,17 @@ EXIT_REASONS = (
 )
 
 # Mandatory experiment fields. Each maps to a documented, expensive lesson.
-EXP_REQUIRED = (
+# Provenance is mandatory for BOTH kinds (a number without its data
+# origin / fee regime / split is noise — the chaos this ledger closes).
+COMMON_REQUIRED = (
     "experiment_id", "ts", "git_commit", "author", "status",
     "setup", "model_family", "params", "data_source", "cache_id",
     "symbols", "n_samples", "fee_regime", "commission_win_pct",
-    "commission_loss_pct", "split_method", "label_def", "n_trades",
-    "repro_cmd",
+    "commission_loss_pct", "split_method", "label_def", "repro_cmd",
 )
+STRATEGY_REQUIRED = ("n_trades",)              # EV/owner-metric runs
+ALPHA_REQUIRED = ("alpha_target", "horizon_sec", "rank_ic_oos",
+                  "cost_floor_pct", "n_eff")   # prediction-only screens
 HYP_REQUIRED = ("hypothesis_id", "rev", "ts", "statement", "status")
 
 OWNER_SHARE_KEYS = ("pct_full_tp", "pct_full_sl", "pct_timeout",
@@ -80,6 +84,9 @@ EXP_COLUMNS = (
     "trades_per_day", "net_return_pct", "kelly_frac", "win_rate_pct",
     "base_rate_pct", "n_trades", "sharpe", "max_dd_pct", "exit_hist_json",
     "artifact_path", "artifact_sha256", "repro_cmd",
+    "kind", "alpha_target", "horizon_sec", "rank_ic_oos", "r2_oos",
+    "auc_oos", "top_decile_absmove_pct", "bot_decile_absmove_pct",
+    "cost_floor_pct", "decile_monotonic", "economic_pass", "n_eff",
 )
 HYP_COLUMNS = (
     "hypothesis_id", "rev", "ts", "statement", "expected_lift",
@@ -98,10 +105,15 @@ class LedgerError(ValueError):
 
 def validate_experiment(r: dict) -> None:
     eid = r.get("experiment_id", "<no-id>")
-    miss = [k for k in EXP_REQUIRED if r.get(k) in (None, "", [], {})]
+    kind = r.get("kind") or "strategy"
+    if kind not in ("alpha", "strategy"):
+        raise LedgerError(f"{eid}: kind must be 'alpha' or 'strategy'")
+    req = COMMON_REQUIRED + (ALPHA_REQUIRED if kind == "alpha"
+                             else STRATEGY_REQUIRED)
+    miss = [k for k in req if r.get(k) in (None, "", [], {})]
     if miss:
         raise LedgerError(f"{eid}: missing mandatory fields {miss} "
-                          f"(provenance is non-optional)")
+                          f"(provenance is non-optional; kind={kind})")
     if r["fee_regime"] not in FEE_REGIMES:
         raise LedgerError(f"{eid}: fee_regime={r['fee_regime']!r} not in "
                           f"{FEE_REGIMES} — TAKER/MAKER must be explicit")
@@ -115,6 +127,19 @@ def validate_experiment(r: dict) -> None:
         raise LedgerError(f"{eid}: symbols must be a non-empty list")
     if not isinstance(r["params"], dict):
         raise LedgerError(f"{eid}: params must be an object")
+
+    if kind == "alpha":
+        # The alpha killer rule: an RL agent converts existing alpha, it
+        # cannot create it and cannot beat the fee/spread floor. A
+        # 'confirmed' alpha that does not clear the cost floor is the
+        # "significant but economically worthless" trap.
+        if r["status"] == "confirmed" and r.get("economic_pass") != 1:
+            raise LedgerError(
+                f"{eid}: refusing to confirm an alpha with "
+                f"economic_pass!=1 — statistically-significant but "
+                f"sub-cost signal is not harvestable. Use 'exploratory' "
+                f"or show top-decile |move| > cost_floor.")
+        return  # alpha rows skip the strategy-only EV/owner/exit checks
 
     # The killer rule: a positive EV under TAKER labels was a false
     # positive all 3 prior times. The ledger will not store such a row as
@@ -253,6 +278,11 @@ def cmd_build_db(a) -> int:
         con.close()
         raise LedgerError(f"{audit[0]} confirmed positive-EV TAKER rows "
                           f"slipped past the gate — ledger is inconsistent")
+    aa = con.execute("SELECT COUNT(*) FROM v_alpha_audit").fetchone()
+    if aa[0]:
+        con.close()
+        raise LedgerError(f"{aa[0]} confirmed sub-cost alpha rows slipped "
+                          f"past the gate — ledger is inconsistent")
     ne = con.execute("SELECT COUNT(*) FROM experiments").fetchone()[0]
     nh = con.execute("SELECT COUNT(*) FROM v_current_hypotheses").fetchone()[0]
     con.close()
@@ -285,6 +315,28 @@ def cmd_frontier(a) -> int:
     return 0
 
 
+def cmd_alpha(a) -> int:
+    db = Path(a.db)
+    if not db.exists():
+        cmd_build_db(argparse.Namespace(db=str(db)))
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    rows = con.execute("SELECT * FROM v_alpha").fetchall()
+    print("| Date | Setup | Symbols | target | h(s) | rankIC | AUC | "
+          "top|mv|% | cost% | econ | mono | n_eff | status |")
+    print("|---|---|---|---|--:|--:|--:|--:|--:|:--:|:--:|--:|---|")
+    for r in rows:
+        f = lambda v, p=4: "" if v is None else f"{v:.{p}f}"
+        print(f"| {r['date']} | {r['setup']} | {r['symbols']} | "
+              f"{r['alpha_target']} | {r['horizon_sec']} | "
+              f"{f(r['rank_ic_oos'])} | {f(r['auc_oos'],3)} | "
+              f"{f(r['top_decile_absmove_pct'],3)} | "
+              f"{f(r['cost_floor_pct'],3)} | {r['economic_pass']} | "
+              f"{r['decile_monotonic']} | {r['n_eff']} | {r['status']} |")
+    con.close()
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # check — CI gate
 # ---------------------------------------------------------------------------
@@ -311,12 +363,14 @@ def main(argv=None) -> int:
     bp.add_argument("--db", default=str(DEFAULT_DB))
     fp = sub.add_parser("frontier")
     fp.add_argument("--db", default=str(DEFAULT_DB))
+    alp = sub.add_parser("alpha")
+    alp.add_argument("--db", default=str(DEFAULT_DB))
     sub.add_parser("check")
     a = p.parse_args(argv)
     fn = {
         "validate": cmd_validate, "append": cmd_append,
         "build-db": cmd_build_db, "frontier": cmd_frontier,
-        "check": cmd_check,
+        "alpha": cmd_alpha, "check": cmd_check,
     }[a.cmd]
     try:
         return fn(a)

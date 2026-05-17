@@ -1,5 +1,60 @@
 # Phase A — cheap-hypothesis plan
 
+## CURRENT DIRECTION (2026-05-17): alpha-first, execution deferred to RL
+
+Decomposition (user, 2026-05-17): **prediction (alpha)** and **execution**
+are separate problems and were getting mixed. We search ONLY for alpha now;
+execution (entry placement, TP/SL, timeout, partial/trailing, selectivity)
+is **deferred to a future RL agent** — it derives optimal execution given
+alpha and cannot create alpha. This skips the entire combinatorial
+execution-variation space for now.
+
+Why: the historical frontier already had ultra-selective models with real
+classification signal (lift 2.5–4.7× over base rate) and still lost
+(−0.027…−0.077 %/tr; the one honest MAKER-first reval = −0.047 %). So
+selectivity/execution is **not** the missing piece — the open question is
+whether harvestable *alpha* exists at all.
+
+Goal is **not** net 0/+15 % now — it is a **sensitivity map**: which
+prediction axis (if any) yields OOS signal that clears the cost floor.
+Hypotheses are ~∞ (combinatorial); the job is direction-finding.
+
+**Alpha testbed (fixed control):** Cryptolake LINK + SOL, 90 d,
+`features_v1` X (59 cols), XGB, MAKER_FIRST labels (H5 done), honest
+val→test, per symbol. Cache already built → screens are ~$0, small/no VM.
+
+**Metric — NOT EV/tr** (that conflates signal with execution+cost).
+Execution-neutral, on honest OOS, per symbol:
+- target = forward mid log-return `r_h` and `sign(r_h)`, h swept;
+- **statistical:** OOS rank-IC (Spearman pred↔r_h), R²/AUC, decile
+  monotonicity;
+- **economic (decisive):** mean |r_h| in the top predicted decile must
+  exceed the ~0.07–0.10 % round-trip cost floor. RL converts existing
+  alpha, never manufactures it, and cannot beat the floor — so
+  statistically-significant-but-sub-cost signal is worthless. The ledger
+  refuses to `confirm` an alpha with `economic_pass≠1` (`v_alpha_audit`).
+
+**Alpha axes (cheapest-first), in the ledger as `kind='alpha'`:**
+
+| # | Hypothesis | Axis | Compute |
+|---|---|---|---|
+| 1 | **HA1** | forward horizon h ∈ {30,60,120,180}s | $0 eval-only |
+| 2 | **HA2** | target form: logret / sign / vol-norm / path-stat | $0 |
+| 3 | **HA3** | feature subset & normalization (of the 59) | $0 |
+| 4 | **HA4** | decision cadence (48/72 s subsample = $0; 12 s = recompute) | $0 / med |
+
+**Deferred to the RL execution phase (ledger `blocked`):** H2 (PT/TS),
+H6 (wider TP/SL+timeout), H10 (regime TP/SL), H12 (selectivity/top-k),
+H11 (VIP fees). H5 stays the confirmed foundation. H1/H3/H7/H9 remain
+alpha-relevant signal/feature hypotheses (lower priority / costlier).
+
+The section below is the prior (2026-05-16) framing — superseded for the
+execution items; kept for the H5 history and methodology notes.
+
+---
+
+# Phase A — cheap-hypothesis plan (prior framing, 2026-05-16)
+
 Goal: net **+15% / 30 days**. Current honest state: **no setup has positive
 EV/tr under realistic MAKER-first labels**; best honest TAKER result is
 LINK TCN −0.040%/tr. We get to +15% by *search*, and search is only as

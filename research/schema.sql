@@ -122,7 +122,29 @@ CREATE TABLE experiments (
     -- REPRODUCIBILITY -------------------------------------------------------
     artifact_path     TEXT,                   -- gs:// or repo-relative path
     artifact_sha256   TEXT,                   -- hash of the full result blob
-    repro_cmd         TEXT NOT NULL           -- exact command to reproduce
+    repro_cmd         TEXT NOT NULL,          -- exact command to reproduce
+
+    -- ALPHA SCREEN — prediction-only experiments. Execution (entry
+    -- placement, TP/SL, timeout, partial/trailing, selectivity) is
+    -- DEFERRED to a future RL agent; an alpha row asks only "is there
+    -- cost/execution-agnostic predictive signal". kind NULL/'strategy' =
+    -- an EV/owner-metric run (all rules above apply). kind='alpha' =
+    -- scored by OOS rank-IC + an ECONOMIC decile filter vs the cost
+    -- floor. An RL agent can only convert existing alpha, never create
+    -- it, and it cannot beat the fee/spread floor — so a 'confirmed'
+    -- alpha MUST have economic_pass=1 (ledger.py + v_alpha_audit enforce).
+    kind                    TEXT CHECK (kind IN ('alpha','strategy')),
+    alpha_target            TEXT,    -- fwd_logret | sign | volnorm_ret | ...
+    horizon_sec             INTEGER, -- forward horizon of the target
+    rank_ic_oos             REAL,    -- Spearman(pred, realized) honest OOS
+    r2_oos                  REAL,
+    auc_oos                 REAL,    -- for sign targets
+    top_decile_absmove_pct  REAL,    -- mean |fwd move| top predicted decile
+    bot_decile_absmove_pct  REAL,
+    cost_floor_pct          REAL,    -- round-trip cost the move must clear
+    decile_monotonic        INTEGER, -- 0|1 monotone pred-decile vs realized
+    economic_pass           INTEGER, -- 0|1 top-decile |move| > cost_floor
+    n_eff                   INTEGER  -- OOS sample count behind the metrics
 );
 -- NB: hypothesis_id is a SOFT reference (hypotheses is an append-only event
 -- log with a composite PK, so a SQL FK cannot target hypothesis_id alone).
@@ -195,4 +217,27 @@ SELECT experiment_id, status, fee_regime, ev_per_trade_pct, note
 FROM experiments
 WHERE status = 'confirmed'
   AND ev_per_trade_pct > 0
-  AND fee_regime = 'TAKER';
+  AND fee_regime = 'TAKER'
+  AND (kind IS NULL OR kind = 'strategy');
+
+-- Alpha frontier: prediction-only screens ranked by OOS rank-IC, with the
+-- economic filter explicit. The "is there harvestable signal" table —
+-- separate from the strategy frontier.
+CREATE VIEW v_alpha AS
+SELECT substr(ts,1,10) AS date, setup, symbols_json AS symbols,
+       alpha_target, horizon_sec, rank_ic_oos, auc_oos,
+       top_decile_absmove_pct, cost_floor_pct, economic_pass,
+       decile_monotonic, n_eff, status
+FROM v_live_experiments
+WHERE kind = 'alpha'
+ORDER BY rank_ic_oos DESC;
+
+-- Alpha audit: a 'confirmed' alpha that does not clear the cost floor is
+-- the "statistically significant but economically worthless" trap. The
+-- RL agent cannot rescue sub-cost signal — this MUST be empty.
+CREATE VIEW v_alpha_audit AS
+SELECT experiment_id, status, rank_ic_oos, top_decile_absmove_pct,
+       cost_floor_pct, economic_pass
+FROM experiments
+WHERE kind = 'alpha' AND status = 'confirmed'
+  AND (economic_pass IS NULL OR economic_pass != 1);

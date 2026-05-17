@@ -58,6 +58,16 @@ The result columns are exactly the owner-defined set (`Самые важные
   `net_return_pct` + `kelly_frac`, `win_rate_pct`, `base_rate_pct`,
   `n_trades`, `sharpe`, `max_dd_pct`, `exit_hist_json` (all 12).
 
+**`kind='alpha'` rows** (prediction-only; execution deferred to a future
+RL agent) skip the owner/EV columns and instead carry `alpha_target`,
+`horizon_sec`, `rank_ic_oos`, `auc_oos`, `top_decile_absmove_pct`,
+`cost_floor_pct`, `decile_monotonic`, `economic_pass`, `n_eff`. The gate
+**refuses to `confirm` an alpha with `economic_pass≠1`** — an RL agent
+converts existing alpha but cannot beat the fee/spread floor, so
+significant-but-sub-cost signal is worthless (`v_alpha`, `v_alpha_audit`;
+see `PLAN.md` → *CURRENT DIRECTION*). `kind=NULL/'strategy'` = the
+owner/EV contract above.
+
 Backfilled rows have owner 1–7 = NULL: those metrics **were not captured**
 at the time. That gap is the chaos this ledger closes — new experiments
 must populate them.
