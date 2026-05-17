@@ -311,7 +311,38 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > both unchanged. Pre-registered & committed **before** the run (HR1
 > rev1, HD1 rev12).
 
-**Last updated:** 2026-05-17 (HR1 pre-registered & launched — reward/loss-structure sweep R0–R4 [|move|-wt / econ-wt / rank:pairwise / asym-cost], HM1-standard both-symbol bar, the HM4-open axis; distinct from HM3-representation & HA7-scope [both unchanged]; verdict pending; prior: HM4/HD1-rev11, HA7-result, HM3, HA2/HM2, HM1).
+> **HR1 RESULT — REFUTED as posed 2026-05-17 (`phaseb-20260517-180221`,
+> 6 alpha rows, well-powered n_oos 1763–6104).** No reward point beats
+> R0 by >2·SE ∧ >0 ∧ placebo-clean on **both** symbols (only LINK-H600
+> R2 locally robust z=2.63; SOL zero → isolated, bar blocks). **R1**
+> |move|-weight = the lone *consistent* effect: 6/6 cells both symbols
+> ΔR0>0 (+0.002…+0.020) but **none clears 2·SE** → weak marginal,
+> **retained** for stacking (HM1 class of T2_asym/H3), not a lever.
+> **R2** economic-weight = robust LINK-H600 only; **SOL degenerate**
+> (AUC exactly 0.500 — zeroing sub-cost moves collapsed SOL's sample;
+> structural re-confirmation of the cost-wall). **R3** rank:pairwise =
+> symbol-inconsistent, **significantly negative on SOL** (z≈−2.4/−2.5)
+> → the IC-surrogate HM2-rev1 named is refuted. **R4** asym up:dn cost
+> ≈0 both → the T2_asym whisper does **not** survive as an objective;
+> thread closed. **Bounded conclusion (NOT the over-claim pattern):**
+> the decision-relevant reward families (plain/magnitude/economic/
+> ranking/asymmetric) + MSE-return/volnorm ≈ **7 pts** are tested-
+> negative; residual untested points (recency/rarity reweight, focal,
+> bespoke-IC gradient) are **low-EV sub-variants of already-negative
+> families**, explicitly flagged as not literally tested — not a new
+> axis. The cheap high-EV snapshot search is now **earned-closed across
+> three independent pre-registered axes** (feature HA1/H3/HA5 · scope
+> HA7 · reward HR1), uniformly ≈0.51 with only retained weak marginals
+> (R1·T2_asym·H3). The single unspent **axis** is representation
+> (sequence) = HM3 accepted prior (adopt, don't test). ⇒ the project is
+> now **legitimately at the strategic fork** (all pre-registered
+> contingencies discharged, HD1 rev13): adopt-sequence-and-build /
+> class·instrument pivot / re-scope testbed / accept-no-cheap-alpha.
+> A human decision, not another screen. (Only remaining cheap
+> experiment = stack the 3 retained weak marginals — low prior;
+> offered, not assumed.) VM auto-deleted (hard cap).
+
+**Last updated:** 2026-05-17 (HR1 REFUTED as posed — reward/loss axis tested-negative across ~7 principled pts, HM1 both-symbol bar; R1 |move|-weight = retained weak marginal [consistent, sub-noise]; R2 SOL-degenerate re-confirms cost-wall; R3 ranking neg on SOL; R4 asym null → T2 thread closed; cheap high-EV search now EARNED-closed on 3 pre-registered axes [feature/scope/reward], bounded claim NOT infinite-exhaustion; only unspent axis = HM3 representation prior ⇒ legitimate strategic fork [HD1 rev13]; prior: HR1-prereg, HM4, HA7-result, HM3, HM1).
 
 ---
 
