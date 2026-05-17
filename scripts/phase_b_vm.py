@@ -100,7 +100,14 @@ def cmd_launch(a) -> int:
     # lowercase, hyphens only. run_id doubles as the instance name.
     run_id = time.strftime("phaseb-%Y%m%d-%H%M%S", time.gmtime())
     mode = getattr(a, "mode", "alpha")
-    if mode in ("alpha", "ha5", "h3", "ha2", "ha7", "hr1"):
+    if mode == "baseline":
+        # HM6 standardized baseline_ref. baseline_360.py has the 4
+        # symbols {LINK,SOL,BTC,ETH} + common-aligned 360d window
+        # FROZEN internally (canon HM6) — NO --symbols/--days here.
+        runner = ('python3 scripts/baseline_360.py --run-id "$RUN_ID" '
+                  '--git-commit "$GIT"')
+        need_rust = "false"   # screen-type, no sim -> skip cargo build
+    elif mode in ("alpha", "ha5", "h3", "ha2", "ha7", "hr1"):
         script = {"alpha": "alpha_screen", "ha5": "ha5_screen", "ha2": "ha2_screen",
                   "h3": "h3_screen", "ha7": "ha7_screen", "hr1": "hr1_screen"}[mode]
         runner = (f'python3 scripts/{script}.py --run-id "$RUN_ID" '
@@ -247,7 +254,7 @@ def main(argv=None) -> int:
     lp = s.add_parser("launch")
     lp.add_argument("--mode",
                     choices=("alpha", "ha5", "h3", "ha2", "ha7", "hr1",
-                             "phaseb"),
+                             "phaseb", "baseline"),
                     default="alpha")
     for c in ("status", "ingest"):
         sp = s.add_parser(c)
