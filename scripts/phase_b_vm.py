@@ -100,8 +100,8 @@ def cmd_launch(a) -> int:
     # lowercase, hyphens only. run_id doubles as the instance name.
     run_id = time.strftime("phaseb-%Y%m%d-%H%M%S", time.gmtime())
     mode = getattr(a, "mode", "alpha")
-    if mode in ("alpha", "ha5", "h3"):
-        script = {"alpha": "alpha_screen", "ha5": "ha5_screen",
+    if mode in ("alpha", "ha5", "h3", "ha2"):
+        script = {"alpha": "alpha_screen", "ha5": "ha5_screen", "ha2": "ha2_screen",
                   "h3": "h3_screen"}[mode]
         runner = (f'python3 scripts/{script}.py --run-id "$RUN_ID" '
                   f'--git-commit "$GIT" --symbols LINK-USDT-PERP '
@@ -245,7 +245,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="phase_b_vm")
     s = p.add_subparsers(dest="cmd", required=True)
     lp = s.add_parser("launch")
-    lp.add_argument("--mode", choices=("alpha", "ha5", "h3", "phaseb"),
+    lp.add_argument("--mode", choices=("alpha", "ha5", "h3", "ha2", "phaseb"),
                     default="alpha")
     for c in ("status", "ingest"):
         sp = s.add_parser(c)
