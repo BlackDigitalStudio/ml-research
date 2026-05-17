@@ -86,7 +86,8 @@ EXP_COLUMNS = (
     "artifact_path", "artifact_sha256", "repro_cmd",
     "kind", "alpha_target", "horizon_sec", "rank_ic_oos", "r2_oos",
     "auc_oos", "top_decile_absmove_pct", "bot_decile_absmove_pct",
-    "cost_floor_pct", "decile_monotonic", "economic_pass", "n_eff",
+    "cost_floor_pct", "decile_monotonic", "economic_pass_loose",
+    "economic_pass_strict", "n_eff",
 )
 HYP_COLUMNS = (
     "hypothesis_id", "rev", "ts", "statement", "expected_lift",
@@ -133,12 +134,13 @@ def validate_experiment(r: dict) -> None:
         # cannot create it and cannot beat the fee/spread floor. A
         # 'confirmed' alpha that does not clear the cost floor is the
         # "significant but economically worthless" trap.
-        if r["status"] == "confirmed" and r.get("economic_pass") != 1:
+        if r["status"] == "confirmed" and r.get("economic_pass_strict") != 1:
             raise LedgerError(
                 f"{eid}: refusing to confirm an alpha with "
-                f"economic_pass!=1 — statistically-significant but "
-                f"sub-cost signal is not harvestable. Use 'exploratory' "
-                f"or show top-decile |move| > cost_floor.")
+                f"economic_pass_strict!=1 — significant-but-sub-cost "
+                f"signal is not harvestable (strict floor = taker + "
+                f"slippage haircut). Use 'exploratory', or show "
+                f"top-decile |move| > cost_floor_pct.")
         return  # alpha rows skip the strategy-only EV/owner/exit checks
 
     # The killer rule: a positive EV under TAKER labels was a false
@@ -323,15 +325,16 @@ def cmd_alpha(a) -> int:
     con.row_factory = sqlite3.Row
     rows = con.execute("SELECT * FROM v_alpha").fetchall()
     print("| Date | Setup | Symbols | target | h(s) | rankIC | AUC | "
-          "top|mv|% | cost% | econ | mono | n_eff | status |")
-    print("|---|---|---|---|--:|--:|--:|--:|--:|:--:|:--:|--:|---|")
+          "top|mv|% | cost% | econL | econS | mono | n_eff | status |")
+    print("|---|---|---|---|--:|--:|--:|--:|--:|:--:|:--:|:--:|--:|---|")
     for r in rows:
         f = lambda v, p=4: "" if v is None else f"{v:.{p}f}"
         print(f"| {r['date']} | {r['setup']} | {r['symbols']} | "
               f"{r['alpha_target']} | {r['horizon_sec']} | "
               f"{f(r['rank_ic_oos'])} | {f(r['auc_oos'],3)} | "
               f"{f(r['top_decile_absmove_pct'],3)} | "
-              f"{f(r['cost_floor_pct'],3)} | {r['economic_pass']} | "
+              f"{f(r['cost_floor_pct'],3)} | {r['economic_pass_loose']} | "
+              f"{r['economic_pass_strict']} | "
               f"{r['decile_monotonic']} | {r['n_eff']} | {r['status']} |")
     con.close()
     return 0

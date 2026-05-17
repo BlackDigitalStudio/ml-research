@@ -28,11 +28,15 @@ Execution-neutral, on honest OOS, per symbol:
 - target = forward mid log-return `r_h` and `sign(r_h)`, h swept;
 - **statistical:** OOS rank-IC (Spearman pred↔r_h), R²/AUC, decile
   monotonicity;
-- **economic (decisive):** mean |r_h| in the top predicted decile must
-  exceed the ~0.07–0.10 % round-trip cost floor. RL converts existing
+- **economic (decisive), two floors:** mean |r_h| in the top predicted
+  decile must exceed the round-trip cost floor — `economic_pass_loose`
+  (~0.08 % maker, idealised fills) and the **binding**
+  `economic_pass_strict` (~0.13 % = taker 0.10 % + slippage/latency
+  haircut, since unfilled makers become takers). RL converts existing
   alpha, never manufactures it, and cannot beat the floor — so
   statistically-significant-but-sub-cost signal is worthless. The ledger
-  refuses to `confirm` an alpha with `economic_pass≠1` (`v_alpha_audit`).
+  refuses to `confirm` an alpha with `economic_pass_strict≠1`
+  (`v_alpha_audit`).
 
 **Alpha axes (cheapest-first), in the ledger as `kind='alpha'`:**
 

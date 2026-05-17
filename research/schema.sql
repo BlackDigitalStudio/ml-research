@@ -132,7 +132,9 @@ CREATE TABLE experiments (
     -- scored by OOS rank-IC + an ECONOMIC decile filter vs the cost
     -- floor. An RL agent can only convert existing alpha, never create
     -- it, and it cannot beat the fee/spread floor — so a 'confirmed'
-    -- alpha MUST have economic_pass=1 (ledger.py + v_alpha_audit enforce).
+    -- alpha MUST have economic_pass_strict=1 (cost_floor_pct = taker +
+    -- slippage haircut, ~0.13%; loose = ~0.08% maker idealised, map only).
+    -- ledger.py + v_alpha_audit enforce.
     kind                    TEXT CHECK (kind IN ('alpha','strategy')),
     alpha_target            TEXT,    -- fwd_logret | sign | volnorm_ret | ...
     horizon_sec             INTEGER, -- forward horizon of the target
@@ -143,8 +145,9 @@ CREATE TABLE experiments (
     bot_decile_absmove_pct  REAL,
     cost_floor_pct          REAL,    -- round-trip cost the move must clear
     decile_monotonic        INTEGER, -- 0|1 monotone pred-decile vs realized
-    economic_pass           INTEGER, -- 0|1 top-decile |move| > cost_floor
-    n_eff                   INTEGER  -- OOS sample count behind the metrics
+    economic_pass_loose     INTEGER, -- 0|1 top-decile |move| > ~0.08% (maker, idealised fills)
+    economic_pass_strict    INTEGER, -- 0|1 top-decile |move| > cost_floor_pct (taker + slippage haircut; the BINDING flag)
+    n_eff                   INTEGER  -- decorrelated OOS sample count (block ≈ h/cadence)
 );
 -- NB: hypothesis_id is a SOFT reference (hypotheses is an append-only event
 -- log with a composite PK, so a SQL FK cannot target hypothesis_id alone).
@@ -226,7 +229,8 @@ WHERE status = 'confirmed'
 CREATE VIEW v_alpha AS
 SELECT substr(ts,1,10) AS date, setup, symbols_json AS symbols,
        alpha_target, horizon_sec, rank_ic_oos, auc_oos,
-       top_decile_absmove_pct, cost_floor_pct, economic_pass,
+       top_decile_absmove_pct, cost_floor_pct,
+       economic_pass_loose, economic_pass_strict,
        decile_monotonic, n_eff, status
 FROM v_live_experiments
 WHERE kind = 'alpha'
@@ -237,7 +241,7 @@ ORDER BY rank_ic_oos DESC;
 -- RL agent cannot rescue sub-cost signal — this MUST be empty.
 CREATE VIEW v_alpha_audit AS
 SELECT experiment_id, status, rank_ic_oos, top_decile_absmove_pct,
-       cost_floor_pct, economic_pass
+       cost_floor_pct, economic_pass_strict
 FROM experiments
 WHERE kind = 'alpha' AND status = 'confirmed'
-  AND (economic_pass IS NULL OR economic_pass != 1);
+  AND (economic_pass_strict IS NULL OR economic_pass_strict != 1);

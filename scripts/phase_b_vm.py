@@ -70,10 +70,13 @@ from google.cloud import storage
 storage.Client().bucket("blackdigital-scalper-data").blob(f"research_runs/$RUN_ID/src.tar.gz").download_to_filename("/tmp/src.tgz")
 PY
 mkdir -p /opt/app && tar xzf /tmp/src.tgz -C /opt/app
-cd /opt/app/rust_ingest && cargo build --release --bins
+NEED_RUST=$(md instance/attributes/need_rust)
+if [ "$NEED_RUST" = "true" ]; then
+  cd /opt/app/rust_ingest && cargo build --release --bins
+fi
 cd /opt/app
-SCALPER_USE_RUST=1 python3 scripts/phase_b_run.py --run-id "$RUN_ID" --git-commit "$GIT" \
-  --symbols LINK-USDT-PERP SOL-USDT-PERP --days 90 --timeout-sec 120
+RUNNER=$(md instance/attributes/runner_cmd)
+SCALPER_USE_RUST=1 bash -c "$RUNNER"
 echo "PHASE_B_RUNNER_EXIT=$? $(date -u)"
 """
 
@@ -95,7 +98,18 @@ def cmd_launch(a) -> int:
     # GCE instance names must match [a-z]([-a-z0-9]{0,61}[a-z0-9])? —
     # lowercase, hyphens only. run_id doubles as the instance name.
     run_id = time.strftime("phaseb-%Y%m%d-%H%M%S", time.gmtime())
-    print(f"run_id={run_id} git={git}")
+    mode = getattr(a, "mode", "alpha")
+    if mode == "alpha":
+        runner = (f'python3 scripts/alpha_screen.py --run-id "$RUN_ID" '
+                  f'--git-commit "$GIT" --symbols LINK-USDT-PERP '
+                  f'SOL-USDT-PERP --days 90')
+        need_rust = "false"   # alpha screen has no sim -> skip cargo build
+    else:
+        runner = (f'python3 scripts/phase_b_run.py --run-id "$RUN_ID" '
+                  f'--git-commit "$GIT" --symbols LINK-USDT-PERP '
+                  f'SOL-USDT-PERP --days 90 --timeout-sec 120')
+        need_rust = "true"
+    print(f"run_id={run_id} git={git} mode={mode} need_rust={need_rust}")
 
     # 1. source tarball (tracked files only) -> GCS
     tar = Path(f"/tmp/{run_id}_src.tar.gz")
@@ -129,7 +143,9 @@ def cmd_launch(a) -> int:
         metadata=compute_v1.Metadata(items=[
             compute_v1.Items(key="startup-script", value=STARTUP),
             compute_v1.Items(key="run_id", value=run_id),
-            compute_v1.Items(key="git_commit", value=git)]),
+            compute_v1.Items(key="git_commit", value=git),
+            compute_v1.Items(key="runner_cmd", value=runner),
+            compute_v1.Items(key="need_rust", value=need_rust)]),
         labels={"purpose": "scalper-phase-b", "run": run_id.lower()[:60]})
     op = compute_v1.InstancesClient().insert(
         project=PROJECT, zone=ZONE, instance_resource=inst)
@@ -198,18 +214,26 @@ def cmd_ingest(a) -> int:
     L = importlib.util.module_from_spec(spec)
     sys.modules["ledger"] = L
     spec.loader.exec_module(L)
-    n = 0
+    # alpha runner emits a flat res["records"]; phase_b emits
+    # res["symbols"][sym]["ledger_record"]. Handle both.
+    recs = list(res.get("records", []))
     for sym, r in res.get("symbols", {}).items():
-        rec = r.get("ledger_record")
-        if not rec:
-            print(f"{sym}: no ledger_record ({r.get('error')})")
+        if r.get("ledger_record"):
+            recs.append(r["ledger_record"])
+        elif r.get("error"):
+            print(f"{sym}: no record ({r.get('error')})")
+    n = 0
+    for rec in recs:
+        if "error" in rec or "experiment_id" not in rec:
+            print(f"skip: {rec.get('symbol')} {rec.get('error','')[:80]}")
             continue
         L.validate_experiment(rec)
         with (REPO / "research" / "experiments.jsonl").open("a") as f:
             f.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
         n += 1
-        print(f"{sym}: appended {rec['experiment_id']} "
-              f"status={rec['status']} ev/tr={rec.get('ev_per_trade_pct')}")
+        print(f"appended {rec['experiment_id']} status={rec['status']} "
+              f"ric={rec.get('rank_ic_oos')} "
+              f"eS={rec.get('economic_pass_strict')}")
     print(f"ingested {n} rows; run `python3 research/ledger.py check`")
     return 0
 
@@ -217,7 +241,8 @@ def cmd_ingest(a) -> int:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="phase_b_vm")
     s = p.add_subparsers(dest="cmd", required=True)
-    s.add_parser("launch")
+    lp = s.add_parser("launch")
+    lp.add_argument("--mode", choices=("alpha", "phaseb"), default="alpha")
     for c in ("status", "ingest"):
         sp = s.add_parser(c)
         sp.add_argument("--run-id", required=True)

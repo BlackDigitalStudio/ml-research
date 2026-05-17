@@ -61,8 +61,10 @@ The result columns are exactly the owner-defined set (`Самые важные
 **`kind='alpha'` rows** (prediction-only; execution deferred to a future
 RL agent) skip the owner/EV columns and instead carry `alpha_target`,
 `horizon_sec`, `rank_ic_oos`, `auc_oos`, `top_decile_absmove_pct`,
-`cost_floor_pct`, `decile_monotonic`, `economic_pass`, `n_eff`. The gate
-**refuses to `confirm` an alpha with `economic_pass≠1`** — an RL agent
+`cost_floor_pct`, `decile_monotonic`, `economic_pass_loose` (~0.08%
+maker, idealised), `economic_pass_strict` (~0.13% taker + slippage
+haircut — the binding flag), `n_eff` (decorrelated). The gate **refuses
+to `confirm` an alpha with `economic_pass_strict≠1`** — an RL agent
 converts existing alpha but cannot beat the fee/spread floor, so
 significant-but-sub-cost signal is worthless (`v_alpha`, `v_alpha_audit`;
 see `PLAN.md` → *CURRENT DIRECTION*). `kind=NULL/'strategy'` = the
