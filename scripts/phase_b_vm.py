@@ -100,11 +100,12 @@ def cmd_launch(a) -> int:
     # lowercase, hyphens only. run_id doubles as the instance name.
     run_id = time.strftime("phaseb-%Y%m%d-%H%M%S", time.gmtime())
     mode = getattr(a, "mode", "alpha")
-    if mode == "alpha":
-        runner = (f'python3 scripts/alpha_screen.py --run-id "$RUN_ID" '
+    if mode in ("alpha", "ha5"):
+        script = "alpha_screen" if mode == "alpha" else "ha5_screen"
+        runner = (f'python3 scripts/{script}.py --run-id "$RUN_ID" '
                   f'--git-commit "$GIT" --symbols LINK-USDT-PERP '
                   f'SOL-USDT-PERP --days 90')
-        need_rust = "false"   # alpha screen has no sim -> skip cargo build
+        need_rust = "false"   # screens have no sim -> skip cargo build
     else:
         runner = (f'python3 scripts/phase_b_run.py --run-id "$RUN_ID" '
                   f'--git-commit "$GIT" --symbols LINK-USDT-PERP '
@@ -243,7 +244,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="phase_b_vm")
     s = p.add_subparsers(dest="cmd", required=True)
     lp = s.add_parser("launch")
-    lp.add_argument("--mode", choices=("alpha", "phaseb"), default="alpha")
+    lp.add_argument("--mode", choices=("alpha", "ha5", "phaseb"),
+                    default="alpha")
     for c in ("status", "ingest"):
         sp = s.add_parser(c)
         sp.add_argument("--run-id", required=True)
