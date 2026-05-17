@@ -169,7 +169,26 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > `refuted(alpha)` := Δ within noise/placebo. Prior "all axes
 > negative / dead" framing superseded by HM1.
 
-**Last updated:** 2026-05-17 (METHODOLOGY CORRECTION HM1: select by marginal Δ vs baseline, not the economic gate [false-negatived 3×]; HA1=signal baseline not dead, H3=weak marginal retained; gate re-scoped to deploy-only; remaining lever = temporal/sequence [HD1 p1]; prior: H3/HA5/HA1, features decoded).
+> **OBJECTIVE AUDIT 2026-05-17 (user diagnosis — HM2 canon).** Why is
+> volatility strongly predicted but direction a coin-flip? Verified in
+> code: HA1/H3 use `XGBRegressor(reg:squarederror)` on signed
+> fwd-return → the reward is **magnitude/volatility fit, not
+> direction** (squared loss dominated by large |move|; small-move sign
+> ≈ free). Headline "success" = rank-IC (magnitude-conflated). HA5
+> head1 was trained ON a volatility target (reached ≥ cost) → its 0.70
+> AUC is **tautological**, not a separate signal. HA5 head2 used a
+> directional objective but only on the degraded ≥cost subset with
+> duplicate conditioners. ⇒ **the directional ceiling of these
+> features was never cleanly measured with an objective that rewards
+> direction**; "direction = coin-flip" is partly an objective artifact
+> (rank-IC > 0 proves a small real directional component MSE
+> under-extracts). Fix the OBJECTIVE before the representation — a
+> sequence model on MSE-return inherits the same bias. **HA2 sharpened
+> → priority 1** (directional-objective screen: sign-classifier /
+> vol-normalised target vs the HA1 MSE baseline, judged by directional
+> AUC + Δ per HM1); temporal demoted to "only if HA2 still ~0.5".
+
+**Last updated:** 2026-05-17 (OBJECTIVE AUDIT HM2: HA1/H3 rewarded magnitude not direction [reg:squarederror], HA5-head1 0.70 tautological; directional ceiling never cleanly tested → HA2 directional-objective screen = priority 1, before temporal; prior: HM1 selection fix, H3/HA5/HA1, features decoded).
 
 ---
 
