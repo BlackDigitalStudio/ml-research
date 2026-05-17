@@ -295,7 +295,23 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > sweep, **pre-register then run on user go** (not launched mid-challenge).
 > The strategic fork is **NOT** yet reached.
 
-**Last updated:** 2026-05-17 (HM4 canon + HD1 rev11 — 2nd self-corrected "axis exhausted from k≤3 points" over-claim this session: reward/loss-structure ≠ representation ≠ scope-as-subset; objective sampled at ~3 pts, HA7 added 0; "objective exhausted→strategic fork" RETRACTED; open+cheap = error-weighting / ranking-IC / asymmetric-cost screen, to pre-register then run on user go; HA7 result stands for what it tested; prior: HA7-result, HM3, HA2/HM2, HM1).
+> **HR1 reward/loss sweep — pre-registered & launched 2026-05-17 (user
+> go via AskUserQuestion: all R1–R4, HM1-standard bar).** Closes the
+> HM4 gap. Same testbed/scope as HA2/HA7 R0 (LINK&SOL, features_v1+conds,
+> ≥cost subset, up-first, H{180,300,600}); the **only** thing varied is
+> how error is scored/weighted: **R0** plain logloss (anchor == HA2a/HA7
+> ~0.51) · **R1** weight ∝ |r_H| (clip p99) · **R2** weight ∝
+> max(|r_H|−cost,0) (economic — sub-cost moves get ≈0 weight) · **R3**
+> `rank:pairwise` on up (the IC/AUC-surrogate HM2-rev1 named, never run)
+> · **R4** asymmetric up:down cost = 0.20:0.13 (T2_asym → into the loss).
+> **Bar (HM1-standard, frozen):** a reward point is a robust marginal
+> iff paired block-bootstrap (AUC_R−AUC_R0) > 2·SE ∧ >0 ∧ placebo≈0.5 ∧
+> beats R0 by >noise on **both** symbols; not economic-gated; no
+> auto-`confirmed`. Distinct from HM3 (representation) and HA7 (scope) —
+> both unchanged. Pre-registered & committed **before** the run (HR1
+> rev1, HD1 rev12).
+
+**Last updated:** 2026-05-17 (HR1 pre-registered & launched — reward/loss-structure sweep R0–R4 [|move|-wt / econ-wt / rank:pairwise / asym-cost], HM1-standard both-symbol bar, the HM4-open axis; distinct from HM3-representation & HA7-scope [both unchanged]; verdict pending; prior: HM4/HD1-rev11, HA7-result, HM3, HA2/HM2, HM1).
 
 ---
 
