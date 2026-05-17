@@ -35,6 +35,7 @@ VM_RUNS = REPO / "research" / "vm_runs.jsonl"
 
 STARTUP = r"""#!/bin/bash
 set -uo pipefail
+export HOME=/root        # startup-script runs under systemd with no HOME
 md(){ curl -s -H "Metadata-Flavor: Google" "http://metadata/computeMetadata/v1/$1"; }
 RUN_ID=$(md instance/attributes/run_id)
 PROJ=$(md project/project-id)
@@ -49,17 +50,20 @@ from google.cloud import storage
 storage.Client().bucket("blackdigital-scalper-data").blob(sys.argv[2]).upload_from_filename(sys.argv[1])
 PY
 }
-selfdelete(){
+cleanup(){
+  # Stop compute charges immediately on completion/failure. The Compute-
+  # enforced hard cap (max_run_duration + instance_termination_action=
+  # DELETE) is the durable teardown guarantee; the orchestrator also
+  # deletes promptly on the terminal monitor signal. No compute.delete
+  # permission needed on the VM SA.
   upload /var/log/phaseb.log "research_runs/$RUN_ID/phaseb.log"
-  TOK=$(md instance/service-accounts/default/token | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
-  curl -s -X DELETE -H "Authorization: Bearer $TOK" \
-    "https://compute.googleapis.com/compute/v1/projects/$PROJ/zones/$ZONE/instances/$NAME" || poweroff
+  poweroff -f || true
 }
-trap selfdelete EXIT
+trap cleanup EXIT
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y && apt-get install -y build-essential curl pkg-config libssl-dev python3-pip git
 curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-source "$HOME/.cargo/env"
+. /root/.cargo/env || export PATH=/root/.cargo/bin:$PATH
 pip3 install --quiet --break-system-packages numpy pyarrow google-cloud-storage xgboost scikit-learn
 python3 - <<PY
 from google.cloud import storage
