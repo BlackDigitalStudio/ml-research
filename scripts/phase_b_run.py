@@ -77,6 +77,13 @@ def _collect(bk, symbol, days, regime, timeout_sec):
         DAYIDX.append(np.full(n, di, np.int32))
     if not X:
         return None
+    # Per-day horizon H varies (gaps differ day to day) — pad every day's
+    # mid_paths to the global max so the axis-0 concat is valid. Padded
+    # columns are never read: per-sample timeout_ticks <= that day's H.
+    Hmax = max(m.shape[1] for m in MID)
+    MID = [m if m.shape[1] == Hmax else
+           np.pad(m, ((0, 0), (0, Hmax - m.shape[1])), mode="edge")
+           for m in MID]
     return dict(
         X=np.concatenate(X), entry_long=np.concatenate(EL),
         entry_short=np.concatenate(ES), entry_book=np.concatenate(EB),
