@@ -111,7 +111,7 @@ def cmd_launch(a) -> int:
             boot=True, auto_delete=True,
             initialize_params=compute_v1.AttachedDiskInitializeParams(
                 source_image=img, disk_size_gb=200,
-                disk_type=f"zones/{ZONE}/diskTypes/pd-balanced"))],
+                disk_type=f"zones/{ZONE}/diskTypes/pd-standard"))],
         network_interfaces=[compute_v1.NetworkInterface(
             access_configs=[compute_v1.AccessConfig(
                 name="External NAT", type_="ONE_TO_ONE_NAT")])],
