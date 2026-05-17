@@ -376,7 +376,7 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > (sequence/temporal, under R1); not a 4-way deliberation.] No
 > compute launched.
 
-**Last updated:** 2026-05-17 (HD1 rev15 — STRUCK the "4-way strategic fork" framing as a self-correction: it re-opened the HM3-closed sequence question and contradicted HM3's corollary; with snapshot search earned-closed + HM3 confirmed, next representation is DECIDED = build sequence/temporal candidate under R1[HM5]; "accept-no-alpha" struck as an option; only open = build-scope + the goal-level shelve/pivot call the user owns; prior: HM5-objective-standard, HR1-result, HM4, HM3, HM1).
+**Last updated:** 2026-05-17 (HD1 rev18 — SELF-CORRECTION #2, user forced verification of real data usage/availability: rev17's "BTC/ETH=546d uniform" was schema-CONTRACT not record; research.db shows modern program used ONLY LINK 2025-10-12..2026-05-08 ~208d + SOL 2026-02-08..2026-05-08 ~89d [unequal, not "~90 each"], BTC/ETH lead-features-only never train symbols, legacy 8-sym caches lost; true per-symbol availability NOT verifiable from sandbox, uniform-546 unverified & contradicted by build windows -> build-scope must verify real coverage, not trust CRYPTOLAKE_SCHEMA.md; prior: HD1 rev15-strike, HM5, HM3).
 
 ---
 
