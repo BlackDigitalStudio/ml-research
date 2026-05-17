@@ -210,7 +210,23 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > ≈0.51, directional alpha is genuinely absent at scalp horizons →
 > deliberate instrument/cost pivot (not before).
 
-**Last updated:** 2026-05-17 (HA2 REFUTED as posed + HM2 self-corrected: snapshot direction ≈0.51 ROBUST across features×objective×scope [not an objective artifact]; cross-asset = faint SOL-only sub-cost whisper; runner spurious-confirmed artifact caught+patched; only untested axis = temporal/sequence [HD1 p1]; prior: HM2, HM1, H3/HA5/HA1).
+> **HM3 ACCEPTED PRIOR + queue convergence 2026-05-17 (user).** Decision:
+> we care only THAT sequence adds directional lift (a known prior — lit.
+> + this project's own historical Mamba/TCN ≫ XGB), not how much. The
+> temporal/sequence screen is therefore **descoped (not data-refuted)**;
+> HD1/H1/H8/H4-seq removed from the active queue, HA6 aligned refuted.
+> **Corollary (must not be lost):** the snapshot-bound ≈0.51 directional
+> negatives (HA1·H3·HA5·HA2) are limited by the snapshot representation;
+> with sequence-superiority an accepted-but-unquantified prior they are
+> **NOT** a proof of "no directional alpha". State of play: the cheap
+> *snapshot-directional* search on LINK/SOL is **mapped & exhausted**;
+> head1 volatility ≈0.70 (real, directionless); the symmetry/cost wall
+> (≤14 bp moves vs ~13 bp cost) stands. No remaining cheap directional
+> lever in queue. Next is a STRATEGIC decision (well-evidenced now, not
+> premature HZ1): adopt-sequence-and-build vs class/instrument pivot vs
+> re-scope testbed — a human call, not another screen.
+
+**Last updated:** 2026-05-17 (HM3 accepted-prior: sequence-lift assumed not tested → temporal/H1/H8 descoped, HA6 refuted; cheap snapshot-directional search EXHAUSTED [≈0.51 robust, NOT 'no alpha' per HM3 corollary]; converged to a strategic decision point; prior: HA2/HM2, HM1, H3/HA5/HA1).
 
 ---
 
