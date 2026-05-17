@@ -123,6 +123,13 @@ dimension was literally zeros.** This narrows every prior negative and
 makes **H3 (BTC-lead) concretely actionable**: the cross-asset slots
 exist and are empty; BTC raw is in the same bucket to fill them.
 
+> **canon HM7 (anti-redundancy):** before proposing any feature/data
+> hypothesis read HM7 in `hypotheses.jsonl`. "Present in features_v1"
+> ≠ "tested" for DEAD cols above; conversely liquidations are LIVE
+> (EXT 56-58 + per-run `liq_sq/liq_n` aggregates, HA5 refuted) and
+> cross-asset/ETH-lead WAS live-tested (H3 weak, HA2 refuted). Do not
+> re-propose these as novel.
+
 - `features.npy` `(3602, 59) float32` — per-decision-point matrix,
   **decoded above** (raw-56 + 3 ext; ~46 live, cross-asset/ETH all
   zero). Row 0 ≈ zeros (warmup).
