@@ -7,12 +7,16 @@
 # H5/H2) runs co-located with gs://blackdigital-scalper-data. No bulk
 # data is pulled through this container.
 #
-# Secret handling — non-negotiable:
-#   * the SA key arrives ONLY via the environment secret $GCP_SA_KEY
-#     (or base64 $GCP_SA_KEY_B64). Never via chat, never committed.
-#   * the key is written 0600 to $HOME/.gcp (outside the repo) and is
-#     never echoed. No `set -x`.
-#   * idempotent: safe to re-run every session start.
+# Credential — non-negotiable:
+#   * accepts EITHER a service-account key OR a user-ADC
+#     ("authorized_user", from `gcloud auth application-default login`).
+#     The ADC path exists because org policy
+#     iam.disableServiceAccountKeyCreation forbids SA keys for this org
+#     (user decision 2026-05-17); ADC is NOT an SA key and is allowed.
+#   * arrives ONLY via the environment secret $GCP_SA_KEY (or base64
+#     $GCP_SA_KEY_B64). Never via chat, never committed.
+#   * written 0600 to $HOME/.gcp (outside the repo), never echoed,
+#     no `set -x`. Idempotent: safe to re-run every session start.
 #
 # Wire this as the environment's setup script (Claude Code on the web:
 # environment settings -> setup script), or `source` it manually.
@@ -36,9 +40,10 @@ elif [[ -n "${GCP_SA_KEY:-}" ]]; then
 elif [[ -f "$CRED_FILE" ]]; then
   : # already materialised this session
 else
-  die "no credentials. Set the environment secret GCP_SA_KEY (raw SA
-  JSON) or GCP_SA_KEY_B64 (base64). This is the ONLY accepted channel —
-  do not paste the key into chat or commit it."
+  die "no credentials. Set the environment secret GCP_SA_KEY (raw JSON:
+  either an SA key OR a user-ADC authorized_user file from 'gcloud auth
+  application-default login') or GCP_SA_KEY_B64 (base64). This is the
+  ONLY accepted channel — do not paste it into chat or commit it."
 fi
 chmod 600 "$CRED_FILE"
 
@@ -46,18 +51,35 @@ case "$CRED_DIR" in
   "$PWD"/*|"$PWD") die "refusing: credential dir $CRED_DIR is inside the
   repo. Set GCP_CRED_DIR outside the working tree." ;;
 esac
-python3 - "$CRED_FILE" <<'PY' || die "GCP_SA_KEY is not valid JSON / not a service-account key"
+# Default project when the credential carries none (authorized_user ADC
+# has no project_id): the canonical Cryptolake-asset project (recon
+# 2026-05-16, RESEARCH_LOG / CRYPTOLAKE_SCHEMA.md). Overridable.
+DEFAULT_GCP_PROJECT="project-26a24ad0-1059-4f73-93b"
+python3 - "$CRED_FILE" <<'PY' || die "credential is not valid JSON / not a service_account key nor an authorized_user ADC"
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d.get("type") == "service_account", "not a service_account key"
-assert d.get("project_id") and d.get("client_email"), "missing project_id/client_email"
+t = d.get("type")
+if t == "service_account":
+    assert d.get("project_id") and d.get("client_email"), "SA key missing project_id/client_email"
+elif t == "authorized_user":
+    assert d.get("client_id") and d.get("client_secret") and d.get("refresh_token"), \
+        "authorized_user ADC missing client_id/client_secret/refresh_token"
+else:
+    raise SystemExit(f"unsupported credential type {t!r} (need service_account or authorized_user)")
 PY
 
 export GOOGLE_APPLICATION_CREDENTIALS="$CRED_FILE"
-GCP_PROJECT="${GCP_PROJECT:-$(python3 -c 'import json,os;print(json.load(open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]))["project_id"])')}"
+# project: SA key -> project_id; ADC -> quota_project_id or $GCP_PROJECT
+# or the canonical default. identity label is type-dependent.
+GCP_PROJECT="${GCP_PROJECT:-$(python3 -c 'import json,os
+d=json.load(open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]))
+print(d.get("project_id") or d.get("quota_project_id") or "")')}"
+GCP_PROJECT="${GCP_PROJECT:-$DEFAULT_GCP_PROJECT}"
 export GOOGLE_APPLICATION_CREDENTIALS GCP_PROJECT GCP_REGION GCP_ZONE
-SA_EMAIL="$(python3 -c 'import json,os;print(json.load(open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]))["client_email"])')"
-echo "gcp_bootstrap: project=$GCP_PROJECT region=$GCP_REGION sa=$SA_EMAIL"
+CRED_ID="$(python3 -c 'import json,os
+d=json.load(open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]))
+print(d.get("client_email") or ("authorized_user:"+d.get("client_id","")[:18]+"... (ADC)"))')"
+echo "gcp_bootstrap: project=$GCP_PROJECT region=$GCP_REGION identity=$CRED_ID"
 
 # --- 2. install the Python clients (PyPI is reachable; gcloud CLI is NOT
 #        required — provisioning uses google-cloud-compute) --------------
