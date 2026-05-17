@@ -32,7 +32,19 @@ cache / split provenance (the chaos that cost us 3 false positives).
 >   `/root/.config/gcloud` — works this session, **not durable** across
 >   container death (re-auth or move to SA-secret to persist).
 
-**Last updated:** 2026-05-16 (GCP connected + recon verified; research ledger shipped + history backfilled + Contabo-loss/GCP migration recorded; prior synthesis 2026-05-12).
+> **Phase B first end-to-end run 2026-05-17 (`phaseb-20260517-003320`):**
+> Lost Cryptolake pipeline **reconstructed and run on GCP** (cargo build /
+> GCS / rust sim / XGB / grid / ledger all working). **H5 trust gate
+> LANDED**: MAKER_FIRST entry integrated, `parity_ok=True` for LINK & SOL
+> on 90 d of real data — every number is now MAKER-first honest. First
+> numbers are **not a strategy**: the XGB gate is degenerate (~100 %
+> take-rate) → LINK EV/tr −0.001 %, 1267 tr/day, net −23.6 %; SOL −0.001 %,
+> 645 tr/day, net −15.8 % (`exploratory` in the ledger). H2 inconclusive
+> (all PT/TS configs identical → never engaged on a trade-everything
+> baseline). **Next bottleneck = model selectivity / trade selection
+> (logged as H12, $0 eval-only).** Over-trading, not PT/TS, is the wall.
+
+**Last updated:** 2026-05-17 (Phase B first end-to-end: pipeline restored on GCP, H5 gate landed + parity verified, over-trading bottleneck found → H12; prior: GCP connected + ledger shipped 2026-05-16).
 
 ---
 
