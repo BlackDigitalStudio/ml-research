@@ -342,7 +342,27 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > experiment = stack the 3 retained weak marginals — low prior;
 > offered, not assumed.) VM auto-deleted (hard cap).
 
-**Last updated:** 2026-05-17 (HR1 REFUTED as posed — reward/loss axis tested-negative across ~7 principled pts, HM1 both-symbol bar; R1 |move|-weight = retained weak marginal [consistent, sub-noise]; R2 SOL-degenerate re-confirms cost-wall; R3 ranking neg on SOL; R4 asym null → T2 thread closed; cheap high-EV search now EARNED-closed on 3 pre-registered axes [feature/scope/reward], bounded claim NOT infinite-exhaustion; only unspent axis = HM3 representation prior ⇒ legitimate strategic fork [HD1 rev13]; prior: HR1-prereg, HM4, HA7-result, HM3, HM1).
+> **HM5 — default objective standardized 2026-05-17 (user decision).**
+> User reframed the fork: *"which reward point do we keep for ALL
+> subsequent research?"* — correctly forcing the objective standard
+> BEFORE the fork, else every future path (incl. sequence) inherits the
+> R0/MSE wrong-objective defect (mild HM2). **Decision: R1** — logloss
+> with `sample_weight ∝ |forward move|` (clip train-p99) — becomes the
+> default directional objective and `baseline_ref` (paired with the HA1
+> rank-IC anchor). Justification: R1 is the **only** reward uniformly
+> ≥ R0 (HR1: **6/6** cells both-sym×H, ΔR0 +0.002…+0.020, placebo
+> clean); the **sign consistency** is significant (one-sided sign-test
+> **p≈0.016**) though no single cell clears 2·SE — a *real-but-small*
+> effect detectable by consistency, not per-cell magnitude. Principled:
+> concentrates loss on economically-decisive moves; R0/MSE squander it
+> on untradeable sub-cost wiggles. **Bounded:** R1 is a *baseline
+> upgrade, NOT a lever/alpha* (won't alone make a strategy); reversible.
+> R2/R3/R4 rejected as defaults (R2 SOL-degenerate, R3 SOL-negative,
+> R4 null). The strategic fork (sequence-build / re-scope / stack-weak
+> / accept-no-alpha) **remains open**; whatever is chosen now runs
+> under R1. No compute launched.
+
+**Last updated:** 2026-05-17 (HM5 — default directional objective standardized to R1 [|move|-weighted logloss], baseline_ref=R1+HA1, per user "which reward do we keep for all research"; justified by HR1 sign-test 6/6 p≈0.016, bounded as baseline-upgrade-not-lever, reversible; R2/R3/R4 rejected as defaults; strategic fork STILL OPEN, runs under R1; prior: HR1-result, HM4, HA7-result, HM3, HM1).
 
 ---
 
