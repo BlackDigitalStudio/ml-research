@@ -84,7 +84,8 @@ EXP_COLUMNS = (
     "trades_per_day", "net_return_pct", "kelly_frac", "win_rate_pct",
     "base_rate_pct", "n_trades", "sharpe", "max_dd_pct", "exit_hist_json",
     "artifact_path", "artifact_sha256", "repro_cmd",
-    "kind", "alpha_target", "horizon_sec", "rank_ic_oos", "r2_oos",
+    "kind", "baseline_ref", "delta_ic",
+    "alpha_target", "horizon_sec", "rank_ic_oos", "r2_oos",
     "auc_oos", "top_decile_absmove_pct", "bot_decile_absmove_pct",
     "cost_floor_pct", "decile_monotonic", "economic_pass_loose",
     "economic_pass_strict", "n_eff",
@@ -130,10 +131,14 @@ def validate_experiment(r: dict) -> None:
         raise LedgerError(f"{eid}: params must be an object")
 
     if kind == "alpha":
-        # The alpha killer rule: an RL agent converts existing alpha, it
-        # cannot create it and cannot beat the fee/spread floor. A
-        # 'confirmed' alpha that does not clear the cost floor is the
-        # "significant but economically worthless" trap.
+        # SELECTION POLICY (schema.sql): during search, keep/kill is by
+        # ROBUST MARGINAL delta_ic vs baseline_ref — NOT this gate. The
+        # rule below ONLY restricts the word 'confirmed' (a deploy-grade
+        # claim); it must NEVER be used to write 'refuted'/discard a
+        # search building block (every block is sub-cost alone until
+        # stacked — false-negatived 3x: HZ1, HA5-scope, H3).
+        # 'refuted' for kind='alpha' := delta_ic within noise/placebo
+        # vs baseline_ref, not economic_pass_strict=0.
         if r["status"] == "confirmed" and r.get("economic_pass_strict") != 1:
             raise LedgerError(
                 f"{eid}: refusing to confirm an alpha with "

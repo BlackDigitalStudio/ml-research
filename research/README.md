@@ -70,6 +70,21 @@ significant-but-sub-cost signal is worthless (`v_alpha`, `v_alpha_audit`;
 see `PLAN.md` → *CURRENT DIRECTION*). `kind=NULL/'strategy'` = the
 owner/EV contract above.
 
+**SELECTION POLICY (mandatory — applies to every agent/session).**
+During SEARCH (`kind='alpha'`) you select what to carry forward by
+**robust marginal Δ in predictive skill vs a declared baseline**
+(`baseline_ref`, `delta_ic`; robust = exceeds noise/placebo,
+consistent across symbols/folds) — **NOT** by `economic_pass_*`. Every
+building block is sub-cost alone until stacked; using the discrete
+economic gate as a per-experiment keep/kill manufactures false
+negatives (it did 3×: HZ1, HA5-scope, H3). `economic_pass_*` are
+recorded distance-to-deploy metrics and a deploy gate **only** for a
+final candidate (`kind='strategy'` / a `confirmed` alpha). For
+`kind='alpha'`, `refuted` means **Δ within noise/placebo vs
+baseline**, never "economic_pass_strict=0". A leak-free signal that is
+sub-cost alone (e.g. HA1 ~0.08 rank-IC @30s) is the **baseline to
+stack on**, not a dead end.
+
 Backfilled rows have owner 1–7 = NULL: those metrics **were not captured**
 at the time. That gap is the chaos this ledger closes — new experiments
 must populate them.

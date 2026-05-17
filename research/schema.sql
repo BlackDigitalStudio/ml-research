@@ -132,12 +132,26 @@ CREATE TABLE experiments (
     -- cost/execution-agnostic predictive signal". kind NULL/'strategy' =
     -- an EV/owner-metric run (all rules above apply). kind='alpha' =
     -- scored by OOS rank-IC + an ECONOMIC decile filter vs the cost
-    -- floor. An RL agent can only convert existing alpha, never create
-    -- it, and it cannot beat the fee/spread floor — so a 'confirmed'
-    -- alpha MUST have economic_pass_strict=1 (cost_floor_pct = taker +
-    -- slippage haircut, ~0.13%; loose = ~0.08% maker idealised, map only).
-    -- ledger.py + v_alpha_audit enforce.
+    -- floor.
+    --
+    -- ===== SELECTION POLICY (read before judging any alpha row) =====
+    -- During SEARCH/mapping (kind='alpha'), keep/kill and "what to carry
+    -- forward" are decided by ROBUST MARGINAL Δ in predictive skill
+    -- vs a declared baseline (`baseline_ref`,`delta_ic`) — NOT by the
+    -- discrete economic gate. Every single building block is sub-cost
+    -- alone until stacked; using economic_pass to refute/kill a search
+    -- experiment manufactures false negatives (this happened 3x:
+    -- HZ1, HA5-scope, H3). `economic_pass_*` are RECORDED distance-to-
+    -- deploy metrics and a DEPLOY gate for a FINAL candidate
+    -- (kind='strategy' / a confirmed alpha), never a per-search
+    -- selector. `refuted` for kind='alpha' means "Δ within noise/
+    -- placebo vs baseline", NOT "economic_pass_strict=0". A 'confirmed'
+    -- alpha still must have economic_pass_strict=1 (that only restricts
+    -- the word 'confirmed'; it must NOT drive 'refuted'/discard).
+    -- ================================================================
     kind                    TEXT CHECK (kind IN ('alpha','strategy')),
+    baseline_ref            TEXT,    -- experiment_id this Δ is measured against
+    delta_ic                REAL,    -- marginal rank-IC lift vs baseline_ref (the SEARCH selector)
     alpha_target            TEXT,    -- fwd_logret | sign | volnorm_ret | ...
     horizon_sec             INTEGER, -- forward horizon of the target
     rank_ic_oos             REAL,    -- Spearman(pred, realized) honest OOS
@@ -230,7 +244,9 @@ WHERE status = 'confirmed'
 -- separate from the strategy frontier.
 CREATE VIEW v_alpha AS
 SELECT substr(ts,1,10) AS date, setup, symbols_json AS symbols,
-       alpha_target, horizon_sec, rank_ic_oos, auc_oos,
+       alpha_target, horizon_sec, rank_ic_oos,
+       baseline_ref, delta_ic,            -- the SEARCH selector (rank by this)
+       auc_oos,
        top_decile_absmove_pct, cost_floor_pct,
        economic_pass_loose, economic_pass_strict,
        decile_monotonic, n_eff, status

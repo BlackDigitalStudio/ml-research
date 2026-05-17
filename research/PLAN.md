@@ -38,6 +38,18 @@ Execution-neutral, on honest OOS, per symbol:
   refuses to `confirm` an alpha with `economic_pass_strict≠1`
   (`v_alpha_audit`).
 
+**SELECTION POLICY (corrected 2026-05-17 after user challenge).**
+`economic_pass_*` gates only the word `confirmed` / a final candidate.
+It is **NOT** the search keep/kill criterion. During search, rank and
+carry forward by **robust marginal `delta_ic` vs `baseline_ref`**
+(exceeds noise/placebo, consistent across symbols). Every block is
+sub-cost alone — judging blocks by the absolute economic gate
+false-negatived us 3× (HZ1, HA5-scope, H3). `refuted` for `kind=alpha`
+:= Δ within noise vs baseline. HA1's leak-free ~0.08 rank-IC @30s is
+the **signal baseline to stack on**, not a dead end; H3 BTC-lead is a
+weak symbol-inconsistent marginal contributor (LINK h30 +10 % rel IC),
+retained for stacking — not "dead".
+
 **Alpha axes (cheapest-first), in the ledger as `kind='alpha'`:**
 
 | # | Hypothesis | Axis | Compute |

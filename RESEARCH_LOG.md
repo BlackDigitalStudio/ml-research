@@ -154,7 +154,22 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > never reproduced MAKER-first) → **HD1 rev3 priority 1**. Do NOT
 > re-claim "no directional alpha" until the temporal axis is tested.
 
-**Last updated:** 2026-05-17 (H3 BTC-lead clean test REFUTED — all 3 snapshot-GBT axes negative [HA1·HA5·H3]; remaining lever = temporal/sequence representation [HD1 p1], the conspicuous never-varied axis & only prior honest best; prior: features decoded, HA5/HA6 scope correction, symmetry wall, HA1).
+> **METHODOLOGY CORRECTION 2026-05-17 (user challenge — HM1 canon).**
+> Root cause of 3 false negatives (HZ1, HA5-scope, H3): I used the
+> discrete `economic_pass` gate as a per-search keep/kill. Wrong. In the
+> search phase every block is sub-cost alone until stacked; selection is
+> by **robust marginal `delta_ic` vs a declared `baseline_ref`**, not the
+> economic gate (now canon in schema/README/PLAN/ledger.py + new fields
+> `baseline_ref,delta_ic`). Re-classified: **HA1 is NOT dead — it is the
+> leak-free directional signal baseline (~0.08 rank-IC @30s) to stack
+> on**; **H3 BTC-lead is a weak symbol-inconsistent marginal contributor
+> (LINK h30 +10 % rel IC), RETAINED for stacking, not refuted**; HA5 ≈ 0
+> marginal over already-live cols. `economic_pass_*` = recorded
+> distance-to-deploy + deploy gate for a FINAL candidate only;
+> `refuted(alpha)` := Δ within noise/placebo. Prior "all axes
+> negative / dead" framing superseded by HM1.
+
+**Last updated:** 2026-05-17 (METHODOLOGY CORRECTION HM1: select by marginal Δ vs baseline, not the economic gate [false-negatived 3×]; HA1=signal baseline not dead, H3=weak marginal retained; gate re-scoped to deploy-only; remaining lever = temporal/sequence [HD1 p1]; prior: H3/HA5/HA1, features decoded).
 
 ---
 
