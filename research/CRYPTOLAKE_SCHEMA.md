@@ -60,17 +60,48 @@ forward excursion directionally skewed, vs the ~symmetric baseline).
 
 ## features_v1 (the model input X)
 
-NB: `features_v1` is the **lost pipeline's** 59-col build; exact column
-names are unrecoverable. Families are inferred from `src/features.py
-FEATURE_KEYS` (LOB/OFI multi-window, imbalance, trade-flow/CVD,
-microprice, Kyle λ, VPIN, realized-vol, sweep, cancel, ETH/cross-exch,
-funding/OI/liquidation-proximity, horizon 30-120 s momentum/vol). Treat
-the 59 cols as opaque X; per-column provenance is a known gap.
+**DECODED 2026-05-17 (earlier "unrecoverable/opaque" claim RETRACTED —
+it was unverified laziness).** `features_v1` is the raw-56 layout of
+THIS repo's feature engine (NO `DROP_RAW_INDICES` applied — `hurst`,
+`spoof`, `large_order` are present) **+ 3 Cryptolake extension cols =
+59**. Cols 0-55 are exactly, in order (from `src/features.py
+FEATURE_KEYS` + `DROP_RAW_INDICES=[5,17,18,19,21,22,23]` +
+`rust_ingest/src/features.rs` index comments), empirically verified by
+value signatures (spread≡1 tick 0.001, funding≡1e-4, cvd ±3e5,
+hurst∈[0.35,0.66], vpin∈[0,1], kyle_lambda~1e-8, ofi_* large signed):
 
-- `features.npy` `(3602, 59) float32` — the per-decision-point feature
-  matrix. **59 cols** (≠ repo `src/features.py` 49/55 — a different/newer
-  set; treat as opaque X for modelling, do not assume FEATURE_KEYS order).
-  Row 0 ≈ zeros (warmup).
+```
+0 ofi 1 imbalance_ratio 2 imbalance_velocity 3 spread 4 depth_ratio_l5
+5 large_order 6 trade_flow_imbalance 7 trade_intensity 8 large_trade
+9 cvd 10 volatility_1s 11 vwap_deviation 12 momentum_5s 13 funding_rate
+14 eth_momentum_1s 15 eth_ofi 16 eth_leading_signal 17 open_interest_delta
+18 long_short_ratio 19 liquidation_proximity 20 spoof_score
+21 volatility_ratio 22 trade_intensity_ratio 23 hurst 24 sweep_intensity
+25 cancel_rate_diff 26 ofi_1s 27 ofi_5s 28 ofi_30s 29 ofi_divergence
+30 cross_exch_mom_500ms 31 queue_pressure 32 top3_asymmetry
+33 effective_spread_ratio 34 momentum_30s 35 momentum_60s 36 momentum_120s
+37 realized_vol_60s 38 realized_vol_120s 39 bipower_var_120s 40 ofi_60s
+41 ofi_120s 42 trade_flow_imbalance_60s 43 funding_time_to_next_min
+44 funding_basis_bps 45 microprice_deviation 46 ofi_top5_weighted
+47 kyle_lambda_60s 48 vpin_60s 49 cancel_to_trade_ratio_30s
+50 bybit_lead_lag_corr_30s 51 okx_net_flow_30s 52 bitget_net_flow_30s
+53 gateio_net_flow_30s 54 eth_momentum_60s 55 eth_btc_corr_30s
+56-58 CRYPTOLAKE_EXT (liq/OI; 56/57 small signed ±0.015 ≈ ret/delta,
+       58 count-like [-26,107] ≈ liquidation magnitude) — light-ID TODO
+```
+
+**DEAD COLUMNS in this build (empirical, LINK 2026-05-06) — material:**
+all cross-asset/ETH are 100% zero (14,15,16,30,50,51,52,53,54,55) and
+several are constant (5 large_order≡1, 18 long_short_ratio≡0, 19
+liquidation_proximity≡0.015, 20 spoof≡1, 24 sweep≡0). → models in
+HA1/HA5 effectively saw **~46 live features; the ENTIRE cross-asset/ETH
+dimension was literally zeros.** This narrows every prior negative and
+makes **H3 (BTC-lead) concretely actionable**: the cross-asset slots
+exist and are empty; BTC raw is in the same bucket to fill them.
+
+- `features.npy` `(3602, 59) float32` — per-decision-point matrix,
+  **decoded above** (raw-56 + 3 ext; ~46 live, cross-asset/ETH all
+  zero). Row 0 ≈ zeros (warmup).
 - `indices.npy` `(3602,) int64`, **monotonic**, step ≈ 220
   (`[0,220,440,...,792220]`). **`features.npy[k]` ↔ `book_parquet.row(indices[k])`**.
   → decision points = every ~220 book updates ≈ ~24 s. ~3602 decisions/day.

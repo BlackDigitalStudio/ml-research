@@ -121,7 +121,25 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > **temporal/sequence model screen** (the conspicuous untested gap).
 > Not a strategy-class pivot; a model/representation pivot, still cheap.
 
-**Last updated:** 2026-05-17 (SCOPE CORRECTION: HA5/HA6 negative bounds only the XGB-snapshot slice; "no directional alpha/pivot" RETRACTED; sequence/target-form/feature levers UNTESTED → HD1 priority 1; prior: HA5/HA6, symmetry wall, HA1, Phase B, H5).
+> **FEATURES DECODED 2026-05-17 (user challenge; "opaque/unrecoverable"
+> RETRACTED — was unverified laziness).** `features_v1` = this repo's
+> raw-56 layout (NO DROP applied) + 3 Cryptolake ext = 59; cols 0-55
+> mapped to exact FEATURE_KEYS names, empirically verified by value
+> signatures (`research/CRYPTOLAKE_SCHEMA.md`). **Material new finding:
+> ~10+ columns are DEAD in this build** — every cross-asset/ETH feature
+> is 100% zero (eth_*, cross_exch_mom, bybit/okx/bitget/gateio_net_flow)
+> and several constant (large_order≡1, spoof≡1, sweep≡0,
+> long_short_ratio≡0, liquidation_proximity≡0.015). Models in HA1/HA5
+> saw **~46 live features; the entire cross-asset dimension was
+> literally zeros.** This narrows every prior negative further AND makes
+> **H3 concretely actionable** (not "rebuild cache" — the BTC-lead slots
+> physically exist and are empty; BTC raw is in the same bucket to fill
+> them). HA5 caveat: its hand-built liq/OI/funding conditioners largely
+> DUPLICATED already-live cols (cvd, ofi_*, funding_*) — the genuinely
+> absent axis was cross-asset, untested. Decode reopens H3/HA3/HD1 with
+> real names.
+
+**Last updated:** 2026-05-17 (FEATURES DECODED: 56/59 = documented raw layout, ~10 dead incl ALL cross-asset → prior negatives on ~46-live degraded set; H3 concretely actionable; "opaque" retracted; prior: HA5/HA6 scope correction, symmetry wall, HA1, Phase B, H5).
 
 ---
 
