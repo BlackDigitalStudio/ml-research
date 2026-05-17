@@ -270,11 +270,32 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > conditioning does not recover cross-symbol directional alpha on
 > LINK/SOL snapshot+events. The "exhausted" framing is now **earned**
 > (systematic, not the 1-point over-claim). HM3 corollary **intact**:
-> representation-bound, NOT "no alpha". No cheap directional screen
-> remains → genuinely the strategic fork (adopt-sequence-and-build /
-> class·instrument pivot / re-scope testbed). VM auto-deleted (hard cap).
+> representation-bound, NOT "no alpha". VM auto-deleted (hard cap).
+> **[rev10's "no cheap screen remains → strategic fork" is RETRACTED —
+> see HM4 / HA7→HM4 block below; HA7 closed scope-as-subset/label/gating,
+> NOT the reward/loss-structure axis.]**
 
-**Last updated:** 2026-05-17 (HA7 REFUTED as posed — strict both-symbol Bonferroni bar met by 0/~90 cells; pooled ≈0.51 not a pooling artifact; T2_asym = weak cross-symbol marginal retained per HM1; rare-regime liqburst structurally underpowered; snapshot-scope axis now EARNED-closed; HM3 corollary intact [representation-bound, not "no alpha"]; HD1 rev10 → strategic fork, no cheap screen left; prior: HA7-prereg, HM3, HA2/HM2, HM1).
+> **HM4 — REWARD/LOSS-STRUCTURE axis is OPEN 2026-05-17 (user challenge,
+> 2nd same-pattern catch).** "Representation is not an axis of how the
+> model is rewarded/punished — did you really exhaust *that*?" Correct
+> answer: **no.** The training reward/loss structure was sampled at
+> **~3 points** total — MSE(signed-return) [HA1], logloss(sign) [HA2a],
+> MSE(vol-norm) [HA2b]; **HA7 added zero** (every cell = plain logloss
+> `_xgbc`, only subset/label/gating varied). I folded that 2–3-point
+> sample into "objective exhausted" (HD1 rev10) and **deflected the
+> remaining search onto representation/HM3** — the exact HA7 over-claim
+> pattern, repeated. **Genuinely never tested** under MAKER-first /
+> honest-OOS / Δ-AUC-vs-HA1 judging: (i) error-weighting by economic
+> |move| or signed-PnL, (ii) ranking / IC objective (`rank:pairwise`;
+> HM2-rev1 named "sign-weighted/IC loss", never run), (iii) asymmetric
+> up/down misclassification cost (motivated by T2_asym — the lone
+> non-null HA7 thread). This axis is **distinct from representation**
+> (HM3) and from **scope-as-subset** (HA7), is **OPEN**, and is **cheap**
+> (same harness). HD1 rev11: priority-1 cheap screen = the reward/loss
+> sweep, **pre-register then run on user go** (not launched mid-challenge).
+> The strategic fork is **NOT** yet reached.
+
+**Last updated:** 2026-05-17 (HM4 canon + HD1 rev11 — 2nd self-corrected "axis exhausted from k≤3 points" over-claim this session: reward/loss-structure ≠ representation ≠ scope-as-subset; objective sampled at ~3 pts, HA7 added 0; "objective exhausted→strategic fork" RETRACTED; open+cheap = error-weighting / ranking-IC / asymmetric-cost screen, to pre-register then run on user go; HA7 result stands for what it tested; prior: HA7-result, HM3, HA2/HM2, HM1).
 
 ---
 
