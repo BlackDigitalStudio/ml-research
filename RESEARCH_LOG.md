@@ -103,7 +103,25 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > timeframe / higher-fidelity events), different asset class, or accept
 > no directional alpha here. **Needs a human decision before more compute.**
 
-**Last updated:** 2026-05-17 (HA5/HA6 decisive negative: vol predictable / direction NOT, directional scalp on LINK/SOL non-viable, triple-confirmed → HZ1 strategy-class pivot decision; prior: symmetry wall, HA1, Phase B, H5, ledger).
+> **SCOPE CORRECTION 2026-05-17 (over-claim retracted, user challenge).**
+> The HA5/HA6 block above is correct about *what was measured* but the
+> phrase "directional scalp non-viable / no directional alpha / pivot
+> strategy class" **outran the evidence**. Everything run for direction
+> (HA1, HA5/HA6, phaseb-003320) shares ONE unvaried slice: **GBT (XGB)
+> on a single-tick flattened `features_v1` snapshot** (lost-provenance,
+> unverified) + a few hand event aggs; no sequence/temporal model, no
+> target-form/feature/cross-asset/ensemble variation, no HP search. The
+> negatives bound **only that slice**, not achievable directional
+> predictability. Critically, the only prior *honest* best result was a
+> **sequence model (LINK TCN −0.040), never reproduced MAKER-first** —
+> snapshot-GBT discards the order-flow *dynamics* where short-horizon
+> direction lives. **HZ1 (pivot) RETRACTED → refuted.** Real open
+> surface = **HD1** (priority 1): direction-improvement cluster —
+> HA2 target-form + HA3 feature work ($0 on built cache), then a
+> **temporal/sequence model screen** (the conspicuous untested gap).
+> Not a strategy-class pivot; a model/representation pivot, still cheap.
+
+**Last updated:** 2026-05-17 (SCOPE CORRECTION: HA5/HA6 negative bounds only the XGB-snapshot slice; "no directional alpha/pivot" RETRACTED; sequence/target-form/feature levers UNTESTED → HD1 priority 1; prior: HA5/HA6, symmetry wall, HA1, Phase B, H5).
 
 ---
 
