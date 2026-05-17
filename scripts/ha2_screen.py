@@ -225,10 +225,13 @@ def run(bk, sc, sym, days, run_id, git):
         xauc = res["xasset"]["auc"]
         eL = int(cap is not None and cap > F_LOOSE / 100)
         eS = int(cap is not None and cap > 0)   # capture already net of floor
+        # HM1: economic must NOT drive status. Auto-status caps at
+        # 'suspect'; 'confirmed' is a human/pre-registered both-symbol
+        # decision, never from cap>0 at near-chance AUC (HA5/HA2 artifact).
         status = "exploratory"
         if (xauc is not None and xauc > 0.52 and plc is not None
                 and abs(plc - 0.5) < 0.02 and (d_auc or 0) > 0):
-            status = "suspect" if not eS else "confirmed"
+            status = "suspect"
         recs.append({
             "experiment_id": f"{run_id}_HA2_{sym}_H{H}",
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

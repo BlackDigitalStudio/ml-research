@@ -188,7 +188,29 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > vol-normalised target vs the HA1 MSE baseline, judged by directional
 > AUC + Δ per HM1); temporal demoted to "only if HA2 still ~0.5".
 
-**Last updated:** 2026-05-17 (OBJECTIVE AUDIT HM2: HA1/H3 rewarded magnitude not direction [reg:squarederror], HA5-head1 0.70 tautological; directional ceiling never cleanly tested → HA2 directional-objective screen = priority 1, before temporal; prior: HM1 selection fix, H3/HA5/HA1, features decoded).
+> **HA2 directional two-head — REFUTED as posed; HM2 self-corrected
+> 2026-05-17 (`phaseb-20260517-154705`, 6 rows).** Fixed objective
+> (directional logloss) + per-head scope (head2 trains on ≥cost subset
+> only) + real BTC+ETH cross-asset inputs — all at once, never before.
+> Result: head2 **base** (features_v1, correct objective+scope) AUC
+> **0.505–0.512 ≈ coin-flip on BOTH symbols**. ⇒ **HM2 partially
+> REFUTED**: the objective *was* magnitude-rewarding (still canon for
+> future agents) but fixing it did **not** reveal hidden directional
+> alpha — the ~0.51 snapshot ceiling is **robust across
+> feature-dimension (HA1·H3·HA5) AND objective×scope (HA2)**. +BTC+ETH:
+> LINK Δ≈0 (flat), SOL Δ +0.009→+0.016 AUC ~0.52–0.525 placebo-clean =
+> a **faint SOL-only sub-cost whisper** (mirrors H3, not a lever).
+> Pre-registered bar (AUC>0.52 BOTH symbols) failed on LINK → not
+> confirmed. The runner auto-`confirmed` SOL300/600 via an
+> economic-cap-sign-at-chance-AUC artifact (HM1 violation) — caught,
+> forced `exploratory`, runner patched, `v_alpha_audit=0`. The single
+> never-varied axis is now unambiguous: **REPRESENTATION
+> (temporal/sequence)** — HD1 priority 1; the only prior honest best
+> was a TCN, never reproduced MAKER-first. If a sequence model also
+> ≈0.51, directional alpha is genuinely absent at scalp horizons →
+> deliberate instrument/cost pivot (not before).
+
+**Last updated:** 2026-05-17 (HA2 REFUTED as posed + HM2 self-corrected: snapshot direction ≈0.51 ROBUST across features×objective×scope [not an objective artifact]; cross-asset = faint SOL-only sub-cost whisper; runner spurious-confirmed artifact caught+patched; only untested axis = temporal/sequence [HD1 p1]; prior: HM2, HM1, H3/HA5/HA1).
 
 ---
 
