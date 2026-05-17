@@ -226,7 +226,31 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > premature HZ1): adopt-sequence-and-build vs class/instrument pivot vs
 > re-scope testbed — a human call, not another screen.
 
-**Last updated:** 2026-05-17 (HM3 accepted-prior: sequence-lift assumed not tested → temporal/H1/H8 descoped, HA6 refuted; cheap snapshot-directional search EXHAUSTED [≈0.51 robust, NOT 'no alpha' per HM3 corollary]; converged to a strategic decision point; prior: HA2/HM2, HM1, H3/HA5/HA1).
+> **HA7 SCOPE SWEEP — pre-registered 2026-05-17 (user challenge).** The
+> "snapshot-directional search **exhausted**" framing in the HM3 block
+> above was an **over-claim on the SCOPE sub-axis** (my recurring error
+> pattern; user caught it). Scope is a *direct* lever on **conditional**
+> predictability (≠ objective tuning, ≠ unconditional AUC): HA1/HA5/HA2
+> tested essentially **one** scope point — the pooled ≥cost head2 (~0.51).
+> One hard constraint reshapes "sweep more" into "sweep the *uncovered*":
+> for a GBT **feature-inclusion ≥ hard-subset** (the tree carves the
+> conditional itself), and HA5/HA2 already fed liq/OI/funding/features_v1
+> as *features* at ≈chance → broad-conditioner scope is covered. The
+> genuinely uncovered, pre-registered axes (`scripts/ha7_screen.py`,
+> FROZEN, no post-hoc DOF): **(A)** regime-bucket head2 — heterogeneity /
+> rare-regime loss-dilution (11 cells); **(B)** alt barrier/target
+> definitions (T0±0.13 control / T1±0.25 / T2 asym / T3 signed-deadband);
+> **(C)** head1-gated cascade (realistic deploy scope). **Strict bar:**
+> block-bootstrap |AUC−0.5|/SE > Bonferroni z\*(α0.05/M) ∧ placebo≈0.5 ∧
+> AUC>0.5 ∧ **same cell on BOTH symbols**; no auto-`confirmed` (HM1).
+> Orthogonal to **HM3** — HM3 descopes the *sequence/representation*
+> prior; HA7 completes the under-tested *scope* axis **within snapshot**.
+> HM3's corollary (≈0.51 ≠ "no alpha", representation-bound) **unchanged**.
+> If HA7's strict both-symbol bar is not met → snapshot-scope is then
+> genuinely closed (still not "no alpha"). Pre-registered & committed
+> **before** the run (HA7 rev1, HM2 rev3, HD1 rev9).
+
+**Last updated:** 2026-05-17 (HA7 pre-registered: scope axis re-opened — HM3-block "exhausted" was a SCOPE over-claim [user challenge]; 3-axis sweep [regime-bucket / alt-barrier / head1-gated], strict Bonferroni+both-symbol bar, GBT feature-inclusion≥subset prior recorded; HM3 sequence-descope & corollary UNCHANGED & orthogonal; prior: HM3, HA2/HM2, HM1, H3/HA5/HA1).
 
 ---
 
