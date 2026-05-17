@@ -101,10 +101,20 @@ def _load_events(bk, sc, sym, day):
     return out
 
 
+# FIXED conditioner schema — every day emits exactly these columns in
+# this order, zero-filled when the event stream is absent that day. A
+# variable per-day width is the ragged-concat bug (same class as
+# phase_b_run._collect); a fixed schema kills it structurally.
+COND_KEYS = ("liq_sq_30s", "liq_n_30s", "liq_sq_120s", "liq_n_120s",
+             "oi_d_120s", "fu_rate", "fu_basis")
+
+
 def _cond_feats(t0, ev):
-    """Causal event/regime conditioners at entry ts t0 (ns), vectorised."""
+    """Causal event/regime conditioners at entry ts t0 (ns). Always
+    returns (n, len(COND_KEYS)) in COND_KEYS order; 0 where stream
+    missing."""
     n = t0.shape[0]
-    F = {}
+    F = {k: np.zeros(n, np.float64) for k in COND_KEYS}
     if "liq_ts" in ev:
         lt, lq = ev["liq_ts"], ev["liq_sq"]
         cum = np.concatenate([[0.0], np.cumsum(lq)])
@@ -125,10 +135,7 @@ def _cond_feats(t0, ev):
         j = np.clip(np.searchsorted(ft, t0, "right") - 1, 0, len(ft) - 1)
         F["fu_rate"] = ev["fu_rate"][j]
         F["fu_basis"] = ev["fu_basis"][j]
-    if not F:
-        return np.zeros((n, 0)), []
-    keys = sorted(F)
-    return np.column_stack([F[k] for k in keys]), keys
+    return np.column_stack([F[k] for k in COND_KEYS]), list(COND_KEYS)
 
 
 def _first_passage(mid, i0, jH, m0, f):
