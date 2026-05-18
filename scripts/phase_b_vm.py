@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -87,9 +88,22 @@ def _sh(cmd: list[str]) -> str:
                           check=True).stdout.strip()
 
 
+def _creds():
+    """Explicit bearer creds when GCP_ACCESS_TOKEN is set (phone path:
+    a raw ~1 h OAuth token used ONLY for the short launch/status/ingest
+    bursts — the multi-hour screen runs on the VM's own attached SA).
+    None => google libs fall back to ADC (SA / authorized_user JSON)."""
+    tok = os.environ.get("GCP_ACCESS_TOKEN")
+    if not tok:
+        return None
+    import google.oauth2.credentials
+    return google.oauth2.credentials.Credentials(token=tok)
+
+
 def _gcs():
     from google.cloud import storage
-    return storage.Client(project=PROJECT).bucket(BUCKET)
+    return storage.Client(project=PROJECT,
+                           credentials=_creds()).bucket(BUCKET)
 
 
 def cmd_launch(a) -> int:
@@ -100,12 +114,14 @@ def cmd_launch(a) -> int:
     # lowercase, hyphens only. run_id doubles as the instance name.
     run_id = time.strftime("phaseb-%Y%m%d-%H%M%S", time.gmtime())
     mode = getattr(a, "mode", "alpha")
-    if mode == "baseline":
-        # HM6 standardized baseline_ref. baseline_360.py has the 4
-        # symbols {LINK,SOL,BTC,ETH} + common-aligned 360d window
-        # FROZEN internally (canon HM6) — NO --symbols/--days here.
-        runner = ('python3 scripts/baseline_360.py --run-id "$RUN_ID" '
-                  '--git-commit "$GIT"')
+    if mode in ("baseline", "ha3"):
+        # HM6-testbed screens with the symbol set + common-aligned 360d
+        # window FROZEN internally (canon HM6) — NO --symbols/--days
+        # here. baseline_360 = the baseline_ref; ha3_screen = the
+        # pre-registered feature-localization screen (HA3 rev2).
+        script = {"baseline": "baseline_360", "ha3": "ha3_screen"}[mode]
+        runner = (f'python3 scripts/{script}.py --run-id "$RUN_ID" '
+                  f'--git-commit "$GIT"')
         need_rust = "false"   # screen-type, no sim -> skip cargo build
     elif mode in ("alpha", "ha5", "h3", "ha2", "ha7", "hr1"):
         script = {"alpha": "alpha_screen", "ha5": "ha5_screen", "ha2": "ha2_screen",
@@ -130,7 +146,8 @@ def cmd_launch(a) -> int:
     print(f"uploaded src.tar.gz ({tar.stat().st_size/1e6:.1f} MB)")
 
     # 2. create the VM with a Compute-enforced hard cost cap
-    img = compute_v1.ImagesClient().get_from_family(
+    cr = _creds()
+    img = compute_v1.ImagesClient(credentials=cr).get_from_family(
         project="debian-cloud", family="debian-12").self_link
     inst = compute_v1.Instance(
         name=run_id,
@@ -157,7 +174,7 @@ def cmd_launch(a) -> int:
             compute_v1.Items(key="runner_cmd", value=runner),
             compute_v1.Items(key="need_rust", value=need_rust)]),
         labels={"purpose": "scalper-phase-b", "run": run_id.lower()[:60]})
-    op = compute_v1.InstancesClient().insert(
+    op = compute_v1.InstancesClient(credentials=cr).insert(
         project=PROJECT, zone=ZONE, instance_resource=inst)
     op.result(timeout=120)
     print(f"VM created: {inst.name} ({MACHINE}, {ZONE}) "
@@ -173,16 +190,17 @@ def cmd_launch(a) -> int:
     with VM_RUNS.open("a") as f:
         f.write(json.dumps(rec) + "\n")
     try:
+        branch = _sh(["git", "rev-parse", "--abbrev-ref", "HEAD"])
         subprocess.run(["git", "add", str(VM_RUNS)], cwd=REPO, check=True)
         subprocess.run(["git", "commit", "-m",
                         f"chore(phase-b): record VM {inst.name} "
                         f"(hard-cap {MAX_RUN_SEC}s, auto-delete)\n\n"
-                        f"https://claude.ai/code/session_014vNLDoetV7qyjB9LyLzDxT"],
+                        f"https://claude.ai/code/session_01UHSj53xrbpSGjkmJrPidMz"],
                        cwd=REPO, check=True)
-        subprocess.run(["git", "push", "-u", "origin",
-                        "claude/explore-trading-algorithm-6oLeW"],
+        subprocess.run(["git", "push", "-u", "origin", branch],
                        cwd=REPO, check=True)
-        print("VM identity recorded + pushed (findable/killable if I die)")
+        print(f"VM identity recorded + pushed to {branch} "
+              f"(findable/killable if I die)")
     except subprocess.CalledProcessError as e:
         print(f"WARN: durable-record push failed: {e}")
     print(f"\nMonitor: python scripts/phase_b_vm.py status --run-id {run_id}")
@@ -192,7 +210,7 @@ def cmd_launch(a) -> int:
 def cmd_status(a) -> int:
     from google.cloud import compute_v1
     name = a.run_id.replace("_", "-")
-    ic = compute_v1.InstancesClient()
+    ic = compute_v1.InstancesClient(credentials=_creds())
     try:
         vm = ic.get(project=PROJECT, zone=ZONE, instance=name)
         print(f"VM {name}: {vm.status}")
@@ -256,7 +274,7 @@ def main(argv=None) -> int:
     lp = s.add_parser("launch")
     lp.add_argument("--mode",
                     choices=("alpha", "ha5", "h3", "ha2", "ha7", "hr1",
-                             "phaseb", "baseline"),
+                             "ha3", "phaseb", "baseline"),
                     default="alpha")
     for c in ("status", "ingest"):
         sp = s.add_parser(c)

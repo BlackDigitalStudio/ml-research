@@ -30,32 +30,56 @@ GCP_ZONE="${GCP_ZONE:-europe-west1-b}"
 
 die() { echo "gcp_bootstrap: $*" >&2; exit 1; }
 
-# --- 1. materialise credentials from the environment secret ---------------
-if [[ -n "${GCP_SA_KEY_B64:-}" ]]; then
-  mkdir -p "$CRED_DIR"
-  printf '%s' "$GCP_SA_KEY_B64" | base64 -d > "$CRED_FILE"
+# Default project when the credential carries none (ADC / bare token):
+# the canonical Cryptolake-asset project (recon 2026-05-16, RESEARCH_LOG
+# / CRYPTOLAKE_SCHEMA.md). Overridable via $GCP_PROJECT.
+DEFAULT_GCP_PROJECT="project-26a24ad0-1059-4f73-93b"
+
+# --- 1. materialise the credential -----------------------------------------
+# Three accepted modes, in priority order (all via env secret only):
+#   A) GCP_ACCESS_TOKEN  — a raw OAuth2 bearer token (~1 h). Phone-
+#      friendly: `gcloud auth print-access-token` in Cloud Shell, paste
+#      the one line. The container only uses creds for SHORT bursts
+#      (VM launch ~1-2 min, status/ingest ~sec); the multi-hour screen
+#      runs on the VM's OWN attached SA (metadata) — so ~1 h is ample
+#      and token expiry mid-run loses nothing (results are durable in
+#      GCS, VM self-deletes; re-paste a fresh token only for ingest).
+#   B) GCP_SA_KEY / _B64 — JSON: an SA key OR a user-ADC
+#      ("authorized_user", from `gcloud auth application-default login`;
+#      org policy iam.disableServiceAccountKeyCreation forbids SA keys
+#      here — ADC is not an SA key and is allowed).
+#   C) a pre-materialised $CRED_FILE from earlier this session.
+if [[ -n "${GCP_ACCESS_TOKEN:-}" ]]; then
+  CRED_MODE="token"
+elif [[ -n "${GCP_SA_KEY_B64:-}" ]]; then
+  mkdir -p "$CRED_DIR"; printf '%s' "$GCP_SA_KEY_B64" | base64 -d > "$CRED_FILE"
+  CRED_MODE="json"
 elif [[ -n "${GCP_SA_KEY:-}" ]]; then
-  mkdir -p "$CRED_DIR"
-  printf '%s' "$GCP_SA_KEY" > "$CRED_FILE"
+  mkdir -p "$CRED_DIR"; printf '%s' "$GCP_SA_KEY" > "$CRED_FILE"
+  CRED_MODE="json"
 elif [[ -f "$CRED_FILE" ]]; then
-  : # already materialised this session
+  CRED_MODE="json"   # already materialised this session
 else
-  die "no credentials. Set the environment secret GCP_SA_KEY (raw JSON:
-  either an SA key OR a user-ADC authorized_user file from 'gcloud auth
-  application-default login') or GCP_SA_KEY_B64 (base64). This is the
-  ONLY accepted channel — do not paste it into chat or commit it."
+  die "no credentials. Set ONE env secret: GCP_ACCESS_TOKEN (raw OAuth
+  bearer, phone-friendly), or GCP_SA_KEY / GCP_SA_KEY_B64 (JSON: SA key
+  or user-ADC). Env-secret channel ONLY — never chat, never committed."
 fi
-chmod 600 "$CRED_FILE"
 
 case "$CRED_DIR" in
   "$PWD"/*|"$PWD") die "refusing: credential dir $CRED_DIR is inside the
   repo. Set GCP_CRED_DIR outside the working tree." ;;
 esac
-# Default project when the credential carries none (authorized_user ADC
-# has no project_id): the canonical Cryptolake-asset project (recon
-# 2026-05-16, RESEARCH_LOG / CRYPTOLAKE_SCHEMA.md). Overridable.
-DEFAULT_GCP_PROJECT="project-26a24ad0-1059-4f73-93b"
-python3 - "$CRED_FILE" <<'PY' || die "credential is not valid JSON / not a service_account key nor an authorized_user ADC"
+
+if [[ "$CRED_MODE" == "token" ]]; then
+  # bare token: nothing on disk; google libs get explicit creds (see
+  # scripts/phase_b_vm.py::_creds). project must come from env/default.
+  unset GOOGLE_APPLICATION_CREDENTIALS || true
+  GCP_PROJECT="${GCP_PROJECT:-$DEFAULT_GCP_PROJECT}"
+  export GCP_ACCESS_TOKEN GCP_PROJECT GCP_REGION GCP_ZONE
+  echo "gcp_bootstrap: project=$GCP_PROJECT region=$GCP_REGION identity=oauth-access-token(~1h)"
+else
+  chmod 600 "$CRED_FILE"
+  python3 - "$CRED_FILE" <<'PY' || die "credential is not valid JSON / not a service_account key nor an authorized_user ADC"
 import json, sys
 d = json.load(open(sys.argv[1]))
 t = d.get("type")
@@ -67,19 +91,17 @@ elif t == "authorized_user":
 else:
     raise SystemExit(f"unsupported credential type {t!r} (need service_account or authorized_user)")
 PY
-
-export GOOGLE_APPLICATION_CREDENTIALS="$CRED_FILE"
-# project: SA key -> project_id; ADC -> quota_project_id or $GCP_PROJECT
-# or the canonical default. identity label is type-dependent.
-GCP_PROJECT="${GCP_PROJECT:-$(python3 -c 'import json,os
+  export GOOGLE_APPLICATION_CREDENTIALS="$CRED_FILE"
+  GCP_PROJECT="${GCP_PROJECT:-$(python3 -c 'import json,os
 d=json.load(open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]))
 print(d.get("project_id") or d.get("quota_project_id") or "")')}"
-GCP_PROJECT="${GCP_PROJECT:-$DEFAULT_GCP_PROJECT}"
-export GOOGLE_APPLICATION_CREDENTIALS GCP_PROJECT GCP_REGION GCP_ZONE
-CRED_ID="$(python3 -c 'import json,os
+  GCP_PROJECT="${GCP_PROJECT:-$DEFAULT_GCP_PROJECT}"
+  export GOOGLE_APPLICATION_CREDENTIALS GCP_PROJECT GCP_REGION GCP_ZONE
+  CRED_ID="$(python3 -c 'import json,os
 d=json.load(open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]))
 print(d.get("client_email") or ("authorized_user:"+d.get("client_id","")[:18]+"... (ADC)"))')"
-echo "gcp_bootstrap: project=$GCP_PROJECT region=$GCP_REGION identity=$CRED_ID"
+  echo "gcp_bootstrap: project=$GCP_PROJECT region=$GCP_REGION identity=$CRED_ID"
+fi
 
 # --- 2. install the Python clients (PyPI is reachable; gcloud CLI is NOT
 #        required — provisioning uses google-cloud-compute) --------------
@@ -101,7 +123,15 @@ proj = os.environ["GCP_PROJECT"]
 region = os.environ["GCP_REGION"]
 buckets = ["blackdigital-scalper-data", "scalper-bot-research-data"]
 
-sc = storage.Client(project=proj)
+# token mode: explicit bearer creds (no ADC on disk). JSON mode: None
+# -> google libs discover GOOGLE_APPLICATION_CREDENTIALS as before.
+_tok = os.environ.get("GCP_ACCESS_TOKEN")
+creds = None
+if _tok:
+    import google.oauth2.credentials
+    creds = google.oauth2.credentials.Credentials(token=_tok)
+
+sc = storage.Client(project=proj, credentials=creds)
 for b in buckets:
     try:
         bk = sc.bucket(b)
@@ -110,7 +140,7 @@ for b in buckets:
     except Exception as e:
         print(f"  storage WARN gs://{b}: {type(e).__name__}: {e}")
 
-zc = compute_v1.ZonesClient()
+zc = compute_v1.ZonesClient(credentials=creds)
 zs = [z.name for z in zc.list(project=proj) if z.name.startswith(region)]
 print(f"  compute OK  {len(zs)} zones in {region}: {zs[:4]}")
 print("gcp_bootstrap: auth + storage + compute verified.")
