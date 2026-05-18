@@ -502,18 +502,42 @@ def _parity_gate():
           "contract.")
 
 
-@app.local_entrypoint()
-def main(dry: int = 0):
-    _parity_gate()
+@app.function(image=RED_IMG, volumes={MNT: VOL}, timeout=21600)
+def coordinator(dry: int = 0):
+    """SERVER-SIDE orchestration (HD1 rev27 fix). The full
+    plan->egress-gate->build->reduce->cost-guard-sweep->§5-GATE runs
+    inside Modal, NOT the local entrypoint, so a local/sandbox
+    disconnect can no longer orphan the run (Modal's advised .spawn
+    pattern). Numeric/frozen content (GATE math, cost-guard thresholds,
+    ingest record schema) is byte-identical to the pre-refactor path;
+    only the execution location + sink (Volume /out/<run_id>/) changed.
+    Durable repo write (experiments.jsonl + research.db) stays LOCAL
+    via _collect_from_volume — the repo lives where the entrypoint is."""
+    import os
+    sys.path.insert(0, "/root/proj")
+    from scripts import hd1_seq_core as C
+    from research import ledger as L
+
+    run_id = f"hd1seq-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}"
+    outd = f"{MNT}/out/{run_id}"
+
+    def _w(name, txt):
+        os.makedirs(outd, exist_ok=True)
+        with open(f"{outd}/{name}", "w") as fh:
+            fh.write(txt)
+        os.makedirs(f"{MNT}/out", exist_ok=True)
+        with open(f"{MNT}/out/LATEST", "w") as fh:
+            fh.write(run_id)
+        VOL.commit()
 
     plan = plan_window.remote()
     psd = plan["psd"]
-    syms_days = [(s, d) for s in SYMS for d in psd[s]]
-    n_sd = len(syms_days)
+    n_sd = sum(len(psd[s]) for s in SYMS)
     print(f"[plan] window {plan['winlo']}..{plan['winhi']} "
           f"days/sym={ {s: len(psd[s]) for s in SYMS} } total_sd={n_sd}")
+    if not dry:
+        _w("STARTED", run_id)
 
-    # --- pre-flight egress: sample 1 day per symbol, extrapolate -------
     probe = [(s, psd[s][len(psd[s]) // 2]) for s in SYMS if psd[s]]
     meas = list(measure_egress.starmap(probe))
     by_sym_bytes = {m["sym"]: m["bytes"] for m in meas}
@@ -521,7 +545,6 @@ def main(dry: int = 0):
                      if s in by_sym_bytes)
     egress_gb = proj_bytes / 2**30
     egress_usd = egress_gb * GCS_EGRESS_PER_GB
-    # compute estimate: 288 train ~8min L4 + 16 build·reduce CPU + probes
     train_usd = 288 * 8 * 60 * PRICE["L4"]
     cpu_usd = (n_sd + len(SYMS)) * 120 * PRICE["CPU_CORE"] * 2
     proj_total = egress_usd + train_usd + cpu_usd
@@ -531,28 +554,24 @@ def main(dry: int = 0):
           f"+cpu≈${cpu_usd:.2f}  => PROJECTED TOTAL ${proj_total:.2f} "
           f"(budget ${BUDGET})")
     if proj_total > BUDGET:
-        raise SystemExit(
-            f"ABORT: projected ${proj_total:.2f} > budget ${BUDGET}. "
-            f"Egress dominates (${egress_usd:.2f}). Not transferring. "
-            f"Options: (1) raise budget; (2) re-freeze §3 with fewer LOB "
-            f"levels/days. Reporting to user — no spend incurred.")
+        msg = (f"ABORT: projected ${proj_total:.2f} > budget ${BUDGET}. "
+               f"Egress dominates (${egress_usd:.2f}). Not transferring. "
+               f"Reporting to user — no spend incurred.")
+        print(msg)
+        if not dry:
+            _w("ABORT", msg)
+        return {"run_id": run_id, "aborted": True, "msg": msg}
     if dry:
         print("[dry] measure+plan only; stopping before build.")
-        return
+        return {"run_id": run_id, "dry": True}
 
-    # --- build (fan-out) + reduce -------------------------------------
-    args = [(s, d, di) for s in SYMS
-            for di, d in enumerate(psd[s])]
+    args = [(s, d, di) for s in SYMS for di, d in enumerate(psd[s])]
     built = list(build_symbol_day.starmap(args))
     n_dp = sum(b.get("n_dp", 0) for b in built)
     print(f"[build] {len(built)} shards, total decision points={n_dp}")
     red = list(reduce_symbol.map(SYMS))
     for r in red:
         print(f"[reduce] {r}")
-
-    # --- sweep with pre-registered cost-guard degradation -------------
-    sys.path.insert(0, str(REPO))
-    from scripts import hd1_seq_core as C
 
     def make_grid(degrade):
         seeds = (0, 1) if degrade >= 1 else C.SEED_GRID
@@ -564,9 +583,9 @@ def main(dry: int = 0):
     for si, sym in enumerate(SYMS):
         seeds, Ds = make_grid(degrade)
         calls = []
-        for L in L_GRID:
+        for Lc in L_GRID:
             grid = [(H, D, sd) for H in HS for D in Ds for sd in seeds]
-            calls.append((sym, L, grid))
+            calls.append((sym, Lc, grid))
         for out in train_cell.starmap(calls):
             results[(out["sym"], out["L"])] = out["res"]
             spent += out["res"].get("_gpu_seconds", 0) * PRICE["L4"]
@@ -574,23 +593,168 @@ def main(dry: int = 0):
         proj = egress_usd + cpu_usd + spent / max(done_frac, 1e-6)
         print(f"[cost] after {sym}: spent≈${spent:.2f} "
               f"proj_total≈${proj:.2f} degrade={degrade}")
+        _w("PROGRESS", f"after {sym}: spent={spent:.2f} "
+                       f"proj={proj:.2f} degrade={degrade}")
         if proj > COST_GUARD and degrade < 2:
             degrade += 1
             print(f"[cost-guard] proj>${COST_GUARD} -> degrade={degrade} "
                   f"(pre-registered; primary axis L untouched)")
 
-    # --- ingest: 12 cells, frozen §5 gate -----------------------------
-    _ingest(results, plan, egress_usd + cpu_usd + spent)
+    total_cost = egress_usd + cpu_usd + spent
+    res_doc, recs = _build_ingest_doc(run_id, results, plan, total_cost)
+    ok, lines = 0, []
+    for r in recs:
+        if "error" in r and "experiment_id" not in r:
+            continue
+        try:
+            L.validate_experiment(r)
+        except L.LedgerError as e:
+            print(f"[ingest] SKIP invalid: {e}")
+            continue
+        lines.append(json.dumps(r, default=str))
+        ok += 1
+    _w("results.json", json.dumps(res_doc, indent=2, default=str))
+    _w("recs.jsonl", ("\n".join(lines) + "\n") if lines else "")
+    _w("meta.json", json.dumps({"run_id": run_id, "ok": ok,
+                                "n_total": len(recs),
+                                "approx_cost_usd": round(total_cost, 2)}))
+    _w("DONE", run_id)
+    print(f"[ingest] {ok}/{len(recs)} valid recs -> Volume /out/{run_id}; "
+          f"DONE written (local --collect appends repo experiments.jsonl).")
     print("HD1_SEQ_DONE")
+    return {"run_id": run_id, "ok": ok, "n_total": len(recs),
+            "approx_cost_usd": round(total_cost, 2)}
 
 
-def _ingest(results, plan, total_cost):
-    import numpy as np
+def _vol_text(remote_path):
+    """Read a small Volume file to a string via the CLI (`get - `)."""
+    import subprocess
+    g = subprocess.run([sys.executable, "-m", "modal", "volume", "get",
+                        "hd1-seq-cache", remote_path, "-"],
+                       capture_output=True, text=True)
+    return g.stdout if g.returncode == 0 else None
+
+
+def _poll_volume_done(timeout_s):
+    """Poll the Volume for the coordinator's DONE/ABORT marker. Source
+    of truth is the Volume (persists independent of any client), so a
+    dead local poller never loses the run — re-attach with --collect."""
+    import subprocess
+    import time as _t
+    t0, rid = _t.time(), None
+    while _t.time() - t0 < timeout_s:
+        if rid is None:
+            s = _vol_text("/out/LATEST")
+            if s and s.strip():
+                rid = s.strip().splitlines()[-1].strip()
+                print(f"[poll] coordinator run_id={rid} "
+                      f"(server-side; survives local disconnect)")
+        if rid:
+            ls = subprocess.run([sys.executable, "-m", "modal", "volume",
+                                 "ls", "hd1-seq-cache", f"/out/{rid}"],
+                                capture_output=True, text=True)
+            o = ls.stdout or ""
+            if "ABORT" in o:
+                return "__ABORT__"
+            if "DONE" in o:
+                return rid
+        _t.sleep(30)
+    return "__TIMEOUT__" if rid else "__NOLATEST__"
+
+
+def _collect_from_volume(run_id):
+    """LOCAL durable ingest: pull the coordinator's /out/<run_id> from
+    the Volume, write repo results.json + append research/experiments.jsonl
+    + rebuild research.db. Idempotent re-attach point: safe to run any
+    time after the server-side coordinator finished."""
+    import subprocess
+    import tempfile
+    import argparse
     sys.path.insert(0, str(REPO))
-    from scripts import hd1_seq_core as C
     from research import ledger as L
 
-    run_id = f"hd1seq-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}"
+    tmp = tempfile.mkdtemp(prefix="hd1seq_collect_")
+    subprocess.run([sys.executable, "-m", "modal", "volume", "get",
+                    "hd1-seq-cache", f"/out/{run_id}", tmp], check=True)
+    root = Path(tmp)
+
+    def _f(name):
+        c = list(root.rglob(name))
+        if not c:
+            raise SystemExit(f"[collect] {name} missing in Volume "
+                             f"/out/{run_id} — coordinator not finished?")
+        return c[0]
+
+    res_doc = json.loads(_f("results.json").read_text())
+    meta = json.loads(_f("meta.json").read_text())
+    recs_txt = _f("recs.jsonl").read_text()
+    art = REPO / "research_runs" / run_id
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "results.json").write_text(json.dumps(res_doc, indent=2,
+                                                 default=str))
+    ok = 0
+    expp = REPO / "research" / "experiments.jsonl"
+    with open(expp, "a") as fh:
+        for ln in recs_txt.splitlines():
+            if not ln.strip():
+                continue
+            r = json.loads(ln)
+            try:
+                L.validate_experiment(r)
+            except L.LedgerError as e:
+                print(f"[ingest] SKIP invalid: {e}")
+                continue
+            fh.write(json.dumps(r, default=str) + "\n")
+            ok += 1
+    print(f"[ingest] appended {ok}/{meta.get('n_total', '?')} "
+          f"-> experiments.jsonl")
+    L.cmd_build_db(argparse.Namespace(db=str(REPO / "research" /
+                                             "research.db")))
+    print(f"[ingest] results.json -> {art/'results.json'}  "
+          f"(approx cost ${meta.get('approx_cost_usd', '?')})")
+
+
+@app.local_entrypoint()
+def main(dry: int = 0, collect: str = ""):
+    _parity_gate()                       # local, $0, hard pre-spend gate
+    if collect:
+        print(f"[collect] pulling finished run {collect} from Volume")
+        _collect_from_volume(collect)
+        print("local entrypoint completed")
+        return
+    if dry:
+        coordinator.remote(dry=1)        # cheap sync: prints plan/egress
+        return
+    h = coordinator.spawn(dry=0)         # SERVER-SIDE — disconnect-immune
+    print(f"[spawn] coordinator fc={getattr(h, 'object_id', '?')} — "
+          f"sweep+ingest run server-side on Modal; a local/sandbox "
+          f"disconnect no longer orphans the run. Resume any time: "
+          f"modal run scripts/hd1_seq_modal.py --collect <run_id> "
+          f"(run_id at Volume /out/LATEST).")
+    run_id = _poll_volume_done(timeout_s=6 * 3600)
+    if run_id == "__ABORT__":
+        print("[coordinator] ABORT marker on Volume /out — budget gate; "
+              "no spend, no ingest.")
+        return
+    if run_id in ("__TIMEOUT__", "__NOLATEST__"):
+        print(f"[poll] {run_id}: coordinator still running server-side "
+              f"(NOT an error). It finishes independently; collect later: "
+              f"modal run scripts/hd1_seq_modal.py --collect <run_id>.")
+        return
+    _collect_from_volume(run_id)
+    print("local entrypoint completed")
+
+
+def _build_ingest_doc(run_id, results, plan, total_cost):
+    """Pure: build (res_doc, recs) — the FROZEN §5 GATE. No I/O, no
+    run_id creation (caller passes it). Byte-identical math to the
+    pre-refactor _ingest; only the sink moved (Volume server-side /
+    repo local) so a local disconnect can't orphan the run."""
+    import numpy as np  # noqa: F401
+    sys.path.insert(0, "/root/proj")
+    sys.path.insert(0, str(REPO))
+    from scripts import hd1_seq_core as C
+
     psd = plan["psd"]
     # best config per (sym,H) = the L with lowest val_logloss
     cells = {}
@@ -688,26 +852,4 @@ def _ingest(results, plan, total_cost):
                "records": recs,
                "finished": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                           time.gmtime())}
-    art = REPO / "research_runs" / run_id
-    art.mkdir(parents=True, exist_ok=True)
-    (art / "results.json").write_text(json.dumps(res_doc, indent=2,
-                                                 default=str))
-
-    ok = 0
-    expp = REPO / "research" / "experiments.jsonl"
-    with open(expp, "a") as fh:
-        for r in recs:
-            if "error" in r and "experiment_id" not in r:
-                continue
-            try:
-                L.validate_experiment(r)
-            except L.LedgerError as e:
-                print(f"[ingest] SKIP invalid: {e}")
-                continue
-            fh.write(json.dumps(r, default=str) + "\n")
-            ok += 1
-    print(f"[ingest] appended {ok}/{len(recs)} -> experiments.jsonl")
-    import argparse
-    L.cmd_build_db(argparse.Namespace(db=str(REPO / "research" /
-                                             "research.db")))
-    print(f"[ingest] results.json -> {art/'results.json'}")
+    return res_doc, recs
