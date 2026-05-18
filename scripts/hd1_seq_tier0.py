@@ -401,6 +401,11 @@ def _collect(run_id):
         f"ric={r['ric_mean']:+.4f}±{r['ric_sd']:.4f} "
         f"lift={r['lift_vs_rev25']} robust={r['robust_vs_noise']}"
         for r in doc["rows"] if "error" not in r)
+    dl = doc["DESIGN_LOCK_RECOMMENDATION"]
+    sc = doc["secondary_rule_check"]
+    inc = doc.get("incomplete_cells")
+    gpu = doc["approx_gpu_usd"]
+    nu = doc["n_units"]
     rec = {"hypothesis_id": "HD1", "rev": 34,
            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
            "statement": (
@@ -408,13 +413,11 @@ def _collect(run_id):
                f"runner rev2 rev36 perf+robustness, numerics "
                f"bit-identical; rev35 design-lock framing; HM1 "
                f"continuous, §5 gate NOT applied; rev28 unchanged). "
-               f"DESIGN-LOCK RECOMMENDATION: {doc['DESIGN_LOCK_"
-               f"RECOMMENDATION']}. PER-CELL: {tbl}. Secondary "
-               f"rev32-rule check (is the edge real vs rev25/noise): "
-               f"{doc['secondary_rule_check']}. incomplete="
-               f"{doc.get('incomplete_cells')}. approx GPU "
-               f"${doc['approx_gpu_usd']} ({doc['n_units']} units). "
-               f"Lock follows the rule, not a post-hoc read."),
+               f"DESIGN-LOCK RECOMMENDATION: {dl}. PER-CELL: {tbl}. "
+               f"Secondary rev32-rule check (is the edge real vs "
+               f"rev25/noise): {sc}. incomplete={inc}. approx GPU "
+               f"${gpu} ({nu} units). Lock follows the rule, not a "
+               f"post-hoc read."),
            "status": "testing",
            "priority_rank": 1, "result_experiment_id": run_id,
            "note": (f"Tier-0 design-lock outcome: "
