@@ -36,33 +36,49 @@ die() { echo "gcp_bootstrap: $*" >&2; exit 1; }
 DEFAULT_GCP_PROJECT="project-26a24ad0-1059-4f73-93b"
 
 # --- 1. materialise the credential -----------------------------------------
-# Three accepted modes, in priority order (all via env secret only):
-#   A) GCP_ACCESS_TOKEN  — a raw OAuth2 bearer token (~1 h). Phone-
-#      friendly: `gcloud auth print-access-token` in Cloud Shell, paste
-#      the one line. The container only uses creds for SHORT bursts
-#      (VM launch ~1-2 min, status/ingest ~sec); the multi-hour screen
-#      runs on the VM's OWN attached SA (metadata) — so ~1 h is ample
-#      and token expiry mid-run loses nothing (results are durable in
-#      GCS, VM self-deletes; re-paste a fresh token only for ingest).
-#   B) GCP_SA_KEY / _B64 — JSON: an SA key OR a user-ADC
-#      ("authorized_user", from `gcloud auth application-default login`;
-#      org policy iam.disableServiceAccountKeyCreation forbids SA keys
-#      here — ADC is not an SA key and is allowed).
-#   C) a pre-materialised $CRED_FILE from earlier this session.
+# Credential is resolved by CONTENT, not by which env var holds it — the
+# GCP_SA_KEY slot is the one empirically confirmed to propagate into a
+# live session here, so it accepts EITHER form:
+#   * value starts with `ya29.`  -> a raw OAuth2 bearer token (~1 h).
+#       Phone path: `gcloud auth print-access-token` in Cloud Shell.
+#       The container only holds creds for SHORT bursts (VM launch
+#       ~1-2 min, status/ingest ~sec); the multi-hour screen runs on
+#       the VM's OWN attached SA (metadata) — ~1 h is ample, expiry
+#       mid-run loses nothing (results durable in GCS, VM self-deletes).
+#   * value starts with `{`      -> JSON: an SA key OR a user-ADC
+#       ("authorized_user", from `gcloud auth application-default
+#       login`; org policy forbids SA keys here — ADC is allowed).
+#   * value starts with `4/0`    -> an OAuth AUTHORIZATION CODE: refuse
+#       with guidance (single-use code, not a credential).
+# Priority: GCP_ACCESS_TOKEN, then GCP_SA_KEY_B64, then GCP_SA_KEY,
+# then a pre-materialised $CRED_FILE. Whitespace in a token is stripped.
+_RAW=""
 if [[ -n "${GCP_ACCESS_TOKEN:-}" ]]; then
-  CRED_MODE="token"
+  _RAW="$GCP_ACCESS_TOKEN"
 elif [[ -n "${GCP_SA_KEY_B64:-}" ]]; then
-  mkdir -p "$CRED_DIR"; printf '%s' "$GCP_SA_KEY_B64" | base64 -d > "$CRED_FILE"
-  CRED_MODE="json"
+  _RAW="$(printf '%s' "$GCP_SA_KEY_B64" | base64 -d 2>/dev/null || true)"
 elif [[ -n "${GCP_SA_KEY:-}" ]]; then
-  mkdir -p "$CRED_DIR"; printf '%s' "$GCP_SA_KEY" > "$CRED_FILE"
-  CRED_MODE="json"
-elif [[ -f "$CRED_FILE" ]]; then
-  CRED_MODE="json"   # already materialised this session
+  _RAW="$GCP_SA_KEY"
+fi
+_RAW_TRIM="$(printf '%s' "$_RAW" | tr -d '[:space:]')"
+if [[ -z "$_RAW" && -f "$CRED_FILE" ]]; then
+  CRED_MODE="json"                       # already materialised this session
+elif [[ "$_RAW_TRIM" == ya29.* || "$_RAW_TRIM" == ya29_* ]]; then
+  CRED_MODE="token"; GCP_ACCESS_TOKEN="$_RAW_TRIM"
+elif [[ "$_RAW_TRIM" == 4/0* ]]; then
+  die "credential is an OAuth AUTHORIZATION CODE (4/0...), not a usable \
+credential. In Cloud Shell run 'gcloud auth print-access-token' and put \
+THAT (starts with ya29.) into the GCP_SA_KEY secret."
+elif [[ "${_RAW#"${_RAW%%[![:space:]]*}"}" == \{* ]]; then
+  mkdir -p "$CRED_DIR"; printf '%s' "$_RAW" > "$CRED_FILE"; CRED_MODE="json"
+elif [[ -n "$_RAW" ]]; then
+  die "credential is set but unrecognised (not ya29.* token, not {...} \
+JSON, not 4/0 code). Put either an access token or an SA/ADC JSON into \
+the GCP_SA_KEY env secret."
 else
-  die "no credentials. Set ONE env secret: GCP_ACCESS_TOKEN (raw OAuth
-  bearer, phone-friendly), or GCP_SA_KEY / GCP_SA_KEY_B64 (JSON: SA key
-  or user-ADC). Env-secret channel ONLY — never chat, never committed."
+  die "no credentials. Set the GCP_SA_KEY env secret to EITHER a one-line
+  access token (gcloud auth print-access-token, starts ya29.) OR an
+  SA/ADC JSON. Env-secret channel ONLY — never chat, never committed."
 fi
 
 case "$CRED_DIR" in

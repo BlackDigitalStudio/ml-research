@@ -88,15 +88,35 @@ def _sh(cmd: list[str]) -> str:
                           check=True).stdout.strip()
 
 
+def _bearer_token():
+    """Resolve a raw OAuth bearer token by CONTENT from whichever env
+    slot carries it (GCP_ACCESS_TOKEN, or the GCP_SA_KEY/_B64 slot when
+    its value is a ya29.* token rather than JSON). Whitespace healed.
+    Returns the token str, or None if the credential is JSON/absent."""
+    import base64
+    for name in ("GCP_ACCESS_TOKEN", "GCP_SA_KEY_B64", "GCP_SA_KEY"):
+        v = os.environ.get(name)
+        if not v:
+            continue
+        if name == "GCP_SA_KEY_B64":
+            try:
+                v = base64.b64decode(v).decode()
+            except Exception:
+                continue
+        s = "".join(v.split())
+        if s.startswith("ya29.") or s.startswith("ya29_"):
+            return s
+        if s[:1] == "{":           # JSON credential -> not a bearer token
+            return None
+    return None
+
+
 def _creds():
-    """Explicit bearer creds when GCP_ACCESS_TOKEN is set (phone path:
-    a raw ~1 h OAuth token used ONLY for the short launch/status/ingest
-    bursts — the multi-hour screen runs on the VM's own attached SA).
-    None => google libs fall back to ADC (SA / authorized_user JSON)."""
-    tok = os.environ.get("GCP_ACCESS_TOKEN")
-    if not tok:
-        return None
-    tok = "".join(tok.split())   # heal wrapped/space-polluted paste
+    """Explicit bearer creds for the phone token path (a raw ~1 h OAuth
+    token used ONLY for the short launch/status/ingest bursts — the
+    multi-hour screen runs on the VM's own attached SA). None => google
+    libs fall back to ADC (SA / authorized_user JSON)."""
+    tok = _bearer_token()
     if not tok:
         return None
     import google.oauth2.credentials
