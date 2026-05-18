@@ -487,15 +487,19 @@ def train_cell(sym: str, L: int, grid: list):
 # local entrypoint — orchestrate, cost-guard, ingest
 # =========================================================================
 def _parity_gate():
+    # Both the Python core AND the Rust heavy-path must be bit-exact to
+    # the frozen contract before any sweep. Local, $0; hard abort.
     import subprocess
-    r = subprocess.run([sys.executable, "tests/test_hd1_parity.py"],
-                       cwd=str(REPO), capture_output=True, text=True)
-    print(r.stdout[-800:])
-    if r.returncode != 0:
-        print(r.stderr[-1500:])
-        raise SystemExit("PARITY GATE FAILED — sweep aborted (frozen "
-                         "numeric contract violated).")
-    print("[parity] PASS — optimized core == frozen contract.")
+    for t in ("tests/test_hd1_parity.py", "tests/test_hd1_parity_rust.py"):
+        r = subprocess.run([sys.executable, t], cwd=str(REPO),
+                           capture_output=True, text=True)
+        print(f"[parity] {t}\n{r.stdout[-800:]}")
+        if r.returncode != 0:
+            print(r.stderr[-1500:])
+            raise SystemExit(f"PARITY GATE FAILED ({t}) — sweep aborted "
+                             f"(frozen numeric contract violated).")
+    print("[parity] PASS — Python core AND Rust heavy-path == frozen "
+          "contract.")
 
 
 @app.local_entrypoint()
