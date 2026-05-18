@@ -96,6 +96,9 @@ def _creds():
     tok = os.environ.get("GCP_ACCESS_TOKEN")
     if not tok:
         return None
+    tok = "".join(tok.split())   # heal wrapped/space-polluted paste
+    if not tok:
+        return None
     import google.oauth2.credentials
     return google.oauth2.credentials.Credentials(token=tok)
 

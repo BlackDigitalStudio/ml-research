@@ -73,6 +73,19 @@ esac
 if [[ "$CRED_MODE" == "token" ]]; then
   # bare token: nothing on disk; google libs get explicit creds (see
   # scripts/phase_b_vm.py::_creds). project must come from env/default.
+  # Heal a wrapped/space-polluted paste (strip ALL whitespace — no
+  # whitespace is valid inside a bearer token).
+  GCP_ACCESS_TOKEN="$(printf '%s' "$GCP_ACCESS_TOKEN" | tr -d '[:space:]')"
+  [[ -n "$GCP_ACCESS_TOKEN" ]] || die "GCP_ACCESS_TOKEN is empty after \
+trimming whitespace."
+  case "$GCP_ACCESS_TOKEN" in
+    4/0*) die "GCP_ACCESS_TOKEN looks like an OAuth AUTHORIZATION CODE \
+(4/0...), not an access token. In Cloud Shell run \
+'gcloud auth print-access-token' and paste THAT (starts with ya29.)." ;;
+    \{*)  die "GCP_ACCESS_TOKEN looks like JSON — that belongs in \
+GCP_SA_KEY, not GCP_ACCESS_TOKEN. For the token path paste the one-line \
+output of 'gcloud auth print-access-token' (starts with ya29.)." ;;
+  esac
   unset GOOGLE_APPLICATION_CREDENTIALS || true
   GCP_PROJECT="${GCP_PROJECT:-$DEFAULT_GCP_PROJECT}"
   export GCP_ACCESS_TOKEN GCP_PROJECT GCP_REGION GCP_ZONE
