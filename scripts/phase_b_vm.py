@@ -112,15 +112,23 @@ def _bearer_token():
 
 
 def _creds():
-    """Explicit bearer creds for the phone token path (a raw ~1 h OAuth
-    token used ONLY for the short launch/status/ingest bursts — the
-    multi-hour screen runs on the VM's own attached SA). None => google
-    libs fall back to ADC (SA / authorized_user JSON)."""
+    """Explicit STATIC bearer creds for the phone token path (a raw
+    ~1 h OAuth token with no refresh fields, used ONLY for the short
+    launch/status/ingest bursts — the multi-hour screen runs on the
+    VM's own attached SA). google-auth would otherwise try to refresh a
+    bare token (no refresh_token) and raise RefreshError, so refresh is
+    neutralised: a bare access token is valid for its own lifetime.
+    None => google libs fall back to ADC (SA / authorized_user JSON)."""
     tok = _bearer_token()
     if not tok:
         return None
     import google.oauth2.credentials
-    return google.oauth2.credentials.Credentials(token=tok)
+
+    class _StaticToken(google.oauth2.credentials.Credentials):
+        def refresh(self, request):          # bare token: never refresh
+            return
+
+    return _StaticToken(token=tok)
 
 
 def _gcs():

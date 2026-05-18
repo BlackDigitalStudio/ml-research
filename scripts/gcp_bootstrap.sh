@@ -158,7 +158,10 @@ _tok = os.environ.get("GCP_ACCESS_TOKEN")
 creds = None
 if _tok:
     import google.oauth2.credentials
-    creds = google.oauth2.credentials.Credentials(token=_tok)
+    class _StaticToken(google.oauth2.credentials.Credentials):
+        def refresh(self, request):   # bare token: never refresh
+            return
+    creds = _StaticToken(token="".join(_tok.split()))
 
 sc = storage.Client(project=proj, credentials=creds)
 for b in buckets:
