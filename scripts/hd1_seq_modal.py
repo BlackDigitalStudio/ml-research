@@ -641,12 +641,16 @@ def _poll_volume_done(timeout_s):
     dead local poller never loses the run — re-attach with --collect."""
     import subprocess
     import time as _t
+    import re
     t0, rid = _t.time(), None
     while _t.time() - t0 < timeout_s:
         if rid is None:
             s = _vol_text("/out/LATEST")
-            if s and s.strip():
-                rid = s.strip().splitlines()[-1].strip()
+            # `modal volume get - ` mixes the CLI status banner into
+            # stdout with no separator; extract the run_id token only.
+            m = re.findall(r"hd1seq-\d{8}-\d{6}", s or "")
+            if m:
+                rid = m[-1]
                 print(f"[poll] coordinator run_id={rid} "
                       f"(server-side; survives local disconnect)")
         if rid:
@@ -670,9 +674,12 @@ def _collect_from_volume(run_id):
     import subprocess
     import tempfile
     import argparse
+    import re
     sys.path.insert(0, str(REPO))
     from research import ledger as L
 
+    m = re.findall(r"hd1seq-\d{8}-\d{6}", run_id)
+    run_id = m[0] if m else run_id
     tmp = tempfile.mkdtemp(prefix="hd1seq_collect_")
     subprocess.run([sys.executable, "-m", "modal", "volume", "get",
                     "hd1-seq-cache", f"/out/{run_id}", tmp], check=True)
