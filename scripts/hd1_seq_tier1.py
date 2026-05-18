@@ -538,24 +538,74 @@ def _finalize(run_id, t_run):
             "~= snapshot fundamentally' (rev28/rev30/rev39 reinforced; "
             "escalate). HM1 continuous, NOT a §5 gate (rev35).")
 
+    # PRIMARY DELIVERABLE (CLAUDE.md rule 1): the conditional alpha
+    # surface. rank_IC mean +- seed-sd per (objective,head) regime,
+    # per cell; the regime that MAXIMIZES alpha per cell, its
+    # magnitude and seed-stability. This is the headline; the
+    # confirmatory deploy gate is demoted to a secondary annotation
+    # (rule 2/4 -- kept verbatim, NOT deleted, just not the framing).
+    from collections import Counter
+    alpha_surface = []
+    for r in rows:
+        ranked = sorted(
+            ((ck, e) for ck, e in r["combos"].items()
+             if "error" not in e),
+            key=lambda kv: kv[1]["ric_mean"], reverse=True)
+        if not ranked:
+            alpha_surface.append({"sym": r["sym"], "H": r["H"],
+                                  "error": "incomplete"})
+            continue
+        top_ck, top_e = ranked[0]
+        alpha_surface.append({
+            "sym": r["sym"], "H": r["H"], "L": r["L"],
+            "is_weak_control": r["is_weak_control"],
+            "alpha_max_regime": top_ck,
+            "alpha_max_ric_mean": top_e["ric_mean"],
+            "alpha_max_seed_sd": top_e["ric_sd"],
+            "alpha_max_seeds": top_e["ric_seeds"],
+            "ranked_surface": [{"regime": ck,
+                                "ric_mean": e["ric_mean"],
+                                "seed_sd": e["ric_sd"]}
+                               for ck, e in ranked]})
+    valid_as = [a for a in alpha_surface if "error" not in a]
+    best_regime = {
+        "per_cell_alpha_max": {
+            f"{a['sym'].split('-')[0]}-H{a['H']}"
+            + ("[weak]" if a["is_weak_control"] else ""):
+            f"{a['alpha_max_regime']} {a['alpha_max_ric_mean']:+.4f}"
+            f"±{a['alpha_max_seed_sd']:.4f}" for a in valid_as},
+        "alpha_max_regime_vote": dict(
+            Counter(a["alpha_max_regime"] for a in valid_as)),
+        "reading": ("which (objective,head) regime yields the most "
+                    "alpha, under which (symbol,horizon) conditions, "
+                    "and how seed-stable -- this IS the tier result")}
+
     doc = {"run_id": run_id,
            "spec": "HD1 rev43 Tier-1 (FROZEN); runner rev4 substrate "
                    "(per-unit numerics == Tier-0 rev3/rev4 regime)",
-           "framing": "rev35 design-lock; HM1 continuous; §5 gate NOT "
-                      "applied; rev28/rev32/rev39/rev41/rev42 unchanged",
+           "PRIMARY_alpha_surface": alpha_surface,
+           "PRIMARY_best_regime_per_cell": best_regime,
            "locked": {"W": W_FIXED, "D": D_FIXED, "dropout": DROPOUT,
                       "wd": WD,
                       "note": "rev30 principled default (smallest W, "
                               "most regularized) accompanying the "
                               "rev39/rev41 W=16 lock"},
-           "reference_corner": "|".join(REF_COMBO),
-           "DECISION": decision,
-           "real_effects": real_effects,
-           "rule": (f"per non-ref combo & cell: lift = ric_mean(C) - "
-                    f"ric_mean(bce|last) in-run; win iff lift>="
-                    f"+{LIFT_THRESH} AND seed-sd<={LIFT_THRESH}; real "
-                    f"effect iff wins>=3/4 incl LTC-H300"),
-           "incomplete_cells": incomplete, "rows": rows,
+           "rows": rows,
+           "secondary_economic_deploy_annotation": {
+               "purpose": "SEPARATE confirmatory deploy question "
+                          "(HM1 §5 family) -- NOT the tier conclusion "
+                          "(CLAUDE.md rule 2). Pre-registered rev43 "
+                          "rule kept verbatim, demoted not deleted "
+                          "(rule 4). rev43 itself framed HM1 as "
+                          "continuous / NOT a §5 hard gate (rev35).",
+               "reference_corner": "|".join(REF_COMBO),
+               "rule": (f"per non-ref combo & cell: lift = ric_mean(C) "
+                        f"- ric_mean(bce|last) in-run; win iff lift>="
+                        f"+{LIFT_THRESH} AND seed-sd<={LIFT_THRESH}; "
+                        f"real effect iff wins>=3/4 incl LTC-H300"),
+               "real_effects": real_effects,
+               "rev42_interaction_clause": decision},
+           "incomplete_cells": incomplete,
            "approx_gpu_usd": spent, "n_units": len(units),
            "finished": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                      time.gmtime())}
@@ -596,44 +646,45 @@ def _collect(run_id):
     art.mkdir(parents=True, exist_ok=True)
     (art / "tier1.json").write_text(json.dumps(doc, indent=2,
                                                default=str))
-    parts = []
-    for r in doc["rows"]:
-        tag = f"{r['sym'].split('-')[0]}-H{r['H']}"
-        ref = r.get("ref_ric_mean")
-        seg = [f"{tag} ref(bce|last)={ref}"]
-        for ck, e in r["combos"].items():
-            if ck == doc["reference_corner"] or "error" in e:
-                continue
-            seg.append(f"{ck} {e['ric_mean']:+.4f}"
-                       f"±{e['ric_sd']:.4f} "
-                       f"lift={e.get('lift_vs_ref')} "
-                       f"win={e.get('wins_cell')}")
-        parts.append(" | ".join(seg))
-    tbl = " ;; ".join(parts)
-    dec = doc["DECISION"]
+    # Headline = the conditional alpha surface (CLAUDE.md rule 1/3).
+    asf = doc["PRIMARY_alpha_surface"]
+    surf = " ;; ".join(
+        f"{a['sym'].split('-')[0]}-H{a['H']}"
+        + ("[weak]" if a.get("is_weak_control") else "")
+        + f": alpha-max {a['alpha_max_regime']}="
+        f"{a['alpha_max_ric_mean']:+.4f}±{a['alpha_max_seed_sd']:.4f}"
+        f"; surface=[" + ", ".join(
+            f"{x['regime']} {x['ric_mean']:+.4f}±{x['seed_sd']:.4f}"
+            for x in a["ranked_surface"]) + "]"
+        for a in asf if "error" not in a)
+    dep = doc["secondary_economic_deploy_annotation"]
     inc = doc.get("incomplete_cells")
     rec = {"hypothesis_id": "HD1", "rev": 44,
            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
            "statement": (
-               f"TIER-1 RESULT (run {run_id}, FROZEN rev43 spec, "
-               f"runner rev4 substrate; locked W=16/D=4 + rev30 "
-               f"principled-default reg dropout=0.5/wd=1e-3; "
-               f"in-run (bce|last) reference controls CUDA run-noise "
-               f"per rev41; rev35 design-lock; HM1 continuous, §5 "
-               f"gate NOT applied; rev28/rev32/rev39/rev41/rev42 "
-               f"UNCHANGED). DECISION: {dec} PER-CELL (ref + non-ref "
-               f"combo ric_mean±seed-sd, lift vs in-run ref, "
-               f"cell-win): {tbl}. incomplete={inc}. approx GPU "
-               f"${doc['approx_gpu_usd']} ({doc['n_units']} units)."),
+               f"TIER-1 CONDITIONAL ALPHA SURFACE (run {run_id}, "
+               f"FROZEN rev43 spec, runner rev4; locked W=16/D=4 + "
+               f"rev30 reg do0.5/wd1e-3). PRIMARY -- rank_IC mean±"
+               f"seed-sd by objective×head regime, and the alpha-max "
+               f"regime per (symbol,horizon) condition: {surf}. "
+               f"incomplete={inc}. approx GPU "
+               f"${doc['approx_gpu_usd']} ({doc['n_units']} units). "
+               f"SECONDARY economic-deploy annotation (separate HM1 "
+               f"§5 question, NOT the tier conclusion -- CLAUDE.md "
+               f"rule 2/4; rev43 framed HM1 continuous, not a §5 "
+               f"gate): {dep['rev42_interaction_clause']}"),
            "status": "testing", "priority_rank": 1,
            "result_experiment_id": run_id,
-           "note": (f"Tier-1 objective/head outcome: {dec[:140]} "
-                    f"Continuous HM1 (no §5 gate; experiments.jsonl "
-                    f"untouched); rev28/rev32/rev39/rev41/rev42 "
-                    f"unchanged.")}
+           "note": (f"Tier-1 PRIMARY = conditional alpha surface "
+                    f"(rank_IC by objective×head per cell + alpha-max "
+                    f"regime). Deploy-gate demoted to a secondary "
+                    f"annotation per CLAUDE.md (kept, not deleted). "
+                    f"experiments.jsonl untouched; "
+                    f"rev28/rev32/rev39/rev41/rev42 unchanged.")}
     with open(REPO / "research" / "hypotheses.jsonl", "a") as fh:
         fh.write(json.dumps(rec) + "\n")
-    print(f"[tier1] {dec[:110]} -> {art/'tier1.json'} ; rev44 appended")
+    print(f"[tier1] alpha-surface: {surf[:140]} -> "
+          f"{art/'tier1.json'} ; rev appended")
 
 
 @app.local_entrypoint()
