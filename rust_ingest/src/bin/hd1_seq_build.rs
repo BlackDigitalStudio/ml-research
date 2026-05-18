@@ -121,7 +121,7 @@ fn read_books(paths: &[PathBuf]) -> Result<Book> {
                     .downcast_ref::<Float64Array>()
                     .ok_or_else(|| anyhow!("depth col not Float64"))
             };
-            let mut grp = |gi: usize, dst: &mut Vec<f64>| -> Result<()> {
+            let grp = |gi: usize, dst: &mut Vec<f64>| -> Result<()> {
                 let cols: Vec<&Float64Array> =
                     (0..N_LEVELS).map(|k| f64col(gi, k)).collect::<Result<_>>()?;
                 for r in 0..nrows {

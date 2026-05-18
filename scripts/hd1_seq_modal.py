@@ -38,6 +38,7 @@ FLOOR = "2025-05-09"
 N_DAYS = 360
 FREEZE_COMMIT = "d56344f"
 HS = (180, 300, 600)
+MAX_L = 512  # frozen context length (== hd1_seq_core.MAX_L)
 
 # Frozen HM6 rev4 baseline_ref (run phaseb-20260517-203822), rank_ic_oos
 # per (symbol, H). delta_ic = HD1-seq rank_ic_oos - this. DO NOT EDIT
@@ -64,19 +65,39 @@ COST_GUARD = 54.0                 # pre-registered degradation trigger
 # ---- Modal app / image / volume / secret --------------------------------
 app = modal.App("hd1-seq")
 
-CPU_IMG = (modal.Image.debian_slim(python_version="3.11")
-           .pip_install("numpy==2.2.4", "pyarrow==19.0.1",
-                        "scikit-learn", "google-cloud-storage")
-           .add_local_dir(str(REPO), "/root/proj",
-                           ignore=["**/.git/**", "**/__pycache__/**",
-                                   "data/**", "models/**", "**/*.db",
-                                   "research_runs/**"]))
+_IGN = ["**/.git/**", "**/__pycache__/**", "data/**", "models/**",
+        "**/*.db", "research_runs/**", "**/target/**"]
+RUST_TOOLCHAIN = "1.94.1"
+
+# IO: plan_window / measure_egress (GCS list + blob sizes only)
+IO_IMG = (modal.Image.debian_slim(python_version="3.11")
+          .pip_install("numpy==2.2.4", "google-cloud-storage"))
+
+# BUILD: bakes the Rust heavy-path binary into the image (the slow path
+# is Rust; Python only downloads parquet + orchestrates). The crate is
+# added copy=True so the cargo build runs at image-build time.
+BUILD_IMG = (modal.Image.debian_slim(python_version="3.11")
+             .apt_install("curl", "build-essential", "pkg-config")
+             .run_commands(
+                 "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs "
+                 "| sh -s -- -y --profile minimal --default-toolchain "
+                 + RUST_TOOLCHAIN)
+             .add_local_dir(str(REPO / "rust_ingest"), "/root/rust_ingest",
+                            copy=True, ignore=["**/target/**"])
+             .run_commands(
+                 "cd /root/rust_ingest && $HOME/.cargo/bin/cargo build "
+                 "--release --bin hd1_seq_build")
+             .pip_install("numpy==2.2.4", "google-cloud-storage"))
+RUST_BIN = "/root/rust_ingest/target/release/hd1_seq_build"
+
+# REDUCE: concat shards on the Volume (numpy + frozen split helper)
+RED_IMG = (modal.Image.debian_slim(python_version="3.11")
+           .pip_install("numpy==2.2.4")
+           .add_local_dir(str(REPO), "/root/proj", ignore=_IGN))
+
 GPU_IMG = (modal.Image.debian_slim(python_version="3.11")
            .pip_install("numpy==2.2.4", "scikit-learn", "torch")
-           .add_local_dir(str(REPO), "/root/proj",
-                          ignore=["**/.git/**", "**/__pycache__/**",
-                                  "data/**", "models/**", "**/*.db",
-                                  "research_runs/**"]))
+           .add_local_dir(str(REPO), "/root/proj", ignore=_IGN))
 VOL = modal.Volume.from_name("hd1-seq-cache", create_if_missing=True)
 MNT = "/cache"
 
@@ -153,7 +174,7 @@ def _window(per):
 # =========================================================================
 # plan_window — list GCS days, apply frozen window rule
 # =========================================================================
-@app.function(image=CPU_IMG, timeout=900,
+@app.function(image=IO_IMG, timeout=900,
               secrets=[modal.Secret.from_name("hd1-gcp")])
 def plan_window():
     bk = _gcs()
@@ -166,7 +187,7 @@ def plan_window():
 # =========================================================================
 # measure_egress — pre-flight: true raw/book bytes for one symbol-day
 # =========================================================================
-@app.function(image=CPU_IMG, timeout=600,
+@app.function(image=IO_IMG, timeout=600,
               secrets=[modal.Secret.from_name("hd1-gcp")])
 def measure_egress(sym: str, day: str):
     bk = _gcs()
@@ -184,14 +205,16 @@ def measure_egress(sym: str, day: str):
 # =========================================================================
 # build_symbol_day — column-projected L2 -> packed fp16 windows shard
 # =========================================================================
-@app.function(image=CPU_IMG, cpu=2.0, timeout=3600,
+@app.function(image=BUILD_IMG, cpu=2.0, timeout=3600,
               volumes={MNT: VOL},
               secrets=[modal.Secret.from_name("hd1-gcp")])
 def build_symbol_day(sym: str, day: str, day_ord: int):
+    # Python only orchestrates: pull parquet + indices, invoke the Rust
+    # heavy-path binary (parquet -> 46-feat per-tick -> causal windows ->
+    # frozen first-passage), pack the f32 windows to f16, write the shard.
     import numpy as np
-    import pyarrow.parquet as pq
-    sys.path.insert(0, "/root/proj")
-    from scripts import hd1_seq_core as C
+    import subprocess
+    import tempfile
 
     out = f"{MNT}/shards/{sym}"
     os.makedirs(out, exist_ok=True)
@@ -200,58 +223,44 @@ def build_symbol_day(sym: str, day: str, day_ord: int):
         return {"sym": sym, "day": day, "cached": True}
 
     bk = _gcs()
-    # indices.npy = decision points (same grid as HM6/features_v1)
-    idx = np.load(io.BytesIO(bk.blob(
-        f"features_v1/symbol={sym}/dt={day}/indices.npy"
-    ).download_as_bytes()), allow_pickle=False).astype(np.int64)
-
-    cols = (["timestamp"]
-            + [f"bid_{k}_price" for k in range(C.N_LEVELS)]
-            + [f"bid_{k}_size" for k in range(C.N_LEVELS)]
-            + [f"ask_{k}_price" for k in range(C.N_LEVELS)]
-            + [f"ask_{k}_size" for k in range(C.N_LEVELS)])
     pref = f"raw/book/exchange=BINANCE_FUTURES/symbol={sym}/dt={day}/"
     blobs = sorted((b for b in bk.client.list_blobs(bk, prefix=pref)
                     if b.name.endswith(".parquet")), key=lambda b: b.name)
     if not blobs:
         return {"sym": sym, "day": day, "error": "no book parquet"}
-    parts = []
-    for b in blobs:
-        t = pq.read_table(io.BytesIO(b.download_as_bytes()), columns=cols)
-        parts.append(t)
-    import pyarrow as pa
-    T = pa.concat_tables(parts)
-    ts = T.column("timestamp").to_numpy(zero_copy_only=False).astype(np.int64)
 
-    bid_p = np.column_stack([T.column(f"bid_{k}_price").to_numpy(
-        zero_copy_only=False) for k in range(C.N_LEVELS)]).astype(np.float64)
-    bid_s = np.column_stack([T.column(f"bid_{k}_size").to_numpy(
-        zero_copy_only=False) for k in range(C.N_LEVELS)]).astype(np.float64)
-    ask_p = np.column_stack([T.column(f"ask_{k}_price").to_numpy(
-        zero_copy_only=False) for k in range(C.N_LEVELS)]).astype(np.float64)
-    ask_s = np.column_stack([T.column(f"ask_{k}_size").to_numpy(
-        zero_copy_only=False) for k in range(C.N_LEVELS)]).astype(np.float64)
+    with tempfile.TemporaryDirectory() as td:
+        bookf = []
+        for n, b in enumerate(blobs):
+            p = f"{td}/book_{n:04d}.parquet"
+            b.download_to_filename(p)
+            bookf.append(p)
+        idxf = f"{td}/indices.npy"
+        bk.blob(f"features_v1/symbol={sym}/dt={day}/indices.npy"
+                ).download_to_filename(idxf)
+        odir = f"{td}/out"
+        r = subprocess.run(
+            [RUST_BIN, "--book", *bookf, "--indices", idxf,
+             "--out-dir", odir, "--max-l", str(MAX_L)],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            return {"sym": sym, "day": day,
+                    "error": f"rust rc={r.returncode}: {r.stderr[-400:]}"}
 
-    mid = 0.5 * (bid_p[:, 0] + ask_p[:, 0])
-    n_ticks = ts.shape[0]
-    sel, i = C.select_decision_idx(idx, n_ticks)
-    if i.size == 0:
-        np.savez_compressed(shard, empty=True)
-        VOL.commit()
-        return {"sym": sym, "day": day, "n_dp": 0}
-
-    tf = C.tick_features(bid_p, bid_s, ask_p, ask_s)      # (n_ticks, 46)
-    win, _ = C.gather_windows(tf, i, L=C.MAX_L)            # (n_dp,512,46) f16
-    t0 = ts[i].astype(np.int64)
-
-    lab = {}
-    for H in HS:
-        y0, rH, _, _ = C.labels_for_H(ts, mid, i, t0, H)
-        lab[f"y0_{H}"] = y0
-        lab[f"rH_{H}"] = rH.astype(np.float32)
+        i = np.load(f"{odir}/i.npy").astype(np.int64)
+        if i.size == 0:
+            np.savez_compressed(shard, empty=True)
+            VOL.commit()
+            return {"sym": sym, "day": day, "n_dp": 0}
+        X = np.load(f"{odir}/X.npy").astype(np.float16)   # f32 -> f16 pack
+        t0 = np.load(f"{odir}/t0.npy").astype(np.int64)
+        lab = {}
+        for H in HS:
+            lab[f"y0_{H}"] = np.load(f"{odir}/y0_{H}.npy").astype(np.int8)
+            lab[f"rH_{H}"] = np.load(f"{odir}/rH_{H}.npy").astype(np.float32)
 
     np.savez_compressed(
-        shard, X=win, i=i.astype(np.int64), t0=t0,
+        shard, X=X, i=i, t0=t0,
         day_ord=np.int32(day_ord),
         n_dp=np.int64(i.size), **lab)
     VOL.commit()
@@ -262,7 +271,7 @@ def build_symbol_day(sym: str, day: str, day_ord: int):
 # =========================================================================
 # reduce_symbol — concat shards in (day asc, sel asc) -> packed.npz
 # =========================================================================
-@app.function(image=CPU_IMG, cpu=2.0, timeout=3600, volumes={MNT: VOL})
+@app.function(image=RED_IMG, cpu=2.0, timeout=3600, volumes={MNT: VOL})
 def reduce_symbol(sym: str):
     import numpy as np
     sys.path.insert(0, "/root/proj")
