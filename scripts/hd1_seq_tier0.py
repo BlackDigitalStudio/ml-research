@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""HD1 Tier-0 sweep (FROZEN spec HD1 rev32; runner rev3 per HD1 rev38).
+"""HD1 Tier-0 sweep (FROZEN spec HD1 rev32; runner rev4 per HD1 rev40).
 
-rev3 infra fix (root cause rev37 = preemptible/multi-container GPU
-cold-start churn; CLI logs unusable here so the code self-reports via
-Volume markers). Changes vs rev2 are TOPOLOGY/OBSERVABILITY ONLY --
-numerics BIT-IDENTICAL (same data prep mirrored from frozen
-train_cell, same RNG/seed/shuffle/bs=1024/schedule/loss):
-  * SINGLE container does ALL symbols sequentially (no coordinator +
-    3-way starmap fan-out -> removes the GPU scheduling contention);
-  * SINGLE GPU type "L4" (no ["L4","T4"] fallback-list churn);
-  * an ALIVE marker is the VERY FIRST thing written (before any heavy
-    import / 28GiB load) -> the container reaching user code is
-    immediately observable (rev2's _hb was after imports -> blind);
-  * a ~$0 smoke() proves the path (start/image/import/GPU/Volume) on
-    this exact instance BEFORE the full run is committed;
-  * per-(cell,config,seed) Volume checkpoint + resume-skip, retries
-    -> an interrupt resumes, never restarts.
-rev35 design-lock framing; HM1 continuous Delta-rank_ic; binary §5
-gate NOT applied; rev28 refuted/shelved UNCHANGED.
+rev4 = multi-GPU throughput, robustness from rev3 PRESERVED. Modal
+GPUs are ALWAYS preemptible (no nonpreemptible for GPU, confirmed
+2026) -> the only defense is preemption-RESILIENCE, which rev3
+already provides; rev4 adds parallelism WITHOUT adding scheduling
+units:
+  * ONE container, gpu="L4:4" (4 GPUs, ONE scheduling unit -> NOT the
+    rev1/rev2 multi-container churn class);
+  * the 216-unit grid is dispatched across the 4 GPUs by a spawn
+    ProcessPool, ONE process pinned per GPU (CUDA_VISIBLE_DEVICES set
+    before torch import). Process isolation gives each unit its own
+    global RNG, re-seeded per unit EXACTLY as sequential rev3 ->
+    per-unit results are BIT-IDENTICAL to rev3 (same cudnn-nondet
+    caveat as rev3, not worse);
+  * per-(cell,config,seed) Volume checkpoint + resume-skip, ALIVE
+    marker before heavy import, ~$0 smoke gate -> all rev3 primitives;
+  * per-cell standardized arrays shared to workers via /tmp memmap
+    (NO 28GiB re-load per worker).
+Numerics/data/objective/schedule UNCHANGED (rev32 spec, rev35
+design-lock framing, rev28 refuted/shelved -- ALL UNCHANGED). This is
+the perf substrate for Tier 1; Tier 1 still needs its own
+pre-registration before any run.
 
 Run:  modal run scripts/hd1_seq_tier0.py            (smoke -> full)
       modal run scripts/hd1_seq_tier0.py --collect <run_id>
@@ -43,7 +47,9 @@ SEEDS = (0, 1, 2)
 D_FIXED = 4
 PATIENCE, MIN_DELTA, T_MAX, EP_CAP = 2, 1e-4, 12, 40
 LIFT_THRESH = 0.004
-L4_USD_PER_S, BUDGET = 1.0e-3, 8.0
+L4_USD_PER_S, BUDGET = 1.0e-3, 12.0
+N_GPU = 4
+SHM = "/tmp/hd1tier0"
 
 _IGN = ["**/.git/**", "**/__pycache__/**", "data/**", "models/**",
         "**/*.db", "research_runs/**", "**/target/**"]
@@ -65,54 +71,157 @@ def _mark(run_id, name, txt):
     VOL.commit()
 
 
-@app.function(image=GPU_IMG, gpu="L4", timeout=900,
+@app.function(image=GPU_IMG, gpu=f"L4:{N_GPU}", timeout=1800,
               volumes={MNT: VOL}, retries=2)
 def smoke(run_id: str):
-    """~$0 path probe: ALIVE first (pre-import), then import the full
-    stack + a 5-step tiny TCN on a synthetic tensor (NO packed load) +
-    Volume write. Proves start/image/import/GPU/commit on this exact
-    instance before the full run is committed."""
+    """~$0 path probe on the EXACT instance (L4:N): ALIVE first
+    (pre-import), then import the full stack + a 5-step tiny TCN per
+    visible GPU + Volume write. Proves the multi-GPU allocation
+    schedules and the stack runs before the full run is committed."""
     t = time.time()
-    _mark(run_id, "SMOKE_ALIVE", t)               # before heavy import
+    _mark(run_id, "SMOKE_ALIVE", t)
     import numpy as np
     import torch
     import torch.nn.functional as Fnn
     sys.path.insert(0, "/root/proj")
     from scripts import hd1_seq_core as C
     from scripts.hd1_seq_modal import _build_tcn
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
-    x = torch.randn(256, 64, C.N_TICK_FEAT, device=dev)
-    y = torch.randint(0, 2, (256,), device=dev).float()
-    net = _build_tcn(C.N_TICK_FEAT, 32, D_FIXED, dropout=0.1).to(dev)
-    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
-    for _ in range(5):
-        opt.zero_grad(set_to_none=True)
-        loss = Fnn.binary_cross_entropy_with_logits(net(x), y)
-        loss.backward()
-        opt.step()
-    msg = (f"SMOKE_OK dev={dev} stack+train5={round(time.time()-t,2)}s "
-           f"loss={float(loss):.4f}")
+    ngpu = torch.cuda.device_count()
+    losses = []
+    for gi in range(max(ngpu, 1)):
+        dev = f"cuda:{gi}" if ngpu else "cpu"
+        x = torch.randn(256, 64, C.N_TICK_FEAT, device=dev)
+        y = torch.randint(0, 2, (256,), device=dev).float()
+        net = _build_tcn(C.N_TICK_FEAT, 32, D_FIXED, dropout=0.1).to(dev)
+        opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+        for _ in range(5):
+            opt.zero_grad(set_to_none=True)
+            loss = Fnn.binary_cross_entropy_with_logits(net(x), y)
+            loss.backward()
+            opt.step()
+        losses.append(round(float(loss), 4))
+    msg = (f"SMOKE_OK n_gpu={ngpu} per_gpu_train5_loss={losses} "
+           f"t={round(time.time()-t,2)}s")
     _mark(run_id, "SMOKE_OK", msg)
     return msg
 
 
-@app.function(image=GPU_IMG, gpu="L4", timeout=21600,
-              volumes={MNT: VOL}, retries=3)
-def tier0_all(run_id: str):
-    """SINGLE container, ALL symbols sequentially, resumable. ALIVE
-    first (pre-import). Aggregates from durable parts and writes
-    tier0.json + DONE itself (no separate coordinator)."""
+def _pool_init(gpu_q):
+    """ProcessPool initializer: pin THIS worker to one GPU by setting
+    CUDA_VISIBLE_DEVICES BEFORE torch is imported in the worker."""
     import os
-    t_run = time.time()
-    _mark(run_id, "ALIVE", t_run)                  # before heavy import
+    gid = gpu_q.get()
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gid)
+    os.environ["_HD1_GPU"] = str(gid)
+
+
+def _unit_worker(task):
+    """Runs ONE (cell,config,seed) on this worker's pinned GPU. Body
+    is byte-faithful to rev3's inner training. Process isolation =>
+    global RNG re-seeded per unit reproduces rev3 exactly."""
+    import os
     import numpy as np
     import torch
     import torch.nn.functional as Fnn
     sys.path.insert(0, "/root/proj")
     from scripts import hd1_seq_core as C
-    from scripts.hd1_seq_modal import _build_tcn, BASELINE_REF_RIC
+    from scripts.hd1_seq_modal import _build_tcn
 
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    (celld, key, W, DO, WD, seed) = task
+    u0 = time.time()
+    dev = "cuda:0" if torch.cuda.is_available() else "cpu"
+    sd = celld["shm"]
+
+    def _ld(n):
+        return np.load(f"{sd}/{n}.npy", mmap_mode="r")
+
+    Xfit = torch.from_numpy(np.ascontiguousarray(_ld("Xfit"))).to(dev)
+    Xval = torch.from_numpy(np.ascontiguousarray(_ld("Xval"))).to(dev)
+    Xte = torch.from_numpy(np.ascontiguousarray(_ld("Xte"))).to(dev)
+    yfit = torch.from_numpy(np.ascontiguousarray(_ld("yfit"))).to(dev)
+    wfit = torch.from_numpy(np.ascontiguousarray(_ld("wfit"))).to(dev)
+    yval_i = np.ascontiguousarray(_ld("yval_i"))
+    yte_i = np.ascontiguousarray(_ld("yte_i"))
+    block = celld["block"]
+    n_fit = Xfit.shape[0]
+    idx = np.arange(n_fit)
+
+    def _logits(net, Xg):
+        o = []
+        with torch.no_grad(), torch.amp.autocast(
+                "cuda", enabled=dev != "cpu"):
+            for s in range(0, Xg.shape[0], 16384):
+                o.append(net(Xg[s:s + 16384]).float().cpu())
+        return torch.cat(o)
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    net = _build_tcn(C.N_TICK_FEAT, W, D_FIXED, dropout=DO).to(dev)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=WD)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_MAX)
+    scaler = torch.amp.GradScaler("cuda", enabled=dev != "cpu")
+    best_ric, pat, best_state = -1e9, 0, None
+    for ep in range(EP_CAP):
+        net.train()
+        np.random.shuffle(idx)
+        for s in range(0, n_fit, 1024):
+            jt = torch.as_tensor(idx[s:s + 1024], device=dev)
+            opt.zero_grad(set_to_none=True)
+            with torch.amp.autocast("cuda", enabled=dev != "cpu"):
+                lo = net(Xfit[jt])
+                loss = (Fnn.binary_cross_entropy_with_logits(
+                    lo, yfit[jt], reduction="none") * wfit[jt]
+                ).sum() / (wfit[jt].sum() + 1e-9)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+        if ep < T_MAX:
+            sch.step()
+        net.eval()
+        vp = _logits(net, Xval)
+        v_ric = C.auc(yval_i, torch.sigmoid(vp).numpy()) - 0.5
+        if v_ric > best_ric + MIN_DELTA:
+            best_ric, pat = v_ric, 0
+            best_state = {k: v.detach().cpu().clone()
+                          for k, v in net.state_dict().items()}
+        else:
+            pat += 1
+            if pat >= PATIENCE:
+                break
+    if best_state:
+        net.load_state_dict(best_state)
+    net.eval()
+    p = torch.sigmoid(_logits(net, Xte)).numpy()
+    se = C.block_bootstrap_auc_se(yte_i, p, block)
+    return {"key": key, "sym": celld["sym"], "H": celld["H"],
+            "L": celld["L"], "W": W, "dropout": DO, "wd": WD,
+            "seed": seed, "ric": round(C.auc(yte_i, p) - 0.5, 6),
+            "placebo_ric": round(C.placebo_auc(yte_i, p) - 0.5, 6),
+            "boot_se": (None if not np.isfinite(se)
+                        else round(float(se), 6)),
+            "n_tr": celld["ntr"], "n_oos": celld["nte"],
+            "block": block, "gpu_s": round(time.time() - u0, 2),
+            "gpu": os.environ.get("_HD1_GPU", "?")}
+
+
+@app.function(image=GPU_IMG, gpu=f"L4:{N_GPU}", timeout=21600,
+              memory=65536, volumes={MNT: VOL}, retries=3)
+def tier0_all(run_id: str):
+    """ONE container, 4 GPUs. ALIVE before import. Per cell: CPU
+    standardize once -> /tmp memmap -> ProcessPool(4, GPU-pinned)
+    dispatches the grid. Per-unit Volume checkpoint + resume-skip.
+    Aggregates from durable parts; writes tier0.json + DONE."""
+    import os
+    import shutil
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    t_run = time.time()
+    _mark(run_id, "ALIVE", t_run)
+    import numpy as np
+    sys.path.insert(0, "/root/proj")
+    from scripts import hd1_seq_core as C
+    from scripts.hd1_seq_modal import BASELINE_REF_RIC  # noqa: F401
+
     VOL.reload()
     pdir = f"{MNT}/tier0/{run_id}/parts"
     os.makedirs(pdir, exist_ok=True)
@@ -120,15 +229,18 @@ def tier0_all(run_id: str):
     for (s, H, L) in CELLS:
         groups.setdefault(s, []).append((H, L))
     per_cell = len(W_SWEEP) * len(DO_SWEEP) * len(WD_SWEEP) * len(SEEDS)
+    tot = len(CELLS) * per_cell
 
     def _hb(extra=""):
-        tot_done = 0
-        for fn in os.listdir(pdir) if os.path.isdir(pdir) else []:
-            tot_done += sum(1 for _ in open(f"{pdir}/{fn}"))
-        _mark(run_id, "HB", f"units={tot_done}/{len(CELLS)*per_cell} "
-              f"t={round(time.time()-t_run)}s {extra}")
+        d = sum(sum(1 for _ in open(f"{pdir}/{fn}"))
+                for fn in (os.listdir(pdir) if os.path.isdir(pdir)
+                           else []))
+        _mark(run_id, "HB",
+              f"units={d}/{tot} t={round(time.time()-t_run)}s {extra}")
 
-    _hb("start")
+    _hb(f"start ngpu={N_GPU}")
+    ctx = mp.get_context("spawn")
+
     for sym, hl in groups.items():
         ppath = f"{pdir}/{sym}.jsonl"
         done = set()
@@ -156,129 +268,58 @@ def tier0_all(run_id: str):
             w1 = C.r1_weights(rH, s_tr_all).astype(np.float32)
             fr = XL[fit_m].reshape(-1, C.N_TICK_FEAT)
             mu = fr.mean(0).astype(np.float32)
-            sd = fr.std(0).astype(np.float32) + 1e-6
-
-            def _G(mask):
-                x = (XL[mask].astype(np.float32) - mu) / sd
-                return torch.from_numpy(x).to(dev)
-
-            Xfit, Xval, Xte = _G(fit_m), _G(val_m), _G(s_te)
-            yfit = torch.from_numpy(up[fit_m]).to(dev)
-            wfit = torch.from_numpy(w1[fit_m]).to(dev)
-            yval_i = up[val_m].astype(int)
-            yte_i = up[s_te].astype(int)
-            block = C.block_size(H)
-            n_fit = Xfit.shape[0]
-            idx = np.arange(n_fit)
-
-            def _logits(net, Xg):
-                o = []
-                with torch.no_grad(), torch.amp.autocast(
-                        "cuda", enabled=dev == "cuda"):
-                    for s in range(0, Xg.shape[0], 4096):
-                        o.append(net(Xg[s:s + 4096]).float().cpu())
-                return torch.cat(o)
-
-            for W in W_SWEEP:
-                for DO in DO_SWEEP:
-                    for WD in WD_SWEEP:
-                        for seed in SEEDS:
-                            key = f"H{H}|W{W}|do{DO}|wd{WD:g}|s{seed}"
-                            if key in done:
-                                continue
-                            u0 = time.time()
-                            torch.manual_seed(seed)
-                            np.random.seed(seed)
-                            net = _build_tcn(C.N_TICK_FEAT, W, D_FIXED,
-                                             dropout=DO).to(dev)
-                            opt = torch.optim.Adam(
-                                net.parameters(), lr=1e-3,
-                                weight_decay=WD)
-                            sch = torch.optim.lr_scheduler.\
-                                CosineAnnealingLR(opt, T_MAX)
-                            scaler = torch.amp.GradScaler(
-                                "cuda", enabled=dev == "cuda")
-                            best_ric, pat, best_state = -1e9, 0, None
-                            for ep in range(EP_CAP):
-                                net.train()
-                                np.random.shuffle(idx)
-                                for s in range(0, n_fit, 1024):
-                                    jt = torch.as_tensor(
-                                        idx[s:s + 1024], device=dev)
-                                    opt.zero_grad(set_to_none=True)
-                                    with torch.amp.autocast(
-                                            "cuda",
-                                            enabled=dev == "cuda"):
-                                        lo = net(Xfit[jt])
-                                        loss = (
-                                            Fnn.
-                                            binary_cross_entropy_with_logits(
-                                                lo, yfit[jt],
-                                                reduction="none")
-                                            * wfit[jt]).sum() / (
-                                            wfit[jt].sum() + 1e-9)
-                                    scaler.scale(loss).backward()
-                                    scaler.step(opt)
-                                    scaler.update()
-                                if ep < T_MAX:
-                                    sch.step()
-                                net.eval()
-                                vp = _logits(net, Xval)
-                                v_ric = C.auc(
-                                    yval_i,
-                                    torch.sigmoid(vp).numpy()) - 0.5
-                                if v_ric > best_ric + MIN_DELTA:
-                                    best_ric, pat = v_ric, 0
-                                    best_state = {
-                                        k: v.detach().cpu().clone()
-                                        for k, v in
-                                        net.state_dict().items()}
-                                else:
-                                    pat += 1
-                                    if pat >= PATIENCE:
-                                        break
-                            if best_state:
-                                net.load_state_dict(best_state)
-                            net.eval()
-                            p = torch.sigmoid(
-                                _logits(net, Xte)).numpy()
-                            se = C.block_bootstrap_auc_se(
-                                yte_i, p, block)
-                            rec = {"key": key, "sym": sym, "H": H,
-                                   "L": L, "W": W, "dropout": DO,
-                                   "wd": WD, "seed": seed,
-                                   "ric": round(
-                                       C.auc(yte_i, p) - 0.5, 6),
-                                   "placebo_ric": round(
-                                       C.placebo_auc(yte_i, p) - 0.5,
-                                       6),
-                                   "boot_se": (
-                                       None if not np.isfinite(se)
-                                       else round(float(se), 6)),
-                                   "n_tr": ntr, "n_oos": nte,
-                                   "block": block,
-                                   "gpu_s": round(time.time() - u0,
-                                                  2)}
-                            with open(ppath, "a") as fh:
-                                fh.write(json.dumps(rec) + "\n")
+            sg = fr.std(0).astype(np.float32) + 1e-6
+            sd = f"{SHM}/{run_id}/{sym}_{H}"
+            os.makedirs(sd, exist_ok=True)
+            np.save(f"{sd}/Xfit.npy",
+                    (XL[fit_m].astype(np.float32) - mu) / sg)
+            np.save(f"{sd}/Xval.npy",
+                    (XL[val_m].astype(np.float32) - mu) / sg)
+            np.save(f"{sd}/Xte.npy",
+                    (XL[s_te].astype(np.float32) - mu) / sg)
+            np.save(f"{sd}/yfit.npy", up[fit_m])
+            np.save(f"{sd}/wfit.npy", w1[fit_m])
+            np.save(f"{sd}/yval_i.npy", up[val_m].astype(int))
+            np.save(f"{sd}/yte_i.npy", up[s_te].astype(int))
+            celld = {"sym": sym, "H": H, "L": L, "block": C.block_size(H),
+                     "ntr": ntr, "nte": nte, "shm": sd}
+            tasks = [(celld, f"H{H}|W{W}|do{DO}|wd{WD:g}|s{seed}",
+                      W, DO, WD, seed)
+                     for W in W_SWEEP for DO in DO_SWEEP
+                     for WD in WD_SWEEP for seed in SEEDS
+                     if f"H{H}|W{W}|do{DO}|wd{WD:g}|s{seed}" not in done]
+            if tasks:
+                gq = ctx.Queue()
+                for g in range(N_GPU):
+                    gq.put(g)
+                done_n = 0
+                with ProcessPoolExecutor(
+                        max_workers=N_GPU, mp_context=ctx,
+                        initializer=_pool_init,
+                        initargs=(gq,)) as ex:
+                    futs = [ex.submit(_unit_worker, t) for t in tasks]
+                    for fu in as_completed(futs):
+                        rec = fu.result()
+                        with open(ppath, "a") as fh:
+                            fh.write(json.dumps(rec) + "\n")
+                        done.add(rec["key"])
+                        done_n += 1
+                        if done_n % N_GPU == 0:
                             VOL.commit()
-                            done.add(key)
-                            if len(done) % 4 == 0:
-                                _hb(f"{sym} {len(done)}/{per_cell*len(hl)}")
-            del Xfit, Xval, Xte, yfit, wfit
-            if dev == "cuda":
-                torch.cuda.empty_cache()
+                            _hb(f"{sym}-H{H}")
+                VOL.commit()
+            shutil.rmtree(sd, ignore_errors=True)
+            _hb(f"{sym}-H{H} cell-done")
         del Xfull, P
-    _finalize(run_id, t_run, BASELINE_REF_RIC)
+    _finalize(run_id, t_run)
     return {"run_id": run_id, "done": True}
 
 
-def _finalize(run_id, t_run, BASELINE_REF_RIC):
-    """Aggregate durable parts -> rev35 design-lock + tier0.json +
-    DONE/ABORT. Runs in-container at the end of tier0_all (also safe
-    to import-call from --collect recovery)."""
+def _finalize(run_id, t_run):
     import os
     import numpy as np
+    sys.path.insert(0, "/root/proj")
+    from scripts.hd1_seq_modal import BASELINE_REF_RIC
     pdir = f"{MNT}/tier0/{run_id}/parts"
     units = []
     if os.path.isdir(pdir):
@@ -367,8 +408,8 @@ def _finalize(run_id, t_run, BASELINE_REF_RIC):
     else:
         lock = "NO complete cells -> inconclusive; re-run needed"
     doc = {"run_id": run_id,
-           "spec": "HD1 rev32 Tier-0 (FROZEN); runner rev3 (rev38 "
-                   "single-container infra fix, numerics bit-identical)",
+           "spec": "HD1 rev32 Tier-0 (FROZEN); runner rev4 (rev40 "
+                   "multi-GPU; per-unit numerics == rev3)",
            "framing": "rev35 design-lock; HM1 continuous; §5 gate NOT "
                       "applied; rev28 unchanged",
            "DESIGN_LOCK_RECOMMENDATION": lock,
@@ -429,11 +470,11 @@ def _collect(run_id):
            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
            "statement": (
                f"TIER-0 RESULT (run {run_id}, FROZEN rev32 spec, "
-               f"runner rev3 single-container infra fix, numerics "
-               f"bit-identical; rev35 design-lock; HM1 continuous, §5 "
-               f"gate NOT applied; rev28 unchanged). DESIGN-LOCK: "
-               f"{dl}. PER-CELL: {tbl}. Secondary rev32-rule check: "
-               f"{sc}. incomplete={inc}. approx GPU "
+               f"runner rev4 multi-GPU; per-unit numerics == rev3; "
+               f"rev35 design-lock; HM1 continuous, §5 gate NOT "
+               f"applied; rev28 unchanged). DESIGN-LOCK: {dl}. "
+               f"PER-CELL: {tbl}. Secondary rev32-rule check: {sc}. "
+               f"incomplete={inc}. approx GPU "
                f"${doc['approx_gpu_usd']} ({doc['n_units']} units)."),
            "status": "testing", "priority_rank": 1,
            "result_experiment_id": run_id,
@@ -447,7 +488,10 @@ def _collect(run_id):
 
 
 @app.local_entrypoint()
-def main(collect: str = "", skip_smoke: int = 0):
+def main(collect: str = "", skip_smoke: int = 0, validate: int = 0):
+    # validate=1: perf+correctness re-run of the SETTLED Tier-0 spec;
+    # does NOT append a scientific rev34 (Tier-0 result already final
+    # rev34/rev39) -- just writes tier0.json/DONE for manual inspect.
     if collect:
         _collect(collect)
         print("local entrypoint completed")
@@ -458,42 +502,38 @@ def main(collect: str = "", skip_smoke: int = 0):
     import re
     import time as _t
     run_id = f"tier0-{_t.strftime('%Y%m%d-%H%M%S', _t.gmtime())}"
-
     if not skip_smoke:
-        sh = smoke.spawn(run_id)
-        print(f"[smoke] spawned fc={getattr(sh,'object_id','?')} "
-              f"run_id={run_id}")
+        smoke.spawn(run_id)
+        print(f"[smoke] spawned run_id={run_id} (L4:{N_GPU})")
         t0, ok = _t.time(), False
-        while _t.time() - t0 < 720:                # 12 min smoke budget
+        while _t.time() - t0 < 1500:
             o = _ls(f"/tier0/{run_id}")
             if "SMOKE_ALIVE" in o:
-                print("[smoke] ALIVE (container reached user code)")
+                print("[smoke] ALIVE (multi-GPU container reached code)")
             if "SMOKE_OK" in o:
-                print(f"[smoke] OK: "
-                      f"{(_vol_text(f'/tier0/{run_id}/SMOKE_OK') or '').strip()}")
+                print("[smoke] OK: " + (
+                    _vol_text(f"/tier0/{run_id}/SMOKE_OK") or "").strip())
                 ok = True
                 break
             _t.sleep(20)
         if not ok:
-            print("[smoke] FAILED (no SMOKE_OK in 12min) -> infra "
-                  "still bad on this profile; NOT launching full run. "
-                  "Agent will diagnose/switch autonomously.")
+            print("[smoke] FAILED (no SMOKE_OK in 25min) -> NOT "
+                  "launching full run; agent diagnoses autonomously.")
             raise SystemExit(3)
-
-    h = tier0_all.spawn(run_id)
-    print(f"[tier0] spawned fc={getattr(h,'object_id','?')} "
-          f"run_id={run_id} (single container, resumable)")
+    tier0_all.spawn(run_id)
+    print(f"[tier0] spawned run_id={run_id} (1 container, {N_GPU} GPU)")
     t0 = _t.time()
     while _t.time() - t0 < 7 * 3600:
         o = _ls(f"/tier0/{run_id}")
-        if "ABORT" in o:
-            _collect(run_id)
-            print("local entrypoint completed (budget-capped)")
-            return
-        if "DONE" in o:
-            _collect(run_id)
-            print("local entrypoint completed")
+        if "ABORT" in o or "DONE" in o:
+            if validate:
+                print(f"[validate] terminal; tier0.json on Volume "
+                      f"/tier0/{run_id} (no rev34 — settled result). "
+                      f"run_id={run_id}")
+            else:
+                _collect(run_id)
+            print("local entrypoint completed"
+                  + (" (budget-capped)" if "ABORT" in o else ""))
             return
         _t.sleep(30)
-    print(f"[poll] still running server-side; collect later: "
-          f"--collect {run_id}.")
+    print(f"[poll] still running; collect later: --collect {run_id}.")
