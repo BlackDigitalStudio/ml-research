@@ -1,0 +1,266 @@
+{
+  "run_id": "tier1-20260518-192553",
+  "spec": "HD1 rev43 Tier-1 (FROZEN); runner rev4 substrate (per-unit numerics == Tier-0 rev3/rev4 regime)",
+  "framing": "rev35 design-lock; HM1 continuous; \u00a75 gate NOT applied; rev28/rev32/rev39/rev41/rev42 unchanged",
+  "locked": {
+    "W": 16,
+    "D": 4,
+    "dropout": 0.5,
+    "wd": 0.001,
+    "note": "rev30 principled default (smallest W, most regularized) accompanying the rev39/rev41 W=16 lock"
+  },
+  "reference_corner": "bce|last",
+  "DECISION": "NO combo is a real effect (no non-ref combo lifts >=+0.004 with seed-sd<=0.004 on >=3/4 cells incl the LTC-H300 weak control). The TCN objective/head axis is ALSO inert at locked W=16/D=4 in the frozen rev32 regime -> materially STRENGTHENS 'TCN ~= snapshot fundamentally' (rev28/rev30/rev39 reinforced; escalate). HM1 continuous, NOT a \u00a75 gate (rev35).",
+  "real_effects": [],
+  "rule": "per non-ref combo & cell: lift = ric_mean(C) - ric_mean(bce|last) in-run; win iff lift>=+0.004 AND seed-sd<=0.004; real effect iff wins>=3/4 incl LTC-H300",
+  "incomplete_cells": [],
+  "rows": [
+    {
+      "sym": "BTC-USDT-PERP",
+      "H": 180,
+      "L": 512,
+      "is_weak_control": false,
+      "ref_combo": "bce|last",
+      "ref_ric_mean": 0.036964,
+      "ref_ric_sd": 0.00067,
+      "combos": {
+        "bce|last": {
+          "ric_mean": 0.036964,
+          "ric_sd": 0.00067,
+          "ric_seeds": [
+            0.036057,
+            0.037181,
+            0.037654
+          ],
+          "placebo_ric": -0.002248,
+          "boot_se": 0.003511
+        },
+        "bce|mean": {
+          "ric_mean": 0.014496,
+          "ric_sd": 0.001834,
+          "ric_seeds": [
+            0.011905,
+            0.01569,
+            0.015894
+          ],
+          "placebo_ric": 0.000753,
+          "boot_se": 0.003544,
+          "lift_vs_ref": -0.022468,
+          "wins_cell": false
+        },
+        "pairwise|last": {
+          "ric_mean": 0.034166,
+          "ric_sd": 0.002075,
+          "ric_seeds": [
+            0.031451,
+            0.034559,
+            0.036488
+          ],
+          "placebo_ric": -0.002346,
+          "boot_se": 0.003486,
+          "lift_vs_ref": -0.002798,
+          "wins_cell": false
+        },
+        "pairwise|mean": {
+          "ric_mean": 0.012901,
+          "ric_sd": 0.001205,
+          "ric_seeds": [
+            0.01128,
+            0.013258,
+            0.014165
+          ],
+          "placebo_ric": 0.000458,
+          "boot_se": 0.003511,
+          "lift_vs_ref": -0.024063,
+          "wins_cell": false
+        }
+      }
+    },
+    {
+      "sym": "BTC-USDT-PERP",
+      "H": 300,
+      "L": 512,
+      "is_weak_control": false,
+      "ref_combo": "bce|last",
+      "ref_ric_mean": 0.028951,
+      "ref_ric_sd": 0.001206,
+      "combos": {
+        "bce|last": {
+          "ric_mean": 0.028951,
+          "ric_sd": 0.001206,
+          "ric_seeds": [
+            0.027342,
+            0.029267,
+            0.030245
+          ],
+          "placebo_ric": -0.000887,
+          "boot_se": 0.002589
+        },
+        "bce|mean": {
+          "ric_mean": 0.008195,
+          "ric_sd": 0.000907,
+          "ric_seeds": [
+            0.006917,
+            0.008736,
+            0.008932
+          ],
+          "placebo_ric": -0.001948,
+          "boot_se": 0.002896,
+          "lift_vs_ref": -0.020756,
+          "wins_cell": false
+        },
+        "pairwise|last": {
+          "ric_mean": 0.027117,
+          "ric_sd": 0.001138,
+          "ric_seeds": [
+            0.025541,
+            0.027623,
+            0.028187
+          ],
+          "placebo_ric": -0.001361,
+          "boot_se": 0.002724,
+          "lift_vs_ref": -0.001834,
+          "wins_cell": false
+        },
+        "pairwise|mean": {
+          "ric_mean": 0.00722,
+          "ric_sd": 0.000644,
+          "ric_seeds": [
+            0.006507,
+            0.007085,
+            0.008067
+          ],
+          "placebo_ric": -0.001529,
+          "boot_se": 0.002917,
+          "lift_vs_ref": -0.021731,
+          "wins_cell": false
+        }
+      }
+    },
+    {
+      "sym": "ETH-USDT-PERP",
+      "H": 180,
+      "L": 256,
+      "is_weak_control": false,
+      "ref_combo": "bce|last",
+      "ref_ric_mean": 0.023482,
+      "ref_ric_sd": 0.001302,
+      "combos": {
+        "bce|last": {
+          "ric_mean": 0.023482,
+          "ric_sd": 0.001302,
+          "ric_seeds": [
+            0.022248,
+            0.022917,
+            0.025282
+          ],
+          "placebo_ric": 0.000552,
+          "boot_se": 0.002676
+        },
+        "bce|mean": {
+          "ric_mean": 0.011585,
+          "ric_sd": 0.001147,
+          "ric_seeds": [
+            0.010368,
+            0.011265,
+            0.013123
+          ],
+          "placebo_ric": 0.002194,
+          "boot_se": 0.003177,
+          "lift_vs_ref": -0.011897,
+          "wins_cell": false
+        },
+        "pairwise|last": {
+          "ric_mean": 0.020816,
+          "ric_sd": 0.000673,
+          "ric_seeds": [
+            0.019916,
+            0.020998,
+            0.021533
+          ],
+          "placebo_ric": 0.001891,
+          "boot_se": 0.002686,
+          "lift_vs_ref": -0.002666,
+          "wins_cell": false
+        },
+        "pairwise|mean": {
+          "ric_mean": 0.004999,
+          "ric_sd": 0.001962,
+          "ric_seeds": [
+            0.003295,
+            0.003954,
+            0.007747
+          ],
+          "placebo_ric": 0.004143,
+          "boot_se": 0.002953,
+          "lift_vs_ref": -0.018483,
+          "wins_cell": false
+        }
+      }
+    },
+    {
+      "sym": "LTC-USDT-PERP",
+      "H": 300,
+      "L": 128,
+      "is_weak_control": true,
+      "ref_combo": "bce|last",
+      "ref_ric_mean": 0.023416,
+      "ref_ric_sd": 0.005407,
+      "combos": {
+        "bce|last": {
+          "ric_mean": 0.023416,
+          "ric_sd": 0.005407,
+          "ric_seeds": [
+            0.016344,
+            0.024432,
+            0.029471
+          ],
+          "placebo_ric": 0.00519,
+          "boot_se": 0.006643
+        },
+        "bce|mean": {
+          "ric_mean": 0.000788,
+          "ric_sd": 0.003527,
+          "ric_seeds": [
+            -0.003881,
+            0.001601,
+            0.004644
+          ],
+          "placebo_ric": 0.008958,
+          "boot_se": 0.00724,
+          "lift_vs_ref": -0.022628,
+          "wins_cell": false
+        },
+        "pairwise|last": {
+          "ric_mean": 0.024773,
+          "ric_sd": 0.006277,
+          "ric_seeds": [
+            0.016045,
+            0.027729,
+            0.030544
+          ],
+          "placebo_ric": 0.005024,
+          "boot_se": 0.006725,
+          "lift_vs_ref": 0.001357,
+          "wins_cell": false
+        },
+        "pairwise|mean": {
+          "ric_mean": 0.002627,
+          "ric_sd": 0.002215,
+          "ric_seeds": [
+            0.000411,
+            0.001818,
+            0.005652
+          ],
+          "placebo_ric": 0.007758,
+          "boot_se": 0.007305,
+          "lift_vs_ref": -0.020789,
+          "wins_cell": false
+        }
+      }
+    }
+  ],
+  "approx_gpu_usd": 1.18,
+  "n_units": 48,
+  "finished": "2026-05-18T19:34:49Z"
+}
