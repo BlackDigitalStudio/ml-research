@@ -23,6 +23,10 @@ path = "src/bin/build_samples.rs"
 name = "grid_sim"
 path = "src/bin/grid_sim.rs"
 
+[[bin]]
+name = "hd1_seq_build"
+path = "src/bin/hd1_seq_build.rs"
+
 [lib]
 name = "scalper_ingest"
 path = "src/lib.rs"

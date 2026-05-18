@@ -114,8 +114,14 @@ def _gcs():
                                  credentials=_Static(token=s))
             return cl.bucket(BUCKET)
         if s[:1] == "{":
+            info = json.loads(v)
+            if info.get("type") == "authorized_user":
+                import google.oauth2.credentials as goc
+                cr = goc.Credentials.from_authorized_user_info(info)
+                return storage.Client(project=GCP_PROJECT,
+                                      credentials=cr).bucket(BUCKET)
             return storage.Client.from_service_account_info(
-                json.loads(v), project=GCP_PROJECT).bucket(BUCKET)
+                info, project=GCP_PROJECT).bucket(BUCKET)
     if raw is None:
         raise RuntimeError("no GCS credential in env (GCP_ACCESS_TOKEN/"
                            "GCP_SA_KEY[_B64])")
