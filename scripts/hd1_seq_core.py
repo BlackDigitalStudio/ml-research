@@ -290,8 +290,13 @@ def tick_features(bid_p, bid_s, ask_p, ask_s):
 def gather_windows(tickfeat, i, L=MAX_L):
     """Causal window gather: for each decision book-index i, the last L
     ticks with ts<=t0 == tickfeat[i-L+1 .. i] (inclusive of i). Left-pad
-    with zeros when i<L-1; returns (n_dp, L, F) float16 and a (n_dp, L)
-    bool valid mask. Single fancy-index op — no Python loop."""
+    with zeros when i<L-1; returns (n_dp, L, F) float32 and a (n_dp, L)
+    bool valid mask. Single fancy-index op — no Python loop.
+
+    f32 (not f16): the §3 transform produces values (e.g. raw Cont-OFI,
+    feat [44]) outside float16 range for high-notional symbols; f16
+    overflows to ±inf -> NaN. f32 is exact for the deterministic
+    transform (HD1 rev26 defect-fix; storage-only, no math change)."""
     n_dp = i.shape[0]
     F = tickfeat.shape[1]
     offs = np.arange(-(L - 1), 1)
@@ -300,7 +305,7 @@ def gather_windows(tickfeat, i, L=MAX_L):
     rows = np.clip(rows, 0, tickfeat.shape[0] - 1)
     win = tickfeat[rows]                         # (n_dp, L, F)
     win[~valid] = 0.0
-    return win.astype(np.float16), valid
+    return win.astype(np.float32), valid
 
 
 # =========================================================================

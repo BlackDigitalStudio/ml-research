@@ -88,12 +88,13 @@ def test_rust_matches_frozen_python():
     assert np.array_equal(ri, i_ref), "decision indices differ"
     assert np.array_equal(rt0, t0_ref), "t0 differs"
 
-    # §3 feature windows — fp-equivalent (both f64 -> f32; py packs f16)
+    # §3 feature windows — both compute f64 -> f32 (HD1 rev26: f32
+    # storage, no f16 pack); expect near bit-exact.
     tf = C.tick_features(bp, bs, ap, az)
     win, _ = C.gather_windows(tf, i_ref, L=L)
+    assert win.dtype == np.float32, win.dtype
     assert rX.shape == win.shape, (rX.shape, win.shape)
-    np.testing.assert_allclose(
-        rX, win.astype(np.float32), rtol=2e-3, atol=2e-3)
+    np.testing.assert_allclose(rX, win, rtol=1e-5, atol=1e-5)
 
     # first-passage label + rH — BIT-EXACT vs the ACTUAL frozen function
     for H in C.HS:

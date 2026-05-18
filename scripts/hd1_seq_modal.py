@@ -211,7 +211,7 @@ def measure_egress(sym: str, day: str):
 def build_symbol_day(sym: str, day: str, day_ord: int):
     # Python only orchestrates: pull parquet + indices, invoke the Rust
     # heavy-path binary (parquet -> 46-feat per-tick -> causal windows ->
-    # frozen first-passage), pack the f32 windows to f16, write the shard.
+    # frozen first-passage), store the f32 windows, write the shard.
     import numpy as np
     import subprocess
     import tempfile
@@ -252,7 +252,7 @@ def build_symbol_day(sym: str, day: str, day_ord: int):
             np.savez_compressed(shard, empty=True)
             VOL.commit()
             return {"sym": sym, "day": day, "n_dp": 0}
-        X = np.load(f"{odir}/X.npy").astype(np.float16)   # f32 -> f16 pack
+        X = np.load(f"{odir}/X.npy").astype(np.float32)   # f32 (rev26)
         t0 = np.load(f"{odir}/t0.npy").astype(np.int64)
         lab = {}
         for H in HS:
@@ -292,7 +292,7 @@ def reduce_symbol(sym: str):
         for H in HS:
             lab[f"y0_{H}"].append(d[f"y0_{H}"])
             lab[f"rH_{H}"].append(d[f"rH_{H}"])
-    X = np.concatenate(Xs)                       # (n, 512, 46) f16
+    X = np.concatenate(Xs)                       # (n, 512, 46) f32
     t0 = np.concatenate(t0s)
     n = X.shape[0]
     tr, te, n_tr = C.honest_split(n)
@@ -372,7 +372,7 @@ def train_cell(sym: str, L: int, grid: list):
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     VOL.reload()
     P = np.load(f"{MNT}/packed/{sym}.npz")
-    Xfull = P["X"]                                # (n,512,46) f16
+    Xfull = P["X"]                                # (n,512,46) f32
     n = int(P["n"])
     XL = np.ascontiguousarray(Xfull[:, -L:, :])   # causal slice
     tr, te, _ = C.honest_split(n)
