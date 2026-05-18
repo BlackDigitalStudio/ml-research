@@ -1,0 +1,113 @@
+{
+  "run_id": "tier0-20260518-135001",
+  "spec": "HD1 rev32 Tier-0 (FROZEN); runner rev3 (rev38 single-container infra fix, numerics bit-identical)",
+  "framing": "rev35 design-lock; HM1 continuous; \u00a75 gate NOT applied; rev28 unchanged",
+  "DESIGN_LOCK_RECOMMENDATION": "NO config robustly clears the ~0.004 noise floor on >=3/4 incl weak control -> capacity/reg axis INERT in this range; principled default = smallest W (16, cheapest + most regularized per rev30); stop sweeping. (best-W vote {16: 1, 64: 2, 32: 1})",
+  "secondary_rule_check": "rev32 lift>=+0.004 & sd<=0.004 on >=3/4 incl LTC-H300: pass=0/4 ctrl=False -> edge_real=False",
+  "incomplete_cells": [],
+  "rows": [
+    {
+      "sym": "BTC-USDT-PERP",
+      "H": 180,
+      "L": 512,
+      "baseline_ref": 0.0419,
+      "rev25_ric": 0.03732,
+      "locked_config": {
+        "W": 16,
+        "dropout": 0.5,
+        "wd": 0.001
+      },
+      "ric_mean": 0.037707,
+      "ric_sd": 0.000946,
+      "ric_seeds": [
+        0.036444,
+        0.037958,
+        0.038719
+      ],
+      "delta_ic_now": -0.004193,
+      "lift_vs_rev25": 0.000387,
+      "placebo_ric": -0.001703,
+      "boot_se": 0.003532,
+      "robust_vs_noise": false,
+      "is_weak_control": false
+    },
+    {
+      "sym": "BTC-USDT-PERP",
+      "H": 300,
+      "L": 512,
+      "baseline_ref": 0.0254,
+      "rev25_ric": 0.02722,
+      "locked_config": {
+        "W": 64,
+        "dropout": 0.5,
+        "wd": 0.001
+      },
+      "ric_mean": 0.030022,
+      "ric_sd": 0.000264,
+      "ric_seeds": [
+        0.029749,
+        0.029938,
+        0.030379
+      ],
+      "delta_ic_now": 0.004622,
+      "lift_vs_rev25": 0.002802,
+      "placebo_ric": -0.001061,
+      "boot_se": 0.002589,
+      "robust_vs_noise": false,
+      "is_weak_control": false
+    },
+    {
+      "sym": "ETH-USDT-PERP",
+      "H": 180,
+      "L": 256,
+      "baseline_ref": 0.0234,
+      "rev25_ric": 0.02295,
+      "locked_config": {
+        "W": 64,
+        "dropout": 0.1,
+        "wd": 0.001
+      },
+      "ric_mean": 0.025145,
+      "ric_sd": 0.001121,
+      "ric_seeds": [
+        0.023561,
+        0.02587,
+        0.026003
+      ],
+      "delta_ic_now": 0.001745,
+      "lift_vs_rev25": 0.002195,
+      "placebo_ric": 0.003097,
+      "boot_se": 0.002689,
+      "robust_vs_noise": false,
+      "is_weak_control": false
+    },
+    {
+      "sym": "LTC-USDT-PERP",
+      "H": 300,
+      "L": 128,
+      "baseline_ref": 0.0404,
+      "rev25_ric": 0.02719,
+      "locked_config": {
+        "W": 32,
+        "dropout": 0.5,
+        "wd": 0.001
+      },
+      "ric_mean": 0.033952,
+      "ric_sd": 0.004509,
+      "ric_seeds": [
+        0.028523,
+        0.033769,
+        0.039564
+      ],
+      "delta_ic_now": -0.006448,
+      "lift_vs_rev25": 0.006762,
+      "placebo_ric": 0.012053,
+      "boot_se": 0.006866,
+      "robust_vs_noise": false,
+      "is_weak_control": true
+    }
+  ],
+  "approx_gpu_usd": 482.22,
+  "n_units": 216,
+  "finished": "2026-05-18T14:55:06Z"
+}

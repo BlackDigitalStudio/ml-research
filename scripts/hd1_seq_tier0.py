@@ -186,6 +186,7 @@ def tier0_all(run_id: str):
                             key = f"H{H}|W{W}|do{DO}|wd{WD:g}|s{seed}"
                             if key in done:
                                 continue
+                            u0 = time.time()
                             torch.manual_seed(seed)
                             np.random.seed(seed)
                             net = _build_tcn(C.N_TICK_FEAT, W, D_FIXED,
@@ -256,7 +257,7 @@ def tier0_all(run_id: str):
                                        else round(float(se), 6)),
                                    "n_tr": ntr, "n_oos": nte,
                                    "block": block,
-                                   "gpu_s": round(time.time() - t_run,
+                                   "gpu_s": round(time.time() - u0,
                                                   2)}
                             with open(ppath, "a") as fh:
                                 fh.write(json.dumps(rec) + "\n")
@@ -299,8 +300,8 @@ def _finalize(run_id, t_run, BASELINE_REF_RIC):
         if r.get("model_family") == "tcn" and r.get("symbols"):
             rev25[(r["symbols"][0], r.get("horizon_sec"))] = \
                 r.get("rank_ic_oos")
-    spent = round(sum(u.get("gpu_s", 0) for u in units) /
-                  max(len(units), 1) * len(units) * L4_USD_PER_S, 2)
+    spent = round(sum(u.get("gpu_s", 0) for u in units) *
+                  L4_USD_PER_S, 2)
     per_cell = len(W_SWEEP) * len(DO_SWEEP) * len(WD_SWEEP) * len(SEEDS)
     rows, n_pass, ctrl_pass, incomplete = [], 0, False, []
     for (s, H, L) in CELLS:
