@@ -211,7 +211,10 @@ def _reduce_symbol(sym, shard_dir, packed_path):
         packed[f"rH_{H}"] = np.concatenate(
             lab[f"rH_{H}"]).astype(np.float32)
     os.makedirs(os.path.dirname(packed_path), exist_ok=True)
-    tmp = packed_path + ".tmp"
+    # tmp MUST end in .npz: np.savez appends '.npz' to any name that
+    # lacks it, so `packed_path + ".tmp"` -> np.savez writes
+    # `...npz.tmp.npz` and the os.replace of `...npz.tmp` fails.
+    tmp = packed_path + ".tmp.npz"
     np.savez(tmp, **packed)
     os.replace(tmp, packed_path)
     for f in files:
@@ -232,6 +235,15 @@ def _stage_upload(bk, local_path, gs_uri):
     return f"gs://{bname}/{key} ({os.path.getsize(local_path)} bytes)"
 
 
+def _stage_upload_text(bk, gs_uri, text):
+    """Small text marker to GCS (FAILED notes, per-symbol status)."""
+    assert gs_uri.startswith("gs://")
+    bname, _, key = gs_uri[len("gs://"):].partition("/")
+    blob = (bk if bname == BUCKET else bk.client.bucket(bname)).blob(key)
+    blob.upload_from_string(str(text))
+    return f"gs://{bname}/{key}"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-l", type=int, default=1536)
@@ -244,6 +256,9 @@ def main():
     ap.add_argument("--stage",
                     default=("gs://blackdigital-scalper-data/"
                              "hd1seq_tier2_pack/l1536"))
+    ap.add_argument("--jobs", type=int, default=24,
+                    help="parallel per-day build workers (each shells "
+                         "the Rust binary; days are independent)")
     a = ap.parse_args()
     build_syms = [s for s in a.build_syms.split(",") if s]
     assert all(s in SYMS for s in build_syms), build_syms
@@ -259,40 +274,79 @@ def main():
           f"{ {s: len(psd[s]) for s in SYMS} }  "
           f"build_syms={build_syms} max_l={a.max_l}", flush=True)
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     summary = {"max_l": a.max_l, "winlo": winlo, "winhi": winhi,
-               "build_syms": build_syms, "per_sym": {}}
+               "build_syms": build_syms, "jobs": a.jobs, "per_sym": {}}
+    failed = {}
     for sym in build_syms:
         sdir = f"{a.work}/shards_l{a.max_l}/{sym}"
         packed = f"{a.work}/packed_l{a.max_l}/{sym}.npz"
         t_s = time.time()
         days = psd[sym]
         ndp = 0
-        for di, day in enumerate(days):
-            r = _build_symbol_day(bk, a.rust_bin, sym, day, di,
-                                  a.max_l, sdir)
-            if r.get("error"):
-                print(f"[build][{sym}] day={day} ERROR {r['error']}",
-                      flush=True)
-                sys.exit(f"build error {sym} {day}: {r['error']}")
-            ndp += r.get("n_dp", 0)
-            if di % 50 == 0 or di == len(days) - 1:
-                print(f"[build][{sym}] {di+1}/{len(days)} "
-                      f"day={day} cum_dp={ndp} "
-                      f"{time.time()-t_s:.0f}s", flush=True)
-        red = _reduce_symbol(sym, sdir, packed)
-        print(f"[reduce][{sym}] {red}", flush=True)
-        st = _stage_upload(bk, packed,
-                           f"{a.stage}/{sym}.npz")
-        print(f"[stage][{sym}] -> {st}  "
-              f"(sym wall {time.time()-t_s:.0f}s)", flush=True)
-        summary["per_sym"][sym] = {"n": red.get("n"),
-                                   "packed_gib": red.get("packed_gib"),
-                                   "n_dp": ndp}
+        try:
+            # Per-day build is embarrassingly parallel (independent
+            # days, unique shard paths, resumable skip-if-exists). The
+            # heavy work is the Rust subprocess (GIL released) so a
+            # thread pool saturates the 96 vCPUs; bk (storage.Client)
+            # is shared thread-safely for the IO-bound downloads.
+            day_errs = []
+            with ThreadPoolExecutor(max_workers=a.jobs) as ex:
+                futs = {ex.submit(_build_symbol_day, bk, a.rust_bin,
+                                  sym, day, di, a.max_l, sdir): (di, day)
+                        for di, day in enumerate(days)}
+                done_n = 0
+                for fu in as_completed(futs):
+                    di, day = futs[fu]
+                    r = fu.result()
+                    if r.get("error"):
+                        day_errs.append(f"{day}:{r['error']}")
+                    ndp += r.get("n_dp", 0)
+                    done_n += 1
+                    if done_n % 50 == 0 or done_n == len(days):
+                        print(f"[build][{sym}] {done_n}/{len(days)} "
+                              f"cum_dp={ndp} "
+                              f"{time.time()-t_s:.0f}s", flush=True)
+            if day_errs:
+                raise RuntimeError(
+                    f"{len(day_errs)} day(s) failed: {day_errs[:5]}"
+                    f"{'...' if len(day_errs) > 5 else ''}")
+            red = _reduce_symbol(sym, sdir, packed)
+            print(f"[reduce][{sym}] {red}", flush=True)
+            st = _stage_upload(bk, packed, f"{a.stage}/{sym}.npz")
+            print(f"[stage][{sym}] -> {st}  "
+                  f"(sym wall {time.time()-t_s:.0f}s)", flush=True)
+            summary["per_sym"][sym] = {
+                "n": red.get("n"),
+                "packed_gib": red.get("packed_gib"), "n_dp": ndp}
+        except Exception as e:
+            # One bad symbol must not waste the compute already spent
+            # on the others; record, stage a marker, keep going, fail
+            # at the end.
+            msg = f"{type(e).__name__}: {e}"
+            print(f"[build][{sym}] SYMBOL FAILED {msg}", flush=True)
+            failed[sym] = msg
+            try:
+                _stage_upload_text(
+                    bk, f"{a.stage}/TIER2_SYMBOL_FAILED_{sym}.txt", msg)
+            except Exception:
+                pass
 
     summary["wall_s"] = round(time.time() - t_all, 1)
+    summary["failed"] = failed
     done = f"{a.work}/TIER2_BUILD_DONE.json"
     with open(done, "w") as fh:
         json.dump(summary, fh, indent=2)
+    # DONE marker only if EVERY requested symbol succeeded; else a
+    # FAILED marker (the transfer stage gates on DONE).
+    if failed:
+        _stage_upload_text(
+            bk, f"{a.stage}/TIER2_BUILD_FAILED.txt",
+            f"symbols failed: {failed}; ok={list(summary['per_sym'])}")
+        print(f"[done] PARTIAL ok={list(summary['per_sym'])} "
+              f"failed={failed}", flush=True)
+        sys.exit(1)
     _stage_upload(bk, done, f"{a.stage}/TIER2_BUILD_DONE.json")
     print(f"[done] {json.dumps(summary)}", flush=True)
 
