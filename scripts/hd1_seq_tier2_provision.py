@@ -38,62 +38,55 @@ INSTANCE = "hd1-tier2-build"
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 STARTUP = r"""#!/bin/bash
-set -uxo pipefail
+# NO `set -u` (unset $HOME under the GCE metadata script runner would
+# kill the script before any GCS write) and NO `set -e` (build failure
+# must still reach the trap so the log + FAILED marker are uploaded).
+set -x
+set -o pipefail
 exec > >(tee /var/log/tier2_startup.log) 2>&1
-PROJECT="%(project)s"
-BUCKET="%(bucket)s"
-STAGE="gs://%(bucket)s/%(stage)s/l1536"
-trap 'echo "[startup] EXIT -> shutting down to stop billing"; \
+export HOME=/root CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup
+export PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/sbin
+GS="gs://%(bucket)s/%(stage)s"
+# gsutil ships on GCE Google images and auto-auths via the instance SA;
+# use it (not pip lib) for the CRITICAL fetch + the always-on
+# post-mortem so a pip/network failure can never blind us again.
+upload_log(){ gsutil -q cp /var/log/tier2_startup.log \
+    "$GS/l1536/tier2_startup.log" 2>/dev/null || true; }
+trap 'rc=$?; echo "[startup] EXIT rc=$rc"; upload_log; \
       shutdown -h now' EXIT
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
+apt-get update -y || true
 apt-get install -y python3-pip build-essential pkg-config libssl-dev \
-    curl tar ca-certificates
-pip3 install --break-system-packages -q google-cloud-storage numpy
-curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-export PATH="$HOME/.cargo/bin:$PATH"
+    curl tar ca-certificates google-cloud-cli || true
+pip3 install --break-system-packages -q google-cloud-storage numpy \
+    || pip3 install -q google-cloud-storage numpy || true
+curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
+    --default-toolchain stable
 
 mkdir -p /opt/tier2 && cd /opt/tier2
-python3 - <<PY
-from google.cloud import storage
-storage.Client(project="$PROJECT").bucket("$BUCKET").blob(
-    "%(bundle_key)s").download_to_filename("/opt/tier2/b.tgz")
-print("bundle pulled")
-PY
+gsutil -q cp "$GS/bundle/tier2_bundle.tar.gz" /opt/tier2/b.tgz
 tar xzf b.tgz
 
 cd /opt/tier2/rust_ingest
-cargo build --release -p depth_parser --bin hd1_seq_build
+/root/.cargo/bin/cargo build --release -p depth_parser \
+    --bin hd1_seq_build
 RB=/opt/tier2/rust_ingest/target/release/hd1_seq_build
 cd /opt/tier2
 
-set +e
 python3 scripts/hd1_seq_tier2_gcpbuild.py --max-l 1536 \
     --work /var/tier2work --rust-bin "$RB" \
     --build-syms BTC-USDT-PERP,ETH-USDT-PERP,LTC-USDT-PERP \
-    --stage "$STAGE"
+    --stage "$GS/l1536"
 RC=$?
-set -e
-if [ $RC -ne 0 ]; then
-  echo "[startup] BUILD FAILED rc=$RC"
-  python3 - <<PY
-from google.cloud import storage
-storage.Client(project="$PROJECT").bucket("$BUCKET").blob(
-    "%(stage)s/l1536/TIER2_BUILD_FAILED.txt").upload_from_string(
-    "rc=$RC see /var/log/tier2_startup.log")
-PY
+echo "[startup] build rc=$RC"
+if [ "$RC" -ne 0 ]; then
+  echo "rc=$RC see tier2_startup.log" | \
+    gsutil -q cp - "$GS/l1536/TIER2_BUILD_FAILED.txt" || true
 fi
-# upload the full startup log for post-mortem / cost attribution
-python3 - <<PY
-from google.cloud import storage
-storage.Client(project="$PROJECT").bucket("$BUCKET").blob(
-    "%(stage)s/l1536/tier2_startup.log").upload_from_filename(
-    "/var/log/tier2_startup.log")
-PY
 echo "[startup] complete rc=$RC"
-""" % {"project": PROJECT, "bucket": BUCKET, "stage": STAGE_PREFIX,
-       "bundle_key": BUNDLE_KEY}
+# trap (EXIT) uploads the full log and powers the VM off.
+""" % {"bucket": BUCKET, "stage": STAGE_PREFIX}
 
 
 def _bundle_bytes() -> bytes:
