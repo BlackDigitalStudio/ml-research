@@ -83,14 +83,23 @@ def build_done():
     return {"done": True, "summary": json.loads(blob.download_as_text())}
 
 
-@app.function(image=IMG, timeout=21600, memory=16384,
+@app.function(image=IMG, timeout=21600, memory=4096,
               secrets=[modal.Secret.from_name("hd1-gcp")],
               volumes={MNT: VOL}, retries=2)
 def transfer_symbol(sym: str):
-    """Egress gs://.../l1536/{sym}.npz -> Volume, split into a
-    mmap-able {sym}_X.npy + a small {sym}_meta.npz. Stream-copies the
-    X.npy zip member (no full X in RAM). Resumable."""
+    """Stream gs://.../l1536/{sym}.npz directly into a mmap-able
+    {sym}_X.npy + a small {sym}_meta.npz on the Volume. NO staging
+    file: the previous design wrote 84 GiB staging to the Volume,
+    then read it back and wrote another 84 GiB X.npy -- two large
+    Volume writes per symbol, and Modal Volume sustained write rate
+    (~10 MB/s observed) made that the wall-clock bottleneck. The new
+    pipe uses google-cloud-storage Blob.open('rb') (a seekable
+    BlobReader doing HTTP range reads under the hood); zipfile only
+    needs an end-seek for the central directory + the member offset,
+    so the X.npy bytes flow GCS -> zipfile -> Volume in 16 MiB chunks
+    with ONE Volume write per symbol. Resumable."""
     import os
+    import shutil
     import zipfile
     import numpy as np
     sys.path.insert(0, "/root/proj")
@@ -109,29 +118,27 @@ def transfer_symbol(sym: str):
     if not blob.exists():
         return {"sym": sym, "error": f"missing gs://{GCS_PREFIX}/"
                 f"{sym}.npz"}
-    staging = f"{PACK_DIR}/_staging_{sym}.npz"
+    blob.reload()
+    src_gib = round((blob.size or 0) / 2**30, 2)
     t0 = time.time()
-    blob.download_to_filename(staging)               # the egress hop
-    dl_s = round(time.time() - t0, 1)
-    gib = round(os.path.getsize(staging) / 2**30, 2)
 
-    with zipfile.ZipFile(staging) as zf:
-        names = set(zf.namelist())
-        if "X.npy" not in names:
-            return {"sym": sym, "error": f"no X.npy in npz "
-                    f"(members={sorted(names)})"}
-        # stream the X.npy member straight to the mmap-able target
-        tmp_x = xpath + ".part"
-        with zf.open("X.npy") as src, open(tmp_x, "wb") as dst:
-            while True:
-                chunk = src.read(16 << 20)
-                if not chunk:
-                    break
-                dst.write(chunk)
-        os.replace(tmp_x, xpath)
-        # small members -> meta
-        meta = {}
-        with np.load(staging) as P:
+    # Stream X.npy member directly from GCS -> Volume (one write).
+    tmp_x = xpath + ".part"
+    with blob.open("rb") as g:
+        with zipfile.ZipFile(g) as zf:
+            names = set(zf.namelist())
+            if "X.npy" not in names:
+                return {"sym": sym, "error": f"no X.npy in npz "
+                        f"(members={sorted(names)})"}
+            with zf.open("X.npy") as src, open(tmp_x, "wb") as dst:
+                shutil.copyfileobj(src, dst, length=16 << 20)
+    os.replace(tmp_x, xpath)
+    x_written_s = round(time.time() - t0, 1)
+
+    # Second short pass for the SMALL meta members (a few KB-MB total).
+    meta = {}
+    with blob.open("rb") as g:
+        with np.load(g) as P:
             for k in ("n", "n_tr"):
                 if k in P.files:
                     meta[k] = P[k]
@@ -139,12 +146,9 @@ def transfer_symbol(sym: str):
             for H in HS:
                 meta[f"y0_{H}"] = P[f"y0_{H}"]
                 meta[f"rH_{H}"] = P[f"rH_{H}"]
-    # tmp name ends in .npz so np.savez writes exactly this path
-    # (it appends .npz only when the name lacks it).
     tmp_m = f"{PACK_DIR}/_meta_{sym}.tmp.npz"
     np.savez(tmp_m, **meta)
     os.replace(tmp_m, mpath)
-    os.remove(staging)
     VOL.commit()
 
     mm = np.load(xpath, mmap_mode="r")
@@ -153,8 +157,10 @@ def transfer_symbol(sym: str):
           and int(meta["n"]) == mm.shape[0])
     return {"sym": sym, "ok": bool(ok), "x_shape": list(mm.shape),
             "x_dtype": str(mm.dtype), "n": int(meta["n"]),
-            "src_gib": gib, "download_s": dl_s,
-            "total_s": round(time.time() - t0, 1)}
+            "src_gib": src_gib, "x_written_s": x_written_s,
+            "total_s": round(time.time() - t0, 1),
+            "mb_per_s": round(src_gib * 1024 / x_written_s, 1)
+            if x_written_s else None}
 
 
 @app.function(image=IMG, timeout=900, volumes={MNT: VOL})
