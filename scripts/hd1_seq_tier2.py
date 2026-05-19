@@ -331,23 +331,35 @@ def _unit_worker(task):
     def _ld(n):
         return np.load(f"{sd}/{n}.npy", mmap_mode="r")
 
-    Xfit = torch.from_numpy(np.ascontiguousarray(_ld("Xfit"))).to(dev)
-    Xval = torch.from_numpy(np.ascontiguousarray(_ld("Xval"))).to(dev)
-    Xte = torch.from_numpy(np.ascontiguousarray(_ld("Xte"))).to(dev)
-    yfit = torch.from_numpy(np.ascontiguousarray(_ld("yfit"))).to(dev)
-    wfit = torch.from_numpy(np.ascontiguousarray(_ld("wfit"))).to(dev)
+    # rev45 OOM fix: at L=1536 with BTC/ETH-scale n (fit rows ~150k),
+    # a full Xfit on a 22 GiB L4 is ~50 GiB -> OOM. Keep the BIG fit/
+    # val/te arrays as host-side numpy mmaps; only the per-batch slice
+    # is materialized + moved to GPU. yfit/wfit are 1D and small
+    # enough to live on GPU.
+    Xfit_mm = _ld("Xfit")
+    Xval_mm = _ld("Xval")
+    Xte_mm = _ld("Xte")
+    yfit = torch.from_numpy(
+        np.ascontiguousarray(_ld("yfit"))).to(dev)
+    wfit = torch.from_numpy(
+        np.ascontiguousarray(_ld("wfit"))).to(dev)
     yval_i = np.ascontiguousarray(_ld("yval_i"))
     yte_i = np.ascontiguousarray(_ld("yte_i"))
     block = celld["block"]
-    n_fit = Xfit.shape[0]
+    n_fit = Xfit_mm.shape[0]
     idx = np.arange(n_fit)
+    EV_CHUNK = 4096                # eval chunk: bounds GPU activations
+    TR_BATCH = 1024
 
-    def _logits(net, Xg):
+    def _logits(net, Xmm):
         o = []
         with torch.no_grad(), torch.amp.autocast(
                 "cuda", enabled=dev != "cpu"):
-            for s in range(0, Xg.shape[0], 16384):
-                o.append(net(Xg[s:s + 16384]).float().cpu())
+            for s in range(0, Xmm.shape[0], EV_CHUNK):
+                xb = torch.from_numpy(np.ascontiguousarray(
+                    Xmm[s:s + EV_CHUNK])).to(dev, non_blocking=True)
+                o.append(net(xb).float().cpu())
+                del xb
         return torch.cat(o)
 
     torch.manual_seed(seed)
@@ -360,21 +372,26 @@ def _unit_worker(task):
     for ep in range(EP_CAP):
         net.train()
         np.random.shuffle(idx)
-        for s in range(0, n_fit, 1024):
-            jt = torch.as_tensor(idx[s:s + 1024], device=dev)
+        for s in range(0, n_fit, TR_BATCH):
+            jt_idx = idx[s:s + TR_BATCH]
+            # per-batch host->GPU; full Xfit never resident on GPU
+            xb = torch.from_numpy(np.ascontiguousarray(
+                Xfit_mm[jt_idx])).to(dev, non_blocking=True)
+            jt = torch.as_tensor(jt_idx, device=dev)
             opt.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=dev != "cpu"):
-                lo = net(Xfit[jt])
+                lo = net(xb)
                 loss = (Fnn.binary_cross_entropy_with_logits(
                     lo, yfit[jt], reduction="none") * wfit[jt]
                 ).sum() / (wfit[jt].sum() + 1e-9)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
+            del xb
         if ep < T_MAX:
             sch.step()
         net.eval()
-        vp = _logits(net, Xval)
+        vp = _logits(net, Xval_mm)
         v_ric = C.auc(yval_i, torch.sigmoid(vp).numpy()) - 0.5
         if v_ric > best_ric + MIN_DELTA:
             best_ric, pat = v_ric, 0
@@ -387,7 +404,7 @@ def _unit_worker(task):
     if best_state:
         net.load_state_dict(best_state)
     net.eval()
-    p = torch.sigmoid(_logits(net, Xte)).numpy()
+    p = torch.sigmoid(_logits(net, Xte_mm)).numpy()
     se = C.block_bootstrap_auc_se(yte_i, p, block)
     return {"key": key, "sym": celld["sym"], "H": celld["H"],
             "L": L, "D": D, "obj": OBJECTIVE, "head": HEAD,
@@ -402,7 +419,7 @@ def _unit_worker(task):
 
 
 @app.function(image=GPU_IMG, gpu=f"L4:{N_GPU}", timeout=21600,
-              memory=49152, volumes={MNT: VOL}, retries=3)
+              memory=131072, volumes={MNT: VOL}, retries=3)
 def tier2_all(run_id: str):
     """ONE container, 4 GPUs. rev45 parity guard FIRST (abort on fail).
     Per symbol: mmap {sym}_X.npy + load meta. Per (H,L): right-causal
