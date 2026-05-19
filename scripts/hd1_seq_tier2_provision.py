@@ -136,13 +136,17 @@ def phase2_provision():
     except Exception:
         pass
 
+    # pd-standard (HDD): counts against DISKS_TOTAL_GB (2458), NOT the
+    # europe-west1 SSD_TOTAL_GB quota (300, which pd-balanced/pd-ssd
+    # consume). Single 700GB root holds OS + /var/tier2work; the build
+    # is CPU/network-bound with sequential npz IO, fine on pd-standard.
     boot = compute_v1.AttachedDisk(
         boot=True, auto_delete=True,
         initialize_params=compute_v1.AttachedDiskInitializeParams(
             source_image="projects/debian-cloud/global/images/family/"
                           "debian-12",
-            disk_size_gb=600, disk_type=(
-                f"zones/{ZONE}/diskTypes/pd-balanced")))
+            disk_size_gb=700, disk_type=(
+                f"zones/{ZONE}/diskTypes/pd-standard")))
 
     inst = compute_v1.Instance(
         name=INSTANCE,
