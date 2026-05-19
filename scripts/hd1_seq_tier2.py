@@ -153,6 +153,50 @@ def _mark(run_id, name, txt):
     VOL.commit()
 
 
+def _fit_mean_std(XL, mask, feat, chunk=4096):
+    """Train-split standardization stats (== the old
+    XL[fit].reshape(-1,F).mean/std(0) intent) computed by STREAMING
+    over fit-row chunks in float64. rev45 engineering-risk fix: at the
+    measured n (~3.2e5 dp, L=1536) the one-shot reshape is ~64 GiB;
+    chunked accumulation bounds peak RAM to ~1 GiB. Standardization is
+    runner-side preprocessing, NOT a hd1_seq_core frozen-contract
+    quantity (the rev45 parity guard bit-checks the PACK, not the
+    z-scored inputs); float64 accumulation is if anything more exact."""
+    import numpy as np
+    idx = np.where(mask)[0]
+    s = np.zeros(feat, np.float64)
+    ss = np.zeros(feat, np.float64)
+    cnt = 0
+    for c in range(0, idx.size, chunk):
+        blk = np.ascontiguousarray(
+            XL[idx[c:c + chunk]]).reshape(-1, feat).astype(np.float64)
+        s += blk.sum(0)
+        ss += np.square(blk).sum(0)
+        cnt += blk.shape[0]
+    mu = s / cnt
+    var = np.maximum(ss / cnt - mu * mu, 0.0)
+    return (mu.astype(np.float32),
+            np.sqrt(var).astype(np.float32) + 1e-6)
+
+
+def _std_write(path, XL, mask, mu, sg, feat, chunk=4096):
+    """Write the standardized (rows,L,feat) f32 array to `path` as a
+    real .npy via an output memmap, filled in row-chunks straight from
+    the mmap'd pack -> peak RAM = one chunk, independent of n. The
+    result is byte-loadable by np.load(mmap_mode='r') in the worker."""
+    import numpy as np
+    idx = np.where(mask)[0]
+    L = XL.shape[1]
+    out = np.lib.format.open_memmap(
+        path, mode="w+", dtype=np.float32, shape=(idx.size, L, feat))
+    for c in range(0, idx.size, chunk):
+        blk = np.ascontiguousarray(
+            XL[idx[c:c + chunk]]).astype(np.float32)
+        out[c:c + blk.shape[0]] = (blk - mu) / sg
+    out.flush()
+    del out
+
+
 def _parity_guard_core():
     """rev45 BINDING guard. For each Tier-2 symbol assert the new 1536
     pack sliced [:,-512:,:] == the frozen 512 pack X bit-for-bit, and
@@ -219,8 +263,8 @@ def parity_guard(run_id: str):
             n = int(np.load(mp)["n"])
             ub_gib = round(n * PACK_L * 46 * 4 / 2**30, 1)
             proj.append(f"{sym}: n={n} L1536-fullpack~{ub_gib}GiB "
-                        f"(standardized fit/val/te subsets are a "
-                        f"fraction; tier2_all memory=131072MB)")
+                        f"(mmap'd; _std_write chunks -> peak ~1GiB "
+                        f"regardless of n; tier2_all memory=49152MB)")
     _mark(run_id, "MEM_PROJECTION", " | ".join(proj))
     return {"ok": ok, "msg": msg, "mem_projection": proj}
 
@@ -358,7 +402,7 @@ def _unit_worker(task):
 
 
 @app.function(image=GPU_IMG, gpu=f"L4:{N_GPU}", timeout=21600,
-              memory=131072, volumes={MNT: VOL}, retries=3)
+              memory=49152, volumes={MNT: VOL}, retries=3)
 def tier2_all(run_id: str):
     """ONE container, 4 GPUs. rev45 parity guard FIRST (abort on fail).
     Per symbol: mmap {sym}_X.npy + load meta. Per (H,L): right-causal
@@ -427,23 +471,17 @@ def tier2_all(run_id: str):
                 keys = [f"L{L}|s{seed}" for seed in SEEDS]
                 if all(k in done for k in keys):
                     continue
-                XL = Xfull[:, -L:, :]
-                fr = np.ascontiguousarray(
-                    XL[fit_m]).reshape(-1, C.N_TICK_FEAT)
-                mu = fr.mean(0).astype(np.float32)
-                sg = fr.std(0).astype(np.float32) + 1e-6
-                del fr
+                XL = Xfull[:, -L:, :]              # mmap view
+                F = C.N_TICK_FEAT
+                mu, sg = _fit_mean_std(XL, fit_m, F)
                 sdp = f"{SHM}/{run_id}/{sym}_{H}_L{L}"
                 os.makedirs(sdp, exist_ok=True)
-                np.save(f"{sdp}/Xfit.npy",
-                        (np.ascontiguousarray(XL[fit_m]).astype(
-                            np.float32) - mu) / sg)
-                np.save(f"{sdp}/Xval.npy",
-                        (np.ascontiguousarray(XL[val_m]).astype(
-                            np.float32) - mu) / sg)
-                np.save(f"{sdp}/Xte.npy",
-                        (np.ascontiguousarray(XL[s_te]).astype(
-                            np.float32) - mu) / sg)
+                # chunked memmap writes: peak RAM ~1 GiB regardless of
+                # n / L (rev45 reconfirm: n~3.2e5 @ L1536 would OOM the
+                # one-shot path).
+                _std_write(f"{sdp}/Xfit.npy", XL, fit_m, mu, sg, F)
+                _std_write(f"{sdp}/Xval.npy", XL, val_m, mu, sg, F)
+                _std_write(f"{sdp}/Xte.npy", XL, s_te, mu, sg, F)
                 np.save(f"{sdp}/yfit.npy", up[fit_m])
                 np.save(f"{sdp}/wfit.npy", w1[fit_m])
                 np.save(f"{sdp}/yval_i.npy", up[val_m].astype(int))
