@@ -64,6 +64,7 @@ VOL = modal.Volume.from_name("hd1-seq-cache", create_if_missing=True)
 MNT = "/cache"
 PACK_DIR = f"{MNT}/packed_l1536"
 RAW_PACK = f"{PACK_DIR}/{SYM}_raw_L{L}.npy"
+GLOB_PACK = f"{PACK_DIR}/{SYM}_globals_lasttick.npy"
 RESULT_PATH = f"{MNT}/tier2/rev48_probe_lobw128_result.json"
 
 
@@ -105,24 +106,39 @@ def _gcs_bucket():
 
 
 # ---- BUILD: stream raw-L2 parquets, gather windows at LTC_meta.t0 ---------
-@app.function(image=IMG, cpu=4.0, memory=16384, timeout=10800,
+@app.function(image=IMG, cpu=64.0, memory=131072, timeout=14400,
               volumes={MNT: VOL},
               secrets=[modal.Secret.from_name("hd1-gcp")])
 def build_raw_l2_ltc():
-    """Stream LTC raw-book parquets day-by-day from GCS, gather L=512
-    right-causal windows at the SAME LTC_meta.t0 decision points
-    already in the rev45 pack, normalize per channel (prices as
-    (p-mid)/mid, sizes as sign*log1p(|s|)), write a (n,L,80) f32 .npy
-    to the Volume.
+    """Stream LTC raw-book parquets day-by-day from GCS at SAME t0
+    decision points the rev45 pack uses. Per-day windowing (NO
+    cross-day tail buffer): start-of-day windows are zero-padded on
+    the left, matching the rev45 Rust-build contract exactly so the
+    LOB-stream input is bit-comparable to a hypothetical rev45-style
+    raw-L2 pack. Two outputs:
 
-    Cross-day windows: a rolling tail buffer keeps the last L ticks of
-    the previous day so windows straddling midnight gather correctly.
+      RAW_PACK  (n, L, 80) f32: per-tick raw 20-lvl LOB, normalized
+                  (prices as (p-mid)/mid; sizes as sign*log1p(|s|))
+                  -- the LOB-stream input.
 
-    Skip-if-exists: if RAW_PACK already exists with the expected shape,
-    return immediately (idempotent rerun)."""
+      GLOB_PACK (n, 6) f32: per-decision-point last-tick engineered
+                  globals (cols 40-45 of the rev45 tick_features:
+                  log-return, spread, L5 depth-imb, L20 depth-imb,
+                  Cont-OFI, microprice-mid offset). Computed by
+                  calling the SAME hd1_seq_core.tick_features on the
+                  same per-day raw L2 -> bit-identical to rev45's
+                  globals at the corresponding decision points.
+
+    Skip-if-exists: requires BOTH packs at the expected shape AND a
+    sentinel /cache/packed_l1536/<sym>_raw_L512.DONE marker (so a
+    partially-written memmap from a killed run is NOT mistaken for a
+    completed build)."""
     import tempfile
     import numpy as np
     import pyarrow.parquet as pq
+
+    sys.path.insert(0, "/root/proj")
+    from scripts import hd1_seq_core as C
 
     VOL.reload()
     os.makedirs(PACK_DIR, exist_ok=True)
@@ -133,36 +149,37 @@ def build_raw_l2_ltc():
     t0 = meta["t0"].astype(np.int64)   # ns since epoch (UTC)
     assert t0.size == n_exp
 
-    if os.path.exists(RAW_PACK):
+    done_marker = f"{PACK_DIR}/{SYM}_raw_L{L}.DONE"
+    if (os.path.exists(RAW_PACK) and os.path.exists(GLOB_PACK)
+            and os.path.exists(done_marker)):
         try:
-            arr = np.load(RAW_PACK, mmap_mode="r")
-            if arr.shape == (n_exp, L, F_LOB):
+            a1 = np.load(RAW_PACK, mmap_mode="r")
+            a2 = np.load(GLOB_PACK, mmap_mode="r")
+            if (a1.shape == (n_exp, L, F_LOB)
+                    and a2.shape == (n_exp, F_GLOB)):
                 return {"status": "skip_existing",
-                        "shape": list(arr.shape)}
+                        "raw_shape": list(a1.shape),
+                        "glob_shape": list(a2.shape)}
         except Exception:
             pass
 
     NS_PER_DAY = 86400 * 1_000_000_000
     EPOCH = dt.date(1970, 1, 1)
 
-    def d2s(days_since_epoch: int) -> str:
-        return (EPOCH + dt.timedelta(days=int(days_since_epoch))).isoformat()
+    def d2s(d):
+        return (EPOCH + dt.timedelta(days=int(d))).isoformat()
 
-    # decision-point days
     t0_day = (t0 // NS_PER_DAY).astype(np.int64)
-    unique_days = np.unique(t0_day)
-    # also fetch the day BEFORE the first dp-day so cross-midnight windows
-    # at the very beginning have prior-day ticks available
-    earliest_day = int(unique_days.min())
-    days_to_fetch = [earliest_day - 1] + list(unique_days)
+    unique_days = sorted(int(d) for d in np.unique(t0_day))
 
     bk = _gcs_bucket()
 
-    # pre-allocate output .npy memmap
-    out = np.lib.format.open_memmap(
+    # pre-allocate output memmaps
+    out_raw = np.lib.format.open_memmap(
         RAW_PACK, mode="w+", dtype=np.float32, shape=(n_exp, L, F_LOB))
+    out_glob = np.lib.format.open_memmap(
+        GLOB_PACK, mode="w+", dtype=np.float32, shape=(n_exp, F_GLOB))
 
-    # channel order: bid_p[0..19], bid_s[0..19], ask_p[0..19], ask_s[0..19]
     chan_cols = []
     for k in range(20):
         chan_cols.append(f"bid_{k}_price")
@@ -174,13 +191,13 @@ def build_raw_l2_ltc():
         chan_cols.append(f"ask_{k}_size")
     assert len(chan_cols) == F_LOB
 
-    tail_ts = np.empty((0,), np.int64)
-    tail_X = np.empty((0, F_LOB), np.float32)
     total_filled = 0
+    days_with_data = 0
+    days_missing = 0
     t_start = time.time()
     log_lines = []
 
-    for d_int in days_to_fetch:
+    for d_int in unique_days:
         day_str = d2s(d_int)
         day_start_ns = d_int * NS_PER_DAY
         day_end_ns = day_start_ns + NS_PER_DAY
@@ -190,6 +207,7 @@ def build_raw_l2_ltc():
                         if b.name.endswith(".parquet")],
                        key=lambda b: b.name)
         if not blobs:
+            days_missing += 1
             log_lines.append(f"{day_str}: no parquets (skipping)")
             continue
 
@@ -202,74 +220,89 @@ def build_raw_l2_ltc():
             ts_parts, X_parts = [], []
             for p in paths:
                 t = pq.read_table(p, columns=["timestamp"] + chan_cols)
-                ts_parts.append(t["timestamp"].to_numpy().astype(np.int64))
+                ts_parts.append(
+                    t["timestamp"].to_numpy().astype(np.int64))
                 X_parts.append(np.column_stack(
-                    [t[c].to_numpy().astype(np.float32) for c in chan_cols]))
+                    [t[c].to_numpy().astype(np.float64)
+                     for c in chan_cols]))
             ts_day = np.concatenate(ts_parts)
-            X_day = np.concatenate(X_parts, axis=0)
+            X_day_raw = np.concatenate(X_parts, axis=0)   # f64
             order = np.argsort(ts_day, kind="stable")
             ts_day = ts_day[order]
-            X_day = X_day[order]
+            X_day_raw = X_day_raw[order]
 
-            # normalize per channel
-            bid_0_p = X_day[:, 0]
-            ask_0_p = X_day[:, 40]
-            mid = 0.5 * (bid_0_p + ask_0_p)
-            mid_safe = np.where(mid > 0, mid, 1.0).astype(np.float32)
-            # price channels
-            for k in range(20):
-                X_day[:, k] = (X_day[:, k] - mid) / mid_safe
-                X_day[:, 40 + k] = (X_day[:, 40 + k] - mid) / mid_safe
-            # size channels: sign*log1p(|s|)
-            for k in range(20):
-                s = X_day[:, 20 + k]
-                X_day[:, 20 + k] = np.sign(s) * np.log1p(np.abs(s))
-                s = X_day[:, 60 + k]
-                X_day[:, 60 + k] = np.sign(s) * np.log1p(np.abs(s))
+            # split into 4 sub-arrays for tick_features bit-match
+            bid_p = X_day_raw[:, 0:20]
+            bid_s = X_day_raw[:, 20:40]
+            ask_p = X_day_raw[:, 40:60]
+            ask_s = X_day_raw[:, 60:80]
 
-            ts_full = np.concatenate([tail_ts, ts_day])
-            X_full = np.concatenate([tail_X, X_day], axis=0)
+            # bit-identical engineered globals (same fn rev45 uses)
+            feat = C.tick_features(bid_p, bid_s, ask_p, ask_s)   # (n_day, 46)
+            globals_day = feat[:, 40:46].astype(np.float32)      # (n_day, 6)
+
+            # LOB-stream normalization, written into a fresh f32 array
+            mid = 0.5 * (bid_p[:, 0] + ask_p[:, 0])
+            mid_safe = np.where(mid > 0, mid, 1.0)
+            lob = np.empty((ts_day.size, F_LOB), np.float32)
+            # prices: (p - mid) / mid
+            lob[:, 0:20] = ((bid_p - mid[:, None]) / mid_safe[:, None]
+                            ).astype(np.float32)
+            lob[:, 40:60] = ((ask_p - mid[:, None]) / mid_safe[:, None]
+                             ).astype(np.float32)
+            # sizes: sign*log1p(|s|)
+            lob[:, 20:40] = (np.sign(bid_s) * np.log1p(np.abs(bid_s))
+                             ).astype(np.float32)
+            lob[:, 60:80] = (np.sign(ask_s) * np.log1p(np.abs(ask_s))
+                             ).astype(np.float32)
 
             in_day = (t0 >= day_start_ns) & (t0 < day_end_ns)
-            dp_indices = np.where(in_day)[0]
-            for dp_i in dp_indices:
+            dp_idx = np.where(in_day)[0]
+            for dp_i in dp_idx:
                 t = int(t0[dp_i])
-                j = int(np.searchsorted(ts_full, t, side="right")) - 1
+                j = int(np.searchsorted(ts_day, t, side="right")) - 1
                 if j < 0:
-                    out[dp_i] = 0.0
+                    out_raw[dp_i] = 0.0
+                    out_glob[dp_i] = 0.0
                     continue
                 lo = j - L + 1
                 if lo >= 0:
-                    out[dp_i] = X_full[lo:j + 1]
+                    out_raw[dp_i] = lob[lo:j + 1]
                 else:
                     pad = -lo
                     win = np.zeros((L, F_LOB), np.float32)
-                    win[pad:] = X_full[:j + 1]
-                    out[dp_i] = win
-            total_filled += dp_indices.size
-
-            # tail = last L ticks for next day's cross-midnight windows
-            keep = min(L, ts_full.size)
-            tail_ts = np.ascontiguousarray(ts_full[-keep:])
-            tail_X = np.ascontiguousarray(X_full[-keep:])
+                    win[pad:] = lob[:j + 1]
+                    out_raw[dp_i] = win
+                out_glob[dp_i] = globals_day[j]
+            total_filled += dp_idx.size
+            days_with_data += 1
 
         log_lines.append(
-            f"{day_str}: ticks={ts_day.size} dp_in_day="
-            f"{int(in_day.sum())} total_filled={total_filled}")
-        if len(log_lines) % 20 == 0:
-            print(" ".join(log_lines[-3:]))
+            f"{day_str}: ticks={ts_day.size} "
+            f"dp_in_day={int(in_day.sum())} "
+            f"total_filled={total_filled}")
+        if len(log_lines) % 10 == 0:
+            print(" ".join(log_lines[-2:]))
             sys.stdout.flush()
             VOL.commit()
 
-    out.flush()
-    del out
+    out_raw.flush(); del out_raw
+    out_glob.flush(); del out_glob
+    # DONE marker last (so partial runs don't trip skip-if-exists)
+    with open(done_marker, "w") as f:
+        f.write(f"n={n_exp} filled={total_filled} "
+                f"days_with_data={days_with_data} "
+                f"days_missing={days_missing}\n")
     VOL.commit()
     elapsed = round(time.time() - t_start, 1)
     return {"status": "built", "n_expected": n_exp,
             "total_filled": total_filled,
-            "shape": [n_exp, L, F_LOB],
-            "path": RAW_PACK, "elapsed_s": elapsed,
-            "days_processed": len(days_to_fetch),
+            "raw_shape": [n_exp, L, F_LOB],
+            "glob_shape": [n_exp, F_GLOB],
+            "raw_path": RAW_PACK, "glob_path": GLOB_PACK,
+            "elapsed_s": elapsed,
+            "days_with_data": days_with_data,
+            "days_missing": days_missing,
             "tail_log": log_lines[-5:]}
 
 
@@ -328,12 +361,14 @@ def _build_two_stream_tcn():
 
 
 # ---- PROBE: one seed of LTC-H300-L=512 W=128 2-stream BCE ----------------
-@app.function(image=IMG, gpu="L4", timeout=3600, memory=32768,
+@app.function(image=IMG, gpu="A100-80GB", timeout=7200, memory=65536,
               volumes={MNT: VOL})
 def probe_lobw128(seed: int):
     """One seed of rev48: LTC-H300-L=512 D=8 W_lob=128 2-stream TCN
     (raw 20-lvl LOB mean-pool + 6 last-tick engineered globals)
-    + BCE-with-r1 + rev45-locked schedule."""
+    + BCE-with-r1 + rev45-locked schedule. Inputs read entirely from
+    the rev48 build's two packs (RAW_PACK + GLOB_PACK) -- NO
+    dependency on the engineered 46-channel X pack."""
     import numpy as np
     import torch
     import torch.nn.functional as Fnn
@@ -345,8 +380,8 @@ def probe_lobw128(seed: int):
     t0 = time.time()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
-    X_eng = np.load(f"{PACK_DIR}/{SYM}_X.npy", mmap_mode="r")   # (n,1536,46)
-    X_raw = np.load(RAW_PACK, mmap_mode="r")                    # (n,L,80)
+    X_raw = np.load(RAW_PACK, mmap_mode="r")        # (n, L, 80)
+    G_all_raw = np.load(GLOB_PACK, mmap_mode="r")   # (n, 6)
     meta = np.load(f"{PACK_DIR}/{SYM}_meta.npz")
     n = int(meta["n"])
     y0 = meta[f"y0_{H}"]
@@ -365,9 +400,8 @@ def probe_lobw128(seed: int):
     val_idx = np.where(val_m)[0]
     te_idx = np.where(s_te)[0]
 
-    # GLOBALS stream: last-tick cols [40:46] from engineered pack
-    G_all = np.ascontiguousarray(
-        X_eng[:, -1, 40:46]).astype(np.float32)  # (n, 6)
+    # GLOBALS stream: standardize on fit rows
+    G_all = np.ascontiguousarray(G_all_raw).astype(np.float32)
     g_mu = G_all[fit_m].mean(axis=0).astype(np.float32)
     g_sd = G_all[fit_m].std(axis=0).astype(np.float32) + 1e-6
     G_all = (G_all - g_mu) / g_sd
