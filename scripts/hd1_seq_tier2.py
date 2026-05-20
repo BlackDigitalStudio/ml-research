@@ -732,7 +732,23 @@ def _collect(run_id):
         for a in asf if "error" not in a)
     dep = doc["secondary_economic_deploy_annotation"]
     inc = doc.get("incomplete_cells")
-    rec = {"hypothesis_id": "HD1", "rev": 46,
+    # auto-increment rev (append-only ledger): pick max(HD1.rev)+1 so
+    # re-collects (e.g. after a resume) never duplicate a rev number.
+    next_rev = 0
+    hp = REPO / "research" / "hypotheses.jsonl"
+    if hp.exists():
+        for ln in open(hp):
+            ln = ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            try:
+                r0 = json.loads(ln)
+                if r0.get("hypothesis_id") == "HD1":
+                    next_rev = max(next_rev, int(r0.get("rev", 0)))
+            except Exception:
+                pass
+    next_rev += 1
+    rec = {"hypothesis_id": "HD1", "rev": next_rev,
            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
            "statement": (
                f"TIER-2 CONDITIONAL ALPHA SURFACE over context length "
@@ -760,7 +776,7 @@ def _collect(run_id):
     with open(REPO / "research" / "hypotheses.jsonl", "a") as fh:
         fh.write(json.dumps(rec) + "\n")
     print(f"[tier2] alpha-surface: {surf[:140]} -> "
-          f"{art/'tier2.json'} ; rev46 appended")
+          f"{art/'tier2.json'} ; rev{next_rev} appended")
 
 
 @app.local_entrypoint()

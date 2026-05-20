@@ -54,7 +54,51 @@
     {
       "sym": "BTC-USDT-PERP",
       "H": 300,
-      "error": "incomplete"
+      "is_weak_control": false,
+      "alpha_max_L": 1536,
+      "alpha_max_D": 9,
+      "alpha_max_ric_mean": 0.029932,
+      "alpha_max_seed_sd": 0.000469,
+      "alpha_max_seeds": [
+        0.029271,
+        0.030212,
+        0.030313
+      ],
+      "ranked_surface": [
+        {
+          "L": 512,
+          "D": 8,
+          "ric_mean": 0.029652,
+          "seed_sd": 0.001354,
+          "ric_seeds": [
+            0.027866,
+            0.029946,
+            0.031144
+          ]
+        },
+        {
+          "L": 1024,
+          "D": 9,
+          "ric_mean": 0.02875,
+          "seed_sd": 0.00162,
+          "ric_seeds": [
+            0.026474,
+            0.029663,
+            0.030113
+          ]
+        },
+        {
+          "L": 1536,
+          "D": 9,
+          "ric_mean": 0.029932,
+          "seed_sd": 0.000469,
+          "ric_seeds": [
+            0.029271,
+            0.030212,
+            0.030313
+          ]
+        }
+      ]
     },
     {
       "sym": "ETH-USDT-PERP",
@@ -158,12 +202,13 @@
   "PRIMARY_best_L_per_cell": {
     "per_cell_alpha_max": {
       "BTC-H180": "L512(D8) +0.0389\u00b10.0015",
+      "BTC-H300": "L1536(D9) +0.0299\u00b10.0005",
       "ETH-H180": "L512(D8) +0.0244\u00b10.0005",
       "LTC-H300[weak]": "L1536(D9) +0.0245\u00b10.0100"
     },
     "alpha_max_L_vote": {
       "512": 2,
-      "1536": 1
+      "1536": 2
     },
     "reading": "the context length L that MAXIMIZES rank_IC per (symbol,horizon), its magnitude and seed-stability -- this IS the Tier-2 result (CLAUDE.md rule 1). Long-context helps iff alpha_max_L>512 with a seed-stable margin over the L512 anchor."
   },
@@ -195,6 +240,16 @@
         "gate_reason": "a=False b=False d=-0.00304 plac=-0.002451 se=0.003521"
       },
       {
+        "cell": "BTC-USDT-PERP-H300",
+        "is_weak_control": false,
+        "alpha_max_L": 1536,
+        "lift_vs_L512_anchor": 0.00028,
+        "anchor_L512_ric_mean": 0.029652,
+        "delta_ic_vs_baseline_ref": 0.00453,
+        "passes_5ab": true,
+        "gate_reason": "a=True b=True d=0.00453 plac=-0.000957 se=0.002619"
+      },
+      {
         "cell": "ETH-USDT-PERP-H180",
         "is_weak_control": false,
         "alpha_max_L": 512,
@@ -216,10 +271,8 @@
       }
     ]
   },
-  "incomplete_cells": [
-    "BTC-USDT-PERP-H300(0/9)"
-  ],
-  "approx_gpu_usd": 5.06,
-  "n_units": 27,
-  "finished": "2026-05-20T00:38:17Z"
+  "incomplete_cells": [],
+  "approx_gpu_usd": 6.83,
+  "n_units": 36,
+  "finished": "2026-05-20T01:11:41Z"
 }
