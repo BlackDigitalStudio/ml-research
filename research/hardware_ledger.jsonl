@@ -1,0 +1,33 @@
+# Append-only hardware/cost ledger. One line per (rev, Modal app). Each entry
+# references an alpha-rev via `refs.{hypothesis_id, rev}`; multiple entries
+# per rev are expected (build, probe, retries, failed attempts).
+#
+# This file is DECOUPLED from research/hypotheses.jsonl: the absence of a
+# ledger entry NEVER blocks an alpha-rev. Hardware/cost info can be backfilled.
+#
+# `billing.actual_cost_usd` is pulled from `modal billing report --json`, NOT
+# estimated. `pulled_at` records when. If a billing window has not yet closed
+# (e.g. the same calendar day), the cost figure may move; pull again later
+# and append a corrective entry rather than editing.
+#
+# Schema (subject-to-evolve, append-only):
+#   ts                       ISO-8601 UTC timestamp the entry was written
+#   refs.hypothesis_id       e.g. "HD1"
+#   refs.rev                 the rev this hardware was used for
+#   modal_app_id             unique ap-* id (one Modal app = one entry)
+#   workspace                Modal workspace (e.g. "ksagachev")
+#   stage                    free-form short tag: "build" | "probe" | "smoke" | ...
+#   hw.class                 "modal_cpu" | "modal_gpu" | "gcp_vm" | ...
+#   hw.vcpu, hw.memory_gib, hw.gpu, hw.parallel_containers
+#   timing.wall_s            outer wall-clock (incl. image build, scheduling)
+#   timing.function_elapsed_s  inner @app.function execution (build) or
+#                              gpu_seconds_total (probe; sum over parallel
+#                              containers), whichever is meaningful
+#   per_unit_gpu_s           [optional] per-container/seed timings
+#   billing.actual_cost_usd  realized cost, from `modal billing report --json`
+#   billing.source           CLI command used
+#   billing.pulled_at        when the billing query was made
+#   note                     [optional] free text (failures, retries, etc.)
+{"ts": "2026-05-20T20:30:00Z", "refs": {"hypothesis_id": "HD1", "rev": 48}, "modal_app_id": "ap-ZtHcRDDoX3VDEliP1onjq0", "workspace": "ksagachev", "stage": "build", "hw": {"class": "modal_cpu", "vcpu": 64, "memory_gib": 128, "gpu": null, "parallel_containers": 1}, "timing": {"wall_s": 1433.8, "function_elapsed_s": 1417.0}, "billing": {"actual_cost_usd": 1.61148, "source": "modal billing report --for today --json", "pulled_at": "2026-05-20T20:25:00Z"}, "note": "rev48 raw-L2 + globals pack build for LTC-USDT-PERP, 360/360 days, 43784/43784 dp filled; ADC-authed hd1-gcp secret (refresh_token JSON)."}
+{"ts": "2026-05-20T20:30:00Z", "refs": {"hypothesis_id": "HD1", "rev": 48}, "modal_app_id": "ap-fKbl3GfUCwCQDNwa1hdkg7", "workspace": "ksagachev", "stage": "build_failed_attempt", "hw": {"class": "modal_cpu", "vcpu": 64, "memory_gib": 128, "gpu": null, "parallel_containers": 1}, "timing": {"wall_s": null, "function_elapsed_s": null}, "billing": {"actual_cost_usd": 0.02348, "source": "modal billing report --for today --json", "pulled_at": "2026-05-20T20:25:00Z"}, "note": "GCS 401 Unauthorized on first parquet listing; root cause: hd1-gcp secret seeded with a local ya29.* OAuth bearer (~1h TTL) that expired before Modal container start. Resolved by re-creating the secret from /root/.config/gcloud/application_default_credentials.json (authorized_user JSON with durable refresh_token)."}
+{"ts": "2026-05-20T20:30:00Z", "refs": {"hypothesis_id": "HD1", "rev": 48}, "modal_app_id": "ap-kw6jyx2gQBoiFJ2A0JFi8y", "workspace": "ksagachev", "stage": "probe", "hw": {"class": "modal_gpu", "vcpu": null, "memory_gib": 64, "gpu": "A100-80GB", "parallel_containers": 3}, "timing": {"wall_s": 188.0, "function_elapsed_s": 369.39, "per_unit_gpu_s": [68.58, 179.67, 121.14]}, "billing": {"actual_cost_usd": 0.45076, "source": "modal billing report --for today --json", "pulled_at": "2026-05-20T20:25:00Z"}, "note": "rev48 probe -- 3 seeds {0,1,2} of 2-stream W=128 raw-LOB + 6-globals at LTC-H300-L=512; .map(SEEDS) -> 3 parallel A100-80GB containers; per-unit gpu_s spread reflects per-seed early-stop epoch counts (ep=9/10/10)."}
