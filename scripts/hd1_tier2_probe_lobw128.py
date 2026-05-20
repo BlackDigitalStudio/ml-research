@@ -90,6 +90,11 @@ META_S1 = f"{PACK_DIR}/{SYM}_meta_stride1.npz"
 RAW_PACK_S1 = f"{PACK_DIR}/{SYM}_raw_L{L}_stride1.npy"
 GLOB_PACK_S1 = f"{PACK_DIR}/{SYM}_globals_lasttick_stride1.npy"
 DONE_S1 = f"{PACK_DIR}/{SYM}_raw_L{L}_stride1.DONE"
+# rev54 C1: engineered (46-ch) dense pack at STRIDE=1 -- rev45/47 anchor arch
+X_ENG_S1 = f"{PACK_DIR}/{SYM}_X_L{L}_eng_stride1.npy"
+DONE_ENG_S1 = f"{PACK_DIR}/{SYM}_X_L{L}_eng_stride1.DONE"
+F_ENG = 46  # rev45 tick_features output dim
+W_ANCHOR = 16  # rev45/47 anchor
 
 
 def _gcs_bucket():
@@ -1207,6 +1212,364 @@ def regsweep_lobw128_cell(cell: dict):
             "gpu_s": round(time.time() - t0, 2)}
 
 
+# ---- BUILD: rev54 C1 engineered dense pack at STRIDE=1 ------------------
+@app.function(image=IMG, cpu=64.0, memory=131072, timeout=14400,
+              volumes={MNT: VOL},
+              secrets=[modal.Secret.from_name("hd1-gcp")])
+def build_dense_engineered_stride1():
+    """rev54 C1: build a 46-channel engineered dense pack at STRIDE=1
+    for LTC-USDT-PERP H=300 L=512 -- the rev45/47 anchor input
+    representation, on the SAME decision-point set as the rev52 dense
+    raw pack. Reads the existing meta_stride1 to get t0/n_dp (no new
+    label computation; just gather windows). For each day: read book
+    parquets, run hd1_seq_core.tick_features (the same fn rev45 Rust
+    binary's reference Python uses; bit-identical), gather L=512
+    windows at each in-day dp (zero-pad at day start, matching the
+    rev45 per-day-shard contract). Output:
+
+      X_ENG_S1     (n, L, 46) f32                       (~16.4 GiB)
+      DONE_ENG_S1  sentinel marker
+
+    Skip-if-exists. Reuses META_S1 written by rev52 build_dense_stride1."""
+    import tempfile
+    import numpy as np
+    import pyarrow.parquet as pq
+
+    sys.path.insert(0, "/root/proj")
+    from scripts import hd1_seq_core as C
+
+    VOL.reload()
+    if not os.path.exists(META_S1):
+        raise RuntimeError(f"META_S1 missing ({META_S1}) -- run build_dense"
+                           " (rev52 Part A) first")
+    meta = np.load(META_S1)
+    n_exp = int(meta["n"])
+    t0 = meta["t0"].astype(np.int64)
+
+    if (os.path.exists(X_ENG_S1) and os.path.exists(DONE_ENG_S1)):
+        try:
+            a = np.load(X_ENG_S1, mmap_mode="r")
+            if a.shape == (n_exp, L, F_ENG):
+                return {"status": "skip_existing",
+                        "shape": list(a.shape), "path": X_ENG_S1}
+        except Exception:
+            pass
+
+    NS_PER_DAY = 86400 * 1_000_000_000
+    EPOCH = dt.date(1970, 1, 1)
+
+    def d2s(d):
+        return (EPOCH + dt.timedelta(days=int(d))).isoformat()
+
+    t0_day = (t0 // NS_PER_DAY).astype(np.int64)
+    unique_days = sorted(int(d) for d in np.unique(t0_day))
+
+    bk = _gcs_bucket()
+    out_eng = np.lib.format.open_memmap(
+        X_ENG_S1, mode="w+", dtype=np.float32, shape=(n_exp, L, F_ENG))
+
+    chan_cols = []
+    for k in range(20):
+        chan_cols.append(f"bid_{k}_price")
+    for k in range(20):
+        chan_cols.append(f"bid_{k}_size")
+    for k in range(20):
+        chan_cols.append(f"ask_{k}_price")
+    for k in range(20):
+        chan_cols.append(f"ask_{k}_size")
+
+    write_total = 0
+    days_missing = 0
+    t_start = time.time()
+    log_lines = []
+
+    for d_int in unique_days:
+        day_str = d2s(d_int)
+        day_start_ns = d_int * NS_PER_DAY
+        day_end_ns = day_start_ns + NS_PER_DAY
+        prefix = (f"raw/book/exchange=BINANCE_FUTURES/"
+                  f"symbol={SYM}/dt={day_str}/")
+        blobs = sorted([b for b in bk.client.list_blobs(bk, prefix=prefix)
+                        if b.name.endswith(".parquet")],
+                       key=lambda b: b.name)
+        if not blobs:
+            days_missing += 1
+            continue
+
+        with tempfile.TemporaryDirectory() as td:
+            paths = []
+            for i, b in enumerate(blobs):
+                p = f"{td}/p{i:04d}.parquet"
+                b.download_to_filename(p)
+                paths.append(p)
+            ts_parts, X_parts = [], []
+            for p in paths:
+                t = pq.read_table(p, columns=["timestamp"] + chan_cols)
+                ts_parts.append(t["timestamp"].to_numpy().astype(np.int64))
+                X_parts.append(np.column_stack(
+                    [t[c].to_numpy().astype(np.float64) for c in chan_cols]))
+            ts_day = np.concatenate(ts_parts)
+            X_day = np.concatenate(X_parts, axis=0)
+            order = np.argsort(ts_day, kind="stable")
+            ts_day = ts_day[order]
+            X_day = X_day[order]
+
+            bid_p = X_day[:, 0:20]
+            bid_s = X_day[:, 20:40]
+            ask_p = X_day[:, 40:60]
+            ask_s = X_day[:, 60:80]
+            feat = C.tick_features(bid_p, bid_s, ask_p, ask_s)  # (n, 46) f32
+
+            in_day = (t0 >= day_start_ns) & (t0 < day_end_ns)
+            dp_idx = np.where(in_day)[0]
+            for dp_i in dp_idx:
+                t = int(t0[dp_i])
+                j = int(np.searchsorted(ts_day, t, side="right")) - 1
+                if j < 0:
+                    out_eng[dp_i] = 0.0
+                    continue
+                lo = j - L + 1
+                if lo >= 0:
+                    out_eng[dp_i] = feat[lo:j + 1]
+                else:
+                    pad = -lo
+                    win = np.zeros((L, F_ENG), np.float32)
+                    win[pad:] = feat[:j + 1]
+                    out_eng[dp_i] = win
+            write_total += dp_idx.size
+        log_lines.append(
+            f"{day_str}: dp_in_day={int(in_day.sum())} cum={write_total}")
+        if len(log_lines) % 20 == 0:
+            print(" ".join(log_lines[-2:]))
+            sys.stdout.flush()
+            VOL.commit()
+
+    out_eng.flush(); del out_eng
+    with open(DONE_ENG_S1, "w") as f:
+        f.write(f"n={n_exp} write_total={write_total} "
+                f"days_missing={days_missing}\n")
+    VOL.commit()
+    return {"status": "built", "n": n_exp,
+            "write_total": int(write_total),
+            "shape": [n_exp, L, F_ENG],
+            "path": X_ENG_S1,
+            "elapsed_s": round(time.time() - t_start, 1),
+            "days_missing": days_missing}
+
+
+# ---- C1 PROBE: rev45-arch (W=16 engineered single-stream) on dense pack -
+def _build_tcn_single_stream(F_in, W, D_in, dropout):
+    """rev45/47 anchor TCN. Block topology + last-step head BYTE-IDENTICAL
+    to hd1_seq_tier2._build_tcn_t2 / hd1_seq_modal._build_tcn (head='last');
+    parametrized for F_in / W / D / dropout."""
+    import torch.nn as nn
+
+    class Chomp(nn.Module):
+        def __init__(self, c):
+            super().__init__()
+            self.c = c
+
+        def forward(self, x):
+            return x[:, :, :-self.c].contiguous() if self.c else x
+
+    class Block(nn.Module):
+        def __init__(self, ci, co, dil):
+            super().__init__()
+            pad = (3 - 1) * dil
+            self.net = nn.Sequential(
+                nn.Conv1d(ci, co, 3, padding=pad, dilation=dil),
+                Chomp(pad), nn.ReLU(), nn.Dropout(dropout),
+                nn.Conv1d(co, co, 3, padding=pad, dilation=dil),
+                Chomp(pad), nn.ReLU(), nn.Dropout(dropout))
+            self.down = nn.Conv1d(ci, co, 1) if ci != co else None
+            self.relu = nn.ReLU()
+
+        def forward(self, x):
+            r = x if self.down is None else self.down(x)
+            return self.relu(self.net(x) + r)
+
+    class TCN(nn.Module):
+        def __init__(self):
+            super().__init__()
+            layers, ci = [], F_in
+            for b in range(D_in):
+                layers.append(Block(ci, W, 2 ** b))
+                ci = W
+            self.tcn = nn.Sequential(*layers)
+            self.head = nn.Linear(W, 1)
+
+        def forward(self, x):                        # x: (B, L, F)
+            h = self.tcn(x.transpose(1, 2))          # (B, W, L)
+            return self.head(h[:, :, -1]).squeeze(-1)
+
+    return TCN()
+
+
+@app.function(image=IMG, gpu="A100-80GB", timeout=3600, memory=65536,
+              volumes={MNT: VOL})
+def probe_engineered_dense_cell(cell: dict):
+    """rev54 C1: W=16 single-stream engineered TCN on the STRIDE=1
+    dense pack, 1 seed, 24 ep no early-stop, per-epoch log. Directly
+    compares to rev52's W=128 raw-LOB cell at the SAME (dropout, wd,
+    n_dp) -- isolates the arch/representation lever from densification.
+
+    cell = {'dropout': float, 'wd': float, 'seed': int (default 0)}"""
+    import numpy as np
+    import torch
+    import torch.nn.functional as Fnn
+
+    VOL.reload()
+    sys.path.insert(0, "/root/proj")
+    from scripts import hd1_seq_core as C
+
+    t0 = time.time()
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+
+    dropout = float(cell["dropout"])
+    wd = float(cell["wd"])
+    seed = int(cell.get("seed", 0))
+    cell_tag = f"eng_W{W_ANCHOR}_drop{dropout:g}_wd{wd:g}_seed{seed}"
+
+    X_eng = np.load(X_ENG_S1, mmap_mode="r")     # (n, L, 46)
+    meta = np.load(META_S1)
+    n = int(meta["n"])
+    y0 = meta["y0_300"]
+    rH = meta["rH_300"].astype(np.float64)
+
+    tr, te, _ = C.honest_split(n)
+    reached = (y0 != 0) & np.isfinite(rH)
+    up = (y0 == 1).astype(np.float32)
+    s_tr_all = tr & reached
+    s_te = te & reached
+    fit_m, val_m = C.train_val_split(s_tr_all)
+    w1 = C.r1_weights(rH, s_tr_all).astype(np.float32)
+
+    fit_idx = np.where(fit_m)[0]
+    val_idx = np.where(val_m)[0]
+    te_idx = np.where(s_te)[0]
+
+    # per-channel z-score on fit rows only (streamed)
+    s_acc = np.zeros(F_ENG, np.float64)
+    ss_acc = np.zeros(F_ENG, np.float64)
+    cnt = 0
+    SCHUNK = 1024
+    for c in range(0, fit_idx.size, SCHUNK):
+        blk = np.ascontiguousarray(
+            X_eng[fit_idx[c:c + SCHUNK]]).reshape(-1, F_ENG).astype(np.float64)
+        s_acc += blk.sum(axis=0)
+        ss_acc += np.square(blk).sum(axis=0)
+        cnt += blk.shape[0]
+    x_mu = (s_acc / cnt).astype(np.float32)
+    x_sd = (np.sqrt(np.maximum(ss_acc / cnt - (s_acc / cnt) ** 2, 0.0))
+            .astype(np.float32) + 1e-6)
+
+    def _gather(idx):
+        x = np.ascontiguousarray(X_eng[idx]).astype(np.float32)
+        x = (x - x_mu) / x_sd
+        return x
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    net = _build_tcn_single_stream(F_in=F_ENG, W=W_ANCHOR, D_in=D,
+                                   dropout=dropout).to(dev)
+    n_params = sum(p.numel() for p in net.parameters())
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=wd)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_MAX_DIAG)
+    scaler = torch.amp.GradScaler("cuda", enabled=dev != "cpu")
+
+    y_dev = torch.from_numpy(up).to(dev)
+    w_dev = torch.from_numpy(w1).to(dev)
+
+    def _eval(indices):
+        out = []
+        wll_num, wll_den = 0.0, 0.0
+        with torch.no_grad(), torch.amp.autocast(
+                "cuda", enabled=dev != "cpu"):
+            for s_ in range(0, indices.size, EV_CHUNK):
+                ii = indices[s_:s_ + EV_CHUNK]
+                xb = _gather(ii)
+                xb = torch.from_numpy(xb).to(dev, non_blocking=True)
+                lo = net(xb).float()
+                jt = torch.as_tensor(ii, device=dev, dtype=torch.long)
+                bce = Fnn.binary_cross_entropy_with_logits(
+                    lo, y_dev[jt], reduction="none")
+                wll_num += float((bce * w_dev[jt]).sum().item())
+                wll_den += float(w_dev[jt].sum().item())
+                out.append(lo.cpu())
+                del xb
+        return torch.cat(out).numpy(), wll_num / max(wll_den, 1e-9)
+
+    y_val_np = up[val_idx].astype(int)
+    y_te_np = up[te_idx].astype(int)
+
+    history = []
+    for ep in range(EP_DIAG):
+        net.train()
+        perm = np.random.permutation(fit_idx)
+        tr_num, tr_den = 0.0, 0.0
+        for s_ in range(0, perm.size, TR_BATCH):
+            ii = perm[s_:s_ + TR_BATCH]
+            xb = _gather(ii)
+            xb = torch.from_numpy(xb).to(dev, non_blocking=True)
+            jt = torch.as_tensor(ii, device=dev, dtype=torch.long)
+            opt.zero_grad(set_to_none=True)
+            with torch.amp.autocast("cuda", enabled=dev != "cpu"):
+                lo = net(xb)
+                bce = Fnn.binary_cross_entropy_with_logits(
+                    lo, y_dev[jt], reduction="none")
+                loss = (bce * w_dev[jt]).sum() / (w_dev[jt].sum() + 1e-9)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+            tr_num += float((bce.detach() * w_dev[jt]).sum().item())
+            tr_den += float(w_dev[jt].sum().item())
+            del xb
+        lr_now = float(opt.param_groups[0]["lr"])
+        if ep < T_MAX_DIAG:
+            sch.step()
+        net.eval()
+        v_lo, v_wll = _eval(val_idx)
+        t_lo, t_wll = _eval(te_idx)
+        v_p = 1.0 / (1.0 + np.exp(-v_lo))
+        t_p = 1.0 / (1.0 + np.exp(-t_lo))
+        v_auc = float(C.auc(y_val_np, v_p))
+        t_auc = float(C.auc(y_te_np, t_p))
+        rec = {"ep": ep + 1, "lr": round(lr_now, 7),
+               "train_loss": round(tr_num / max(tr_den, 1e-9), 6),
+               "val_logloss": round(v_wll, 6),
+               "val_ric": round(v_auc - 0.5, 6),
+               "test_logloss": round(t_wll, 6),
+               "test_ric": round(t_auc - 0.5, 6)}
+        history.append(rec)
+        print(f"[{cell_tag}] ep{ep+1:>2d} lr={lr_now:.5f} "
+              f"trL={rec['train_loss']:.4f} "
+              f"vR={rec['val_ric']:+.4f} tR={rec['test_ric']:+.4f}")
+        sys.stdout.flush()
+
+    last = history[-1]
+    by_val = max(history, key=lambda r: r["val_ric"])
+    by_test = max(history, key=lambda r: r["test_ric"])
+    t_lo_final, _ = _eval(te_idx)
+    t_p_final = 1.0 / (1.0 + np.exp(-t_lo_final))
+    plac = float(C.placebo_auc(y_te_np, t_p_final) - 0.5)
+    block = int(C.block_size(H))
+    se = C.block_bootstrap_auc_se(y_te_np, t_p_final, block)
+    se_f = None if not np.isfinite(se) else round(float(se), 6)
+
+    return {"rev": 54, "cell_tag": cell_tag,
+            "arch": "engineered_singlestream_W16_laststep",
+            "dropout": dropout, "wd": wd, "seed": seed,
+            "n_params": int(n_params),
+            "n_fit": int(fit_m.sum()), "n_val": int(val_m.sum()),
+            "n_te": int(s_te.sum()), "block": block,
+            "history": history,
+            "summary": {"last_ep": last, "by_best_val_ric": by_val,
+                        "by_best_test_ric": by_test},
+            "final_ep_diagnostics": {"placebo_ric": round(plac, 6),
+                                     "boot_se": se_f},
+            "gpu_s": round(time.time() - t0, 2)}
+
+
 @app.function(image=IMG, cpu=1.0, memory=4096, timeout=600,
               volumes={MNT: VOL})
 def save_result(payload: dict):
@@ -1236,6 +1599,28 @@ def main(stage: str = "all", lcurve_seed: int = 0):
         save_result.remote({"out_path": out_path, **r})
         print("\n=== rev50 LCURVE RESULT ===")
         print(json.dumps(r, indent=2, default=str))
+        print(f"\ntotal wall: {time.time() - t_main:.1f}s")
+        return
+    if stage == "c1":
+        # rev54 C1: builds engineered dense pack (if missing) + runs ONE
+        # cell (rev45-anchor reg drop=0.5 wd=1e-3) of W=16 single-stream
+        # engineered TCN at STRIDE=1 -- isolates arch from densification.
+        print(f"[stage={stage}] launching build_dense_engineered_stride1 ...")
+        rb = build_dense_engineered_stride1.remote()
+        print(f"[build_dense_engineered] result:\n"
+              f"{json.dumps(rb, indent=2, default=str)}")
+        if rb.get("status") not in ("built", "skip_existing"):
+            print("[c1] build failed; aborting probe.")
+            return
+        print(f"[stage={stage}] launching probe_engineered_dense_cell"
+              " (drop=0.5 wd=1e-3 seed=0)...")
+        rp = probe_engineered_dense_cell.remote(
+            {"dropout": 0.5, "wd": 1e-3, "seed": 0})
+        print("\n=== rev54 C1 PROBE RESULT ===")
+        print(json.dumps(rp, indent=2, default=str))
+        save_result.remote(
+            {"out_path": f"{MNT}/tier2/rev54_c1_engineered_dense.json",
+             **rp})
         print(f"\ntotal wall: {time.time() - t_main:.1f}s")
         return
     if stage in ("build_dense", "all_dense"):
