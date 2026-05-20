@@ -1210,15 +1210,16 @@ def regsweep_lobw128_cell(cell: dict):
 @app.function(image=IMG, cpu=1.0, memory=4096, timeout=600,
               volumes={MNT: VOL})
 def save_result(payload: dict):
-    """Persist the rev48 collected result to the Volume for later
-    rev49 result-append."""
+    """Persist a result payload to the Volume. If payload['out_path']
+    is provided, write there (preferred -- per-rev unique path); else
+    fall back to the rev48 RESULT_PATH (legacy)."""
     VOL.reload()
-    os.makedirs(f"{MNT}/tier2", exist_ok=True)
-    with open(RESULT_PATH, "w") as f:
+    out = payload.get("out_path") or RESULT_PATH
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w") as f:
         json.dump(payload, f, indent=2, default=str)
     VOL.commit()
-    return {"saved_to": RESULT_PATH,
-            "size_bytes": os.path.getsize(RESULT_PATH)}
+    return {"saved_to": out, "size_bytes": os.path.getsize(out)}
 
 
 @app.local_entrypoint()
