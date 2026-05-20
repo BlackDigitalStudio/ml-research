@@ -467,7 +467,16 @@ def tier2_all(run_id: str):
         if os.path.exists(ppath):
             for ln in open(ppath):
                 try:
-                    done.add(json.loads(ln)["key"])
+                    rec = json.loads(ln)
+                    k = rec["key"]
+                    # back-compat: old keys lacked the H prefix, which
+                    # caused cross-H collision (a finished H180 made
+                    # H300 look "done" within the same symbol). New
+                    # keys are H{H}|L{L}|s{seed}; old recs carry H in
+                    # the body so we can synthesize the canonical key.
+                    if not k.startswith("H"):
+                        k = f"H{rec['H']}|{k}"
+                    done.add(k)
                 except Exception:
                     pass
         Xfull = np.load(f"{PACK_DIR}/{sym}_X.npy", mmap_mode="r")
@@ -485,7 +494,7 @@ def tier2_all(run_id: str):
             fit_m, val_m = C.train_val_split(s_tr_all)
             w1 = C.r1_weights(rH, s_tr_all).astype(np.float32)
             for L in L_GRID:
-                keys = [f"L{L}|s{seed}" for seed in SEEDS]
+                keys = [f"H{H}|L{L}|s{seed}" for seed in SEEDS]
                 if all(k in done for k in keys):
                     continue
                 XL = Xfull[:, -L:, :]              # mmap view
@@ -506,9 +515,10 @@ def tier2_all(run_id: str):
                 celld = {"sym": sym, "H": H, "L": L,
                          "block": C.block_size(H),
                          "ntr": ntr, "nte": nte, "shm": sdp}
-                tasks = [(celld, f"L{L}|s{seed}", L, D_FOR_L[L], seed)
+                tasks = [(celld, f"H{H}|L{L}|s{seed}", L,
+                          D_FOR_L[L], seed)
                          for seed in SEEDS
-                         if f"L{L}|s{seed}" not in done]
+                         if f"H{H}|L{L}|s{seed}" not in done]
                 gq = ctx.Queue()
                 for g in range(N_GPU):
                     gq.put(g)
