@@ -1,0 +1,225 @@
+{
+  "run_id": "tier2-20260519-233033",
+  "spec": "HD1 rev45 Tier-2 (FROZEN); runner rev4 substrate; single MAX_L=1536 pack, L right-causal-sliced, D forced per L by RF>=L {512:8,1024:9,1536:9}",
+  "PRIMARY_alpha_surface": [
+    {
+      "sym": "BTC-USDT-PERP",
+      "H": 180,
+      "is_weak_control": false,
+      "alpha_max_L": 512,
+      "alpha_max_D": 8,
+      "alpha_max_ric_mean": 0.038858,
+      "alpha_max_seed_sd": 0.001453,
+      "alpha_max_seeds": [
+        0.037398,
+        0.038337,
+        0.04084
+      ],
+      "ranked_surface": [
+        {
+          "L": 512,
+          "D": 8,
+          "ric_mean": 0.038858,
+          "seed_sd": 0.001453,
+          "ric_seeds": [
+            0.037398,
+            0.038337,
+            0.04084
+          ]
+        },
+        {
+          "L": 1024,
+          "D": 9,
+          "ric_mean": 0.037491,
+          "seed_sd": 0.000949,
+          "ric_seeds": [
+            0.036164,
+            0.037984,
+            0.038325
+          ]
+        },
+        {
+          "L": 1536,
+          "D": 9,
+          "ric_mean": 0.037699,
+          "seed_sd": 0.000744,
+          "ric_seeds": [
+            0.036903,
+            0.0375,
+            0.038693
+          ]
+        }
+      ]
+    },
+    {
+      "sym": "BTC-USDT-PERP",
+      "H": 300,
+      "error": "incomplete"
+    },
+    {
+      "sym": "ETH-USDT-PERP",
+      "H": 180,
+      "is_weak_control": false,
+      "alpha_max_L": 512,
+      "alpha_max_D": 8,
+      "alpha_max_ric_mean": 0.024394,
+      "alpha_max_seed_sd": 0.000497,
+      "alpha_max_seeds": [
+        0.024006,
+        0.02408,
+        0.025096
+      ],
+      "ranked_surface": [
+        {
+          "L": 512,
+          "D": 8,
+          "ric_mean": 0.024394,
+          "seed_sd": 0.000497,
+          "ric_seeds": [
+            0.024006,
+            0.02408,
+            0.025096
+          ]
+        },
+        {
+          "L": 1024,
+          "D": 9,
+          "ric_mean": 0.023315,
+          "seed_sd": 0.000673,
+          "ric_seeds": [
+            0.02265,
+            0.023057,
+            0.024237
+          ]
+        },
+        {
+          "L": 1536,
+          "D": 9,
+          "ric_mean": 0.023665,
+          "seed_sd": 0.001026,
+          "ric_seeds": [
+            0.022549,
+            0.023419,
+            0.025027
+          ]
+        }
+      ]
+    },
+    {
+      "sym": "LTC-USDT-PERP",
+      "H": 300,
+      "is_weak_control": true,
+      "alpha_max_L": 1536,
+      "alpha_max_D": 9,
+      "alpha_max_ric_mean": 0.024538,
+      "alpha_max_seed_sd": 0.010012,
+      "alpha_max_seeds": [
+        0.013794,
+        0.021925,
+        0.037896
+      ],
+      "ranked_surface": [
+        {
+          "L": 512,
+          "D": 8,
+          "ric_mean": 0.023971,
+          "seed_sd": 0.006885,
+          "ric_seeds": [
+            0.017809,
+            0.020523,
+            0.03358
+          ]
+        },
+        {
+          "L": 1024,
+          "D": 9,
+          "ric_mean": 0.024533,
+          "seed_sd": 0.008465,
+          "ric_seeds": [
+            0.014274,
+            0.024321,
+            0.035005
+          ]
+        },
+        {
+          "L": 1536,
+          "D": 9,
+          "ric_mean": 0.024538,
+          "seed_sd": 0.010012,
+          "ric_seeds": [
+            0.013794,
+            0.021925,
+            0.037896
+          ]
+        }
+      ]
+    }
+  ],
+  "PRIMARY_best_L_per_cell": {
+    "per_cell_alpha_max": {
+      "BTC-H180": "L512(D8) +0.0389\u00b10.0015",
+      "ETH-H180": "L512(D8) +0.0244\u00b10.0005",
+      "LTC-H300[weak]": "L1536(D9) +0.0245\u00b10.0100"
+    },
+    "alpha_max_L_vote": {
+      "512": 2,
+      "1536": 1
+    },
+    "reading": "the context length L that MAXIMIZES rank_IC per (symbol,horizon), its magnitude and seed-stability -- this IS the Tier-2 result (CLAUDE.md rule 1). Long-context helps iff alpha_max_L>512 with a seed-stable margin over the L512 anchor."
+  },
+  "locked": {
+    "objective": "bce",
+    "head": "last",
+    "W": 16,
+    "dropout": 0.5,
+    "wd": 0.001,
+    "D_for_L": {
+      "512": 8,
+      "1024": 9,
+      "1536": 9
+    },
+    "L_anchor": 512,
+    "note": "rev44 outcome (bce|last) + rev30/rev39/rev41 capacity lock; D lifted per rev45 RF>=L for Tier-2 only"
+  },
+  "secondary_economic_deploy_annotation": {
+    "purpose": "SEPARATE confirmatory deploy question (HM1 \u00a75 family) -- NOT the tier conclusion (CLAUDE.md rule 2). Pre-registered rev45 continuous lift vs the L512 RF-matched anchor + the frozen \u00a75 gate on the alpha-max-L config, as a DIAGNOSTIC, kept verbatim and demoted (rule 4). rev28 refuted/shelved + experiments.jsonl UNCHANGED; HM1 continuous, not a \u00a75 verdict.",
+    "per_cell": [
+      {
+        "cell": "BTC-USDT-PERP-H180",
+        "is_weak_control": false,
+        "alpha_max_L": 512,
+        "lift_vs_L512_anchor": 0.0,
+        "anchor_L512_ric_mean": 0.038858,
+        "delta_ic_vs_baseline_ref": -0.00304,
+        "passes_5ab": false,
+        "gate_reason": "a=False b=False d=-0.00304 plac=-0.002451 se=0.003521"
+      },
+      {
+        "cell": "ETH-USDT-PERP-H180",
+        "is_weak_control": false,
+        "alpha_max_L": 512,
+        "lift_vs_L512_anchor": 0.0,
+        "anchor_L512_ric_mean": 0.024394,
+        "delta_ic_vs_baseline_ref": 0.00099,
+        "passes_5ab": false,
+        "gate_reason": "a=False b=False d=0.00099 plac=0.001233 se=0.002688"
+      },
+      {
+        "cell": "LTC-USDT-PERP-H300",
+        "is_weak_control": true,
+        "alpha_max_L": 1536,
+        "lift_vs_L512_anchor": 0.000567,
+        "anchor_L512_ric_mean": 0.023971,
+        "delta_ic_vs_baseline_ref": -0.01586,
+        "passes_5ab": false,
+        "gate_reason": "a=False b=False d=-0.01586 plac=0.007771 se=0.007037"
+      }
+    ]
+  },
+  "incomplete_cells": [
+    "BTC-USDT-PERP-H300(0/9)"
+  ],
+  "approx_gpu_usd": 5.06,
+  "n_units": 27,
+  "finished": "2026-05-20T00:38:17Z"
+}
