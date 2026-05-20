@@ -48,6 +48,10 @@ TR_BATCH = 1024
 EV_CHUNK = 4096
 L4_USD_PER_S = 0.000222
 
+# rev50 diagnostic (lcurve): no early-stop, full per-epoch logging
+EP_DIAG = 24
+T_MAX_DIAG = 24
+
 BUCKET = "blackdigital-scalper-data"
 GCP_PROJECT = "project-26a24ad0-1059-4f73-93b"
 
@@ -505,6 +509,211 @@ def probe_lobw128(seed: int):
             "ep_used": int(ep + 1)}
 
 
+# ---- DIAGNOSTIC: rev50 learning-curve (per-epoch val/test ric/logloss) ----
+@app.function(image=IMG, gpu="A100-80GB", timeout=3600, memory=65536,
+              volumes={MNT: VOL})
+def lcurve_lobw128(seed: int = 0):
+    """rev50 DIAGNOSTIC: same 2-stream W=128 raw-LOB + 6-globals
+    architecture as rev48, ONE seed, NO early-stop, EP_DIAG=24 epochs,
+    per-epoch logging of train_loss / val_logloss / val_ric / test_ric
+    / lr. Cosine T_MAX_DIAG=24 matched to actual run length (NOT the
+    rev48-probe T_MAX=8 which collapses LR before the diagnostic
+    window closes).
+
+    Purpose: distinguish (i) capacity-overfit-on-val (val_ric peaks
+    very early, test_ric peaks even earlier, both decay -- rev30 motif
+    on a bigger model) from (ii) val/test distribution shift (val_ric
+    rises smoothly, test_ric stays low throughout, no overfit-decay).
+
+    Pre-reg: research/hypotheses.jsonl HD1 rev50 (this rev). Outcome
+    only INFORMS interpretation of rev49; rev49 result unchanged."""
+    import numpy as np
+    import torch
+    import torch.nn.functional as Fnn
+
+    VOL.reload()
+    sys.path.insert(0, "/root/proj")
+    from scripts import hd1_seq_core as C
+
+    t0 = time.time()
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+
+    X_raw = np.load(RAW_PACK, mmap_mode="r")
+    G_all_raw = np.load(GLOB_PACK, mmap_mode="r")
+    meta = np.load(f"{PACK_DIR}/{SYM}_meta.npz")
+    n = int(meta["n"])
+    y0 = meta[f"y0_{H}"]
+    rH = meta[f"rH_{H}"].astype(np.float64)
+
+    tr, te, _ = C.honest_split(n)
+    reached = (y0 != 0) & np.isfinite(rH)
+    up = (y0 == 1).astype(np.float32)
+    s_tr_all = tr & reached
+    s_te = te & reached
+    fit_m, val_m = C.train_val_split(s_tr_all)
+    w1 = C.r1_weights(rH, s_tr_all).astype(np.float32)
+
+    fit_idx = np.where(fit_m)[0]
+    val_idx = np.where(val_m)[0]
+    te_idx = np.where(s_te)[0]
+
+    G_all = np.ascontiguousarray(G_all_raw).astype(np.float32)
+    g_mu = G_all[fit_m].mean(axis=0).astype(np.float32)
+    g_sd = G_all[fit_m].std(axis=0).astype(np.float32) + 1e-6
+    G_all = (G_all - g_mu) / g_sd
+
+    # LOB z-score on fit rows (streamed)
+    s_acc = np.zeros(F_LOB, np.float64)
+    ss_acc = np.zeros(F_LOB, np.float64)
+    cnt = 0
+    SCHUNK = 1024
+    for c in range(0, fit_idx.size, SCHUNK):
+        blk = np.ascontiguousarray(
+            X_raw[fit_idx[c:c + SCHUNK]]).reshape(-1, F_LOB).astype(np.float64)
+        s_acc += blk.sum(axis=0)
+        ss_acc += np.square(blk).sum(axis=0)
+        cnt += blk.shape[0]
+    x_mu = (s_acc / cnt).astype(np.float32)
+    x_sd = (np.sqrt(np.maximum(ss_acc / cnt - (s_acc / cnt) ** 2, 0.0))
+            .astype(np.float32) + 1e-6)
+
+    def _gather(idx):
+        x = np.ascontiguousarray(X_raw[idx]).astype(np.float32)
+        x = (x - x_mu) / x_sd
+        return x, G_all[idx]
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    net = _build_two_stream_tcn().to(dev)
+    n_params = sum(p.numel() for p in net.parameters())
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=WD)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_MAX_DIAG)
+    scaler = torch.amp.GradScaler("cuda", enabled=dev != "cpu")
+
+    y_dev = torch.from_numpy(up).to(dev)
+    w_dev = torch.from_numpy(w1).to(dev)
+
+    def _eval(indices):
+        """Return (logits_np, weighted_logloss)."""
+        out = []
+        wll_num, wll_den = 0.0, 0.0
+        with torch.no_grad(), torch.amp.autocast(
+                "cuda", enabled=dev != "cpu"):
+            for s_ in range(0, indices.size, EV_CHUNK):
+                ii = indices[s_:s_ + EV_CHUNK]
+                xb, gb = _gather(ii)
+                xb = torch.from_numpy(xb).to(dev, non_blocking=True)
+                gb = torch.from_numpy(gb).to(dev, non_blocking=True)
+                lo = net(xb, gb).float()
+                jt = torch.as_tensor(ii, device=dev, dtype=torch.long)
+                bce = Fnn.binary_cross_entropy_with_logits(
+                    lo, y_dev[jt], reduction="none")
+                wll_num += float((bce * w_dev[jt]).sum().item())
+                wll_den += float(w_dev[jt].sum().item())
+                out.append(lo.cpu())
+                del xb, gb
+        wll = wll_num / max(wll_den, 1e-9)
+        return torch.cat(out).numpy(), wll
+
+    y_val_np = up[val_idx].astype(int)
+    y_te_np = up[te_idx].astype(int)
+
+    history = []
+    for ep in range(EP_DIAG):
+        net.train()
+        perm = np.random.permutation(fit_idx)
+        tr_num, tr_den = 0.0, 0.0
+        for s_ in range(0, perm.size, TR_BATCH):
+            ii = perm[s_:s_ + TR_BATCH]
+            xb, gb = _gather(ii)
+            xb = torch.from_numpy(xb).to(dev, non_blocking=True)
+            gb = torch.from_numpy(gb).to(dev, non_blocking=True)
+            jt = torch.as_tensor(ii, device=dev, dtype=torch.long)
+            opt.zero_grad(set_to_none=True)
+            with torch.amp.autocast("cuda", enabled=dev != "cpu"):
+                lo = net(xb, gb)
+                bce = Fnn.binary_cross_entropy_with_logits(
+                    lo, y_dev[jt], reduction="none")
+                loss = (bce * w_dev[jt]).sum() / (w_dev[jt].sum() + 1e-9)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+            tr_num += float((bce.detach() * w_dev[jt]).sum().item())
+            tr_den += float(w_dev[jt].sum().item())
+            del xb, gb
+        lr_now = float(opt.param_groups[0]["lr"])
+        if ep < T_MAX_DIAG:
+            sch.step()
+
+        net.eval()
+        v_lo, v_wll = _eval(val_idx)
+        t_lo, t_wll = _eval(te_idx)
+        v_p = 1.0 / (1.0 + np.exp(-v_lo))
+        t_p = 1.0 / (1.0 + np.exp(-t_lo))
+        v_auc = float(C.auc(y_val_np, v_p))
+        t_auc = float(C.auc(y_te_np, t_p))
+        rec = {
+            "ep": ep + 1,
+            "lr": round(lr_now, 7),
+            "train_loss": round(tr_num / max(tr_den, 1e-9), 6),
+            "val_logloss": round(v_wll, 6),
+            "val_ric": round(v_auc - 0.5, 6),
+            "val_auc": round(v_auc, 6),
+            "test_logloss": round(t_wll, 6),
+            "test_ric": round(t_auc - 0.5, 6),
+            "test_auc": round(t_auc, 6),
+        }
+        history.append(rec)
+        print(f"ep{ep+1:>2d}  lr={lr_now:.5f}  "
+              f"trL={rec['train_loss']:.4f}  "
+              f"vL={rec['val_logloss']:.4f}  vR={rec['val_ric']:+.4f}  "
+              f"tL={rec['test_logloss']:.4f}  tR={rec['test_ric']:+.4f}")
+        sys.stdout.flush()
+
+    # post-hoc summaries at the three "interesting" epochs
+    def _stats_at(ep_idx):
+        net_state = "live"  # we don't restore; just describe the live state
+        # We don't checkpoint per-epoch (would 24x VRAM); summary fields
+        # are read from history. boot_se/placebo computed only at end.
+        return history[ep_idx]
+
+    last = history[-1]
+    by_val = max(history, key=lambda r: r["val_ric"])
+    by_test = max(history, key=lambda r: r["test_ric"])
+
+    # end-of-run placebo + boot_se on TEST set (live final-epoch model)
+    _, _ = _eval(te_idx)  # warm
+    t_lo_final, _ = _eval(te_idx)
+    t_p_final = 1.0 / (1.0 + np.exp(-t_lo_final))
+    plac = float(C.placebo_auc(y_te_np, t_p_final) - 0.5)
+    block = int(C.block_size(H))
+    se = C.block_bootstrap_auc_se(y_te_np, t_p_final, block)
+    se_f = None if not np.isfinite(se) else round(float(se), 6)
+
+    return {
+        "rev": 50,
+        "seed": int(seed),
+        "cfg": {"sym": SYM, "H": H, "L": L, "D": D, "W_lob": W_LOB,
+                "F_lob": F_LOB, "F_glob": F_GLOB,
+                "EP_DIAG": EP_DIAG, "T_MAX_DIAG": T_MAX_DIAG,
+                "DROPOUT": DROPOUT, "WD": WD, "TR_BATCH": TR_BATCH,
+                "n_params": int(n_params)},
+        "n_fit": int(fit_m.sum()), "n_val": int(val_m.sum()),
+        "n_te": int(s_te.sum()), "block": block,
+        "history": history,
+        "summary": {
+            "last_ep": last,
+            "by_best_val_ric": by_val,
+            "by_best_test_ric": by_test,
+        },
+        "final_ep_diagnostics": {
+            "placebo_ric": round(plac, 6),
+            "boot_se": se_f,
+        },
+        "gpu_s": round(time.time() - t0, 2),
+    }
+
+
 @app.function(image=IMG, cpu=1.0, memory=4096, timeout=600,
               volumes={MNT: VOL})
 def save_result(payload: dict):
@@ -520,10 +729,20 @@ def save_result(payload: dict):
 
 
 @app.local_entrypoint()
-def main(stage: str = "all"):
-    """Stage: build | probe | all."""
+def main(stage: str = "all", lcurve_seed: int = 0):
+    """Stage: build | probe | lcurve | all."""
     import statistics as st
     t_main = time.time()
+    if stage == "lcurve":
+        print(f"[stage={stage}] launching lcurve_lobw128 seed={lcurve_seed}"
+              f" (EP_DIAG={EP_DIAG}, T_MAX_DIAG={T_MAX_DIAG}, NO early-stop)...")
+        r = lcurve_lobw128.remote(lcurve_seed)
+        out_path = f"{MNT}/tier2/rev50_lcurve_seed{lcurve_seed}.json"
+        save_result.remote({"out_path": out_path, **r})
+        print("\n=== rev50 LCURVE RESULT ===")
+        print(json.dumps(r, indent=2, default=str))
+        print(f"\ntotal wall: {time.time() - t_main:.1f}s")
+        return
     if stage in ("build", "all"):
         print(f"[stage={stage}] launching build_raw_l2_ltc on Modal CPU...")
         r_build = build_raw_l2_ltc.remote()
