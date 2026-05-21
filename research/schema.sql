@@ -37,7 +37,7 @@ CREATE TABLE hypotheses (
     priority_rank     INTEGER,                -- cheap-first ordering
     status            TEXT NOT NULL
         CHECK (status IN ('active','testing','confirmed','refuted',
-                          'blocked','superseded')),
+                          'blocked','superseded','informative')),
     result_experiment_id TEXT,                -- FK -> experiments(experiment_id)
     note              TEXT,
     PRIMARY KEY (hypothesis_id, rev)

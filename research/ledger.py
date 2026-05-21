@@ -44,7 +44,7 @@ DATA_SOURCES = ("v3_btc", "cryptolake", "recorder", "volaware", "other")
 SPLIT_METHODS = ("CPCV_6_2", "walkforward_7525", "honest_val_test", "other")
 EXP_STATUS = ("confirmed", "suspect", "refuted", "artifact", "exploratory")
 HYP_STATUS = ("active", "testing", "confirmed", "refuted", "blocked",
-              "superseded")
+              "superseded", "informative")
 
 # live_sim.TradeOutcome.REASONS — the 12 canonical exit reasons.
 EXIT_REASONS = (
