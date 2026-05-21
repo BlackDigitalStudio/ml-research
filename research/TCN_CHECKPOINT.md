@@ -16,6 +16,55 @@ noted). block-bootstrap SE ≈ 0.005–0.007 per single-seed cell.
 
 ---
 
+## 0. ECONOMIC REALITY (read first) — rank_IC is a PROXY, not money
+
+**rank_IC is a rank-correlation search screen, NOT a tradeable edge.**
+Translate it before celebrating any number:
+
+- rank_IC → **AUC = rank_IC + 0.5**. The best TCN cell (BTC-H180,
+  +0.0389) is **AUC ≈ 0.539**: given a random up-move and a random
+  down-move, the model ranks the up-move higher only ~53.9% of the time
+  (vs 50% coin-flip). The LTC-H300 dense argmax (+0.0347) is AUC ≈ 0.535.
+  Most cells are AUC 0.51–0.53. This is a **1–4 percentage-point** rank
+  edge over chance.
+- **The label barrier (±0.13%) equals the round-trip cost floor (0.13%).**
+  A correct directional call earns ~13bp at the barrier but pays ~13bp in
+  costs → net ≈ 0; a wrong call loses ~13bp + ~13bp. To profit you need a
+  win-rate well above ~60%. AUC 0.54 implies ~52–54% → **deeply
+  unprofitable**.
+- **Economic gate result (from the ledger, NOT estimated):**
+  - TCN (HD1): **0 of 12 cells** pass `economic_pass_strict` OR
+    `economic_pass_loose`. top-decile abs-move = 0.13% = exactly the cost
+    floor (the model's most-confident decile does not separate from cost).
+  - HM6 snapshot XGBoost baseline: **0 of 24 cells** pass either gate
+    (AUC 0.51–0.55). The baseline is ALSO sub-economic on this label/cost
+    regime → "TCN ≈ snapshot" means *both are sub-economic*, not "both
+    are good".
+  - Whole ledger: 13 of 100 experiments pass — ALL in the HA1/HA2/HA5/H3
+    lines (LINK/SOL), and the HM2 rev1 audit flagged HA1/HA5/H3 as
+    **magnitude/volatility-conflated objective artifacts** (XGBRegressor
+    reg:squarederror on signed return rewards |move| fit, not direction;
+    HA5's 0.70 AUC is tautological vs a volatility target). I.e. the
+    "passes" are objective mis-specification, not clean directional alpha.
+
+**Bottom line:** across the entire TCN line (and its snapshot baseline)
+there is a **faint, statistically-nonzero directional signal (AUC
+0.51–0.54) that does NOT clear the 13bp cost floor by a wide margin.** No
+TCN config is tradeable as a standalone directional predictor at this
+(label, cost) regime. The rank_IC surface below is the *conditional map of
+that sub-economic signal* — useful for knowing where the signal is
+strongest, but it is not money until something changes the (objective,
+label, cost, or combination) regime.
+
+**Caveat on the dense session (rev48-58):** we logged rank_IC only — the
+decile-EV / win-rate / `economic_pass` fields were NOT computed for the
+dense cells. By AUC analogy (dense +0.0347 = AUC 0.535 ≈ BTC-H180 sparse
+0.537, which failed the gate), the dense cells almost certainly also fail,
+but the exact dense economic numbers are an open eval (cheap re-run that
+emits decile-EV/win-rate, ~$0.5).
+
+---
+
 ## 1. The axes, and which ones move alpha
 
 | Axis | Levels tested | Effect on alpha | Where shown |
@@ -91,6 +140,13 @@ LTC-H300-L512 unless noted. 1 seed except rev49.
 high-vol liquid symbol (BTC/LTC) > ETH > SOL; dense sampling (STRIDE=1);
 context L≥512 (more does not help). Representation/capacity/head/streams
 are interchangeable at the alpha level.
+
+**But in economic terms (see §0):** even the argmax (BTC-H180, AUC 0.539)
+fails the economic gate (0/12 TCN cells pass; baseline 0/24). "Best alpha"
+here means "least sub-economic rank_IC", not "tradeable edge". The
+argmax tells us WHERE the faint directional signal concentrates (short-H,
+high-vol symbols) — useful for siting any future objective/cost change —
+not that BTC-H180 is deployable.
 
 ---
 
