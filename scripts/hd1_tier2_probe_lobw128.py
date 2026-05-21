@@ -95,6 +95,12 @@ X_ENG_S1 = f"{PACK_DIR}/{SYM}_X_L{L}_eng_stride1.npy"
 DONE_ENG_S1 = f"{PACK_DIR}/{SYM}_X_L{L}_eng_stride1.DONE"
 F_ENG = 46  # rev45 tick_features output dim
 W_ANCHOR = 16  # rev45/47 anchor
+# rev56 L-sweep: one raw pack at L_MAX (f16), slice shorter L at probe time
+L_MAX = 2048
+RAW_PACK_S1_LMAX = f"{PACK_DIR}/{SYM}_raw_L{L_MAX}_stride1_f16.npy"
+DONE_S1_LMAX = f"{PACK_DIR}/{SYM}_raw_L{L_MAX}_stride1_f16.DONE"
+# rev45 RF-forced D map (RF = 1 + 4*(2^D - 1) >= L), extended to 2048
+D_FOR_L_EXT = {512: 8, 1024: 9, 1536: 9, 2048: 10}
 
 
 def _gcs_bucket():
@@ -336,11 +342,15 @@ def build_raw_l2_ltc():
 
 
 # ---- MODEL: 2-stream TCN (raw LOB W=128 mean-pool + 6-globals Linear) -----
-def _build_two_stream_tcn(dropout=None):
+def _build_two_stream_tcn(dropout=None, d_blocks=None):
     """Build the 2-stream TCN. dropout=None -> uses module-level DROPOUT
-    (rev48/rev50 default); pass a float to override (rev52 sweep)."""
+    (rev48/rev50 default); pass a float to override (rev52 sweep).
+    d_blocks=None -> uses module-level D (rev48/50/52); pass an int to
+    override (rev56 L-sweep RF-matched D)."""
     if dropout is None:
         dropout = DROPOUT
+    if d_blocks is None:
+        d_blocks = D
     import torch
     import torch.nn as nn
 
@@ -372,7 +382,7 @@ def _build_two_stream_tcn(dropout=None):
         def __init__(self):
             super().__init__()
             layers, ci = [], F_LOB
-            for b in range(D):
+            for b in range(d_blocks):
                 layers.append(Block(ci, W_LOB, 2 ** b))
                 ci = W_LOB
             self.lob = nn.Sequential(*layers)
@@ -1570,6 +1580,342 @@ def probe_engineered_dense_cell(cell: dict):
             "gpu_s": round(time.time() - t0, 2)}
 
 
+# ---- BUILD: rev56 raw pack at L_MAX=2048 (f16), STRIDE=1 ----------------
+@app.function(image=IMG, cpu=64.0, memory=131072, timeout=21600,
+              volumes={MNT: VOL},
+              secrets=[modal.Secret.from_name("hd1-gcp")])
+def build_dense_raw_lmax():
+    """rev56 L-sweep build: raw 20-lvl LOB windows at L_MAX=2048,
+    STRIDE=1, on the SAME META_S1 dp set (n=174,606, parity-verified).
+    Single-phase (labels already in META_S1; no parity recompute).
+    Stored as float16 (~55 GiB vs 109 GiB f32): the raw normalized
+    channels are f16-safe -- (p-mid)/mid ~ 1e-2, sign*log1p(|size|)
+    <= ~14, both << f16 max 65504, with ~1e-3 relative rounding that
+    is immaterial vs the alpha signal (NO Cont-OFI channel in the raw
+    80-ch pack, unlike the engineered pack where f16 overflowed in
+    rev26). Shorter L probes slice the last L ticks of each window.
+    Output: RAW_PACK_S1_LMAX (n, 2048, 80) f16 + DONE marker."""
+    import tempfile
+    import numpy as np
+    import pyarrow.parquet as pq
+
+    sys.path.insert(0, "/root/proj")
+    from scripts import hd1_seq_core as C  # noqa: F401 (parity provenance)
+
+    VOL.reload()
+    if not os.path.exists(META_S1):
+        raise RuntimeError(f"META_S1 missing ({META_S1}); run build_dense first")
+    meta = np.load(META_S1)
+    n_exp = int(meta["n"])
+    t0 = meta["t0"].astype(np.int64)
+
+    if os.path.exists(RAW_PACK_S1_LMAX) and os.path.exists(DONE_S1_LMAX):
+        try:
+            a = np.load(RAW_PACK_S1_LMAX, mmap_mode="r")
+            if a.shape == (n_exp, L_MAX, F_LOB):
+                return {"status": "skip_existing", "shape": list(a.shape)}
+        except Exception:
+            pass
+
+    NS_PER_DAY = 86400 * 1_000_000_000
+    EPOCH = dt.date(1970, 1, 1)
+
+    def d2s(d):
+        return (EPOCH + dt.timedelta(days=int(d))).isoformat()
+
+    t0_day = (t0 // NS_PER_DAY).astype(np.int64)
+    unique_days = sorted(int(d) for d in np.unique(t0_day))
+    bk = _gcs_bucket()
+    out = np.lib.format.open_memmap(
+        RAW_PACK_S1_LMAX, mode="w+", dtype=np.float16,
+        shape=(n_exp, L_MAX, F_LOB))
+
+    chan_cols = []
+    for k in range(20):
+        chan_cols.append(f"bid_{k}_price")
+    for k in range(20):
+        chan_cols.append(f"bid_{k}_size")
+    for k in range(20):
+        chan_cols.append(f"ask_{k}_price")
+    for k in range(20):
+        chan_cols.append(f"ask_{k}_size")
+
+    write_total = 0
+    days_missing = 0
+    t_start = time.time()
+    log = []
+    for d_int in unique_days:
+        day_str = d2s(d_int)
+        day_start_ns = d_int * NS_PER_DAY
+        day_end_ns = day_start_ns + NS_PER_DAY
+        prefix = (f"raw/book/exchange=BINANCE_FUTURES/"
+                  f"symbol={SYM}/dt={day_str}/")
+        blobs = sorted([b for b in bk.client.list_blobs(bk, prefix=prefix)
+                        if b.name.endswith(".parquet")],
+                       key=lambda b: b.name)
+        if not blobs:
+            days_missing += 1
+            continue
+        with tempfile.TemporaryDirectory() as td:
+            paths = []
+            for i, b in enumerate(blobs):
+                p = f"{td}/p{i:04d}.parquet"
+                b.download_to_filename(p)
+                paths.append(p)
+            ts_parts, X_parts = [], []
+            for p in paths:
+                t = pq.read_table(p, columns=["timestamp"] + chan_cols)
+                ts_parts.append(t["timestamp"].to_numpy().astype(np.int64))
+                X_parts.append(np.column_stack(
+                    [t[c].to_numpy().astype(np.float64) for c in chan_cols]))
+            ts_day = np.concatenate(ts_parts)
+            X_day = np.concatenate(X_parts, axis=0)
+            order = np.argsort(ts_day, kind="stable")
+            ts_day = ts_day[order]
+            X_day = X_day[order]
+
+            bid_p = X_day[:, 0:20]
+            bid_s = X_day[:, 20:40]
+            ask_p = X_day[:, 40:60]
+            ask_s = X_day[:, 60:80]
+            mid = 0.5 * (bid_p[:, 0] + ask_p[:, 0])
+            mid_safe = np.where(mid > 0, mid, 1.0)
+            lob = np.empty((ts_day.size, F_LOB), np.float32)
+            lob[:, 0:20] = ((bid_p - mid[:, None]) / mid_safe[:, None])
+            lob[:, 40:60] = ((ask_p - mid[:, None]) / mid_safe[:, None])
+            lob[:, 20:40] = (np.sign(bid_s) * np.log1p(np.abs(bid_s)))
+            lob[:, 60:80] = (np.sign(ask_s) * np.log1p(np.abs(ask_s)))
+            lob = lob.astype(np.float16)
+
+            in_day = (t0 >= day_start_ns) & (t0 < day_end_ns)
+            dp_idx = np.where(in_day)[0]
+            for dp_i in dp_idx:
+                t = int(t0[dp_i])
+                j = int(np.searchsorted(ts_day, t, side="right")) - 1
+                if j < 0:
+                    out[dp_i] = 0
+                    continue
+                lo = j - L_MAX + 1
+                if lo >= 0:
+                    out[dp_i] = lob[lo:j + 1]
+                else:
+                    pad = -lo
+                    win = np.zeros((L_MAX, F_LOB), np.float16)
+                    win[pad:] = lob[:j + 1]
+                    out[dp_i] = win
+            write_total += dp_idx.size
+        log.append(f"{day_str}: cum={write_total}")
+        if len(log) % 20 == 0:
+            print(f"[build_lmax] {log[-1]}")
+            sys.stdout.flush()
+            VOL.commit()
+
+    out.flush(); del out
+    with open(DONE_S1_LMAX, "w") as f:
+        f.write(f"n={n_exp} write_total={write_total} "
+                f"days_missing={days_missing} dtype=f16 L_MAX={L_MAX}\n")
+    VOL.commit()
+    return {"status": "built", "n": n_exp, "write_total": int(write_total),
+            "shape": [n_exp, L_MAX, F_LOB], "dtype": "float16",
+            "path": RAW_PACK_S1_LMAX,
+            "elapsed_s": round(time.time() - t_start, 1),
+            "days_missing": days_missing}
+
+
+# ---- L-SWEEP PROBE: 2-stream raw-LOB at sliced L, RF-matched D ----------
+@app.function(image=IMG, gpu="A100-80GB", timeout=7200, memory=98304,
+              volumes={MNT: VOL})
+def probe_raw_lsweep_cell(cell: dict):
+    """rev56: 2-stream raw-LOB + 6-globals at a chosen context length L
+    (sliced from the L_MAX=2048 f16 pack), RF-matched D = D_FOR_L_EXT[L],
+    rev45-anchor reg (dropout, wd), 1 seed, 24 ep no early-stop,
+    per-epoch logging. Globals come from the existing GLOB_PACK_S1
+    (last-tick, L-independent). Isolates the CONTEXT-LENGTH axis for
+    the RAW representation (vs rev52 #7 fixed at L=512).
+
+    cell = {'L': int, 'dropout': float, 'wd': float, 'seed': int}"""
+    import numpy as np
+    import torch
+    import torch.nn.functional as Fnn
+
+    VOL.reload()
+    sys.path.insert(0, "/root/proj")
+    from scripts import hd1_seq_core as C
+
+    t0 = time.time()
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+
+    L_use = int(cell["L"])
+    d_blocks = D_FOR_L_EXT[L_use]
+    dropout = float(cell.get("dropout", 0.5))
+    wd = float(cell.get("wd", 1e-3))
+    seed = int(cell.get("seed", 0))
+    cell_tag = f"raw_L{L_use}_D{d_blocks}_drop{dropout:g}_wd{wd:g}_seed{seed}"
+
+    X_raw = np.load(RAW_PACK_S1_LMAX, mmap_mode="r")   # (n, 2048, 80) f16
+    G_all_raw = np.load(GLOB_PACK_S1, mmap_mode="r")    # (n, 6) f32
+    meta = np.load(META_S1)
+    n = int(meta["n"])
+    y0 = meta["y0_300"]
+    rH = meta["rH_300"].astype(np.float64)
+
+    tr, te, _ = C.honest_split(n)
+    reached = (y0 != 0) & np.isfinite(rH)
+    up = (y0 == 1).astype(np.float32)
+    s_tr_all = tr & reached
+    s_te = te & reached
+    fit_m, val_m = C.train_val_split(s_tr_all)
+    w1 = C.r1_weights(rH, s_tr_all).astype(np.float32)
+
+    fit_idx = np.where(fit_m)[0]
+    val_idx = np.where(val_m)[0]
+    te_idx = np.where(s_te)[0]
+
+    G_all = np.ascontiguousarray(G_all_raw).astype(np.float32)
+    g_mu = G_all[fit_m].mean(axis=0).astype(np.float32)
+    g_sd = G_all[fit_m].std(axis=0).astype(np.float32) + 1e-6
+    G_all = (G_all - g_mu) / g_sd
+
+    sl = slice(L_MAX - L_use, L_MAX)   # last L_use ticks of each window
+
+    # PRELOAD the sliced windows for all needed rows into RAM in ONE mmap
+    # pass (fit u val u te ~= 105k rows). Avoids re-reading the 55 GiB f16
+    # Volume pack every epoch (would be ~480 GiB IO over 24 ep at L=2048).
+    needed = np.union1d(np.union1d(fit_idx, val_idx), te_idx)
+    remap = -np.ones(n, dtype=np.int64)
+    remap[needed] = np.arange(needed.size)
+    Xmem = np.empty((needed.size, L_use, F_LOB), np.float16)
+    CH = 2048
+    for c in range(0, needed.size, CH):
+        blk = needed[c:c + CH]
+        Xmem[c:c + blk.size] = X_raw[blk, sl, :]
+    print(f"[{cell_tag}] preloaded {Xmem.shape} f16 "
+          f"({Xmem.nbytes/2**30:.1f} GiB) into RAM")
+    sys.stdout.flush()
+
+    fit_rows = remap[fit_idx]
+    # z-score on fit rows from RAM
+    s_acc = np.zeros(F_LOB, np.float64)
+    ss_acc = np.zeros(F_LOB, np.float64)
+    cnt = 0
+    for c in range(0, fit_rows.size, CH):
+        blk = np.ascontiguousarray(
+            Xmem[fit_rows[c:c + CH]]).reshape(-1, F_LOB).astype(np.float64)
+        s_acc += blk.sum(axis=0)
+        ss_acc += np.square(blk).sum(axis=0)
+        cnt += blk.shape[0]
+    x_mu = (s_acc / cnt).astype(np.float32)
+    x_sd = (np.sqrt(np.maximum(ss_acc / cnt - (s_acc / cnt) ** 2, 0.0))
+            .astype(np.float32) + 1e-6)
+
+    def _gather(idx):
+        x = Xmem[remap[idx]].astype(np.float32)
+        x = (x - x_mu) / x_sd
+        return x, G_all[idx]
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    net = _build_two_stream_tcn(dropout=dropout, d_blocks=d_blocks).to(dev)
+    n_params = sum(p.numel() for p in net.parameters())
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=wd)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_MAX_DIAG)
+    scaler = torch.amp.GradScaler("cuda", enabled=dev != "cpu")
+
+    y_dev = torch.from_numpy(up).to(dev)
+    w_dev = torch.from_numpy(w1).to(dev)
+
+    def _eval(indices):
+        out = []
+        wll_num, wll_den = 0.0, 0.0
+        with torch.no_grad(), torch.amp.autocast(
+                "cuda", enabled=dev != "cpu"):
+            for s_ in range(0, indices.size, EV_CHUNK):
+                ii = indices[s_:s_ + EV_CHUNK]
+                xb, gb = _gather(ii)
+                xb = torch.from_numpy(xb).to(dev, non_blocking=True)
+                gb = torch.from_numpy(gb).to(dev, non_blocking=True)
+                lo = net(xb, gb).float()
+                jt = torch.as_tensor(ii, device=dev, dtype=torch.long)
+                bce = Fnn.binary_cross_entropy_with_logits(
+                    lo, y_dev[jt], reduction="none")
+                wll_num += float((bce * w_dev[jt]).sum().item())
+                wll_den += float(w_dev[jt].sum().item())
+                out.append(lo.cpu())
+                del xb, gb
+        return torch.cat(out).numpy(), wll_num / max(wll_den, 1e-9)
+
+    y_val_np = up[val_idx].astype(int)
+    y_te_np = up[te_idx].astype(int)
+
+    EV_CHUNK_L = max(512, EV_CHUNK // max(1, L_use // 512))  # smaller chunk at big L
+    history = []
+    for ep in range(EP_DIAG):
+        net.train()
+        perm = np.random.permutation(fit_idx)
+        tr_num, tr_den = 0.0, 0.0
+        for s_ in range(0, perm.size, TR_BATCH):
+            ii = perm[s_:s_ + TR_BATCH]
+            xb, gb = _gather(ii)
+            xb = torch.from_numpy(xb).to(dev, non_blocking=True)
+            gb = torch.from_numpy(gb).to(dev, non_blocking=True)
+            jt = torch.as_tensor(ii, device=dev, dtype=torch.long)
+            opt.zero_grad(set_to_none=True)
+            with torch.amp.autocast("cuda", enabled=dev != "cpu"):
+                lo = net(xb, gb)
+                bce = Fnn.binary_cross_entropy_with_logits(
+                    lo, y_dev[jt], reduction="none")
+                loss = (bce * w_dev[jt]).sum() / (w_dev[jt].sum() + 1e-9)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+            tr_num += float((bce.detach() * w_dev[jt]).sum().item())
+            tr_den += float(w_dev[jt].sum().item())
+            del xb, gb
+        lr_now = float(opt.param_groups[0]["lr"])
+        if ep < T_MAX_DIAG:
+            sch.step()
+        net.eval()
+        v_lo, v_wll = _eval(val_idx)
+        t_lo, t_wll = _eval(te_idx)
+        v_p = 1.0 / (1.0 + np.exp(-v_lo))
+        t_p = 1.0 / (1.0 + np.exp(-t_lo))
+        v_auc = float(C.auc(y_val_np, v_p))
+        t_auc = float(C.auc(y_te_np, t_p))
+        rec = {"ep": ep + 1, "lr": round(lr_now, 7),
+               "train_loss": round(tr_num / max(tr_den, 1e-9), 6),
+               "val_logloss": round(v_wll, 6),
+               "val_ric": round(v_auc - 0.5, 6),
+               "test_logloss": round(t_wll, 6),
+               "test_ric": round(t_auc - 0.5, 6)}
+        history.append(rec)
+        print(f"[{cell_tag}] ep{ep+1:>2d} lr={lr_now:.5f} "
+              f"trL={rec['train_loss']:.4f} "
+              f"vR={rec['val_ric']:+.4f} tR={rec['test_ric']:+.4f}")
+        sys.stdout.flush()
+
+    last = history[-1]
+    by_val = max(history, key=lambda r: r["val_ric"])
+    by_test = max(history, key=lambda r: r["test_ric"])
+    t_lo_final, _ = _eval(te_idx)
+    t_p_final = 1.0 / (1.0 + np.exp(-t_lo_final))
+    plac = float(C.placebo_auc(y_te_np, t_p_final) - 0.5)
+    block = int(C.block_size(H))
+    se = C.block_bootstrap_auc_se(y_te_np, t_p_final, block)
+    se_f = None if not np.isfinite(se) else round(float(se), 6)
+
+    return {"rev": 56, "cell_tag": cell_tag, "L": L_use, "D": d_blocks,
+            "dropout": dropout, "wd": wd, "seed": seed,
+            "n_params": int(n_params),
+            "n_fit": int(fit_m.sum()), "n_val": int(val_m.sum()),
+            "n_te": int(s_te.sum()), "block": block,
+            "history": history,
+            "summary": {"last_ep": last, "by_best_val_ric": by_val,
+                        "by_best_test_ric": by_test},
+            "final_ep_diagnostics": {"placebo_ric": round(plac, 6),
+                                     "boot_se": se_f},
+            "gpu_s": round(time.time() - t0, 2)}
+
+
 @app.function(image=IMG, cpu=1.0, memory=4096, timeout=600,
               volumes={MNT: VOL})
 def save_result(payload: dict):
@@ -1599,6 +1945,49 @@ def main(stage: str = "all", lcurve_seed: int = 0):
         save_result.remote({"out_path": out_path, **r})
         print("\n=== rev50 LCURVE RESULT ===")
         print(json.dumps(r, indent=2, default=str))
+        print(f"\ntotal wall: {time.time() - t_main:.1f}s")
+        return
+    if stage == "lsweep":
+        # rev56: build L_MAX=2048 raw pack (if missing), then probe
+        # L in {512, 2048} at rev45-anchor reg (drop=0.5 wd=1e-3) seed=0.
+        print(f"[stage={stage}] launching build_dense_raw_lmax (L_MAX="
+              f"{L_MAX}, f16)...")
+        rb = build_dense_raw_lmax.remote()
+        print(f"[build_lmax] result:\n{json.dumps(rb, indent=2, default=str)}")
+        if rb.get("status") not in ("built", "skip_existing"):
+            print("[lsweep] build failed; aborting.")
+            return
+        cells = [{"L": 512, "dropout": 0.5, "wd": 1e-3, "seed": 0},
+                 {"L": 2048, "dropout": 0.5, "wd": 1e-3, "seed": 0}]
+        print(f"[stage={stage}] launching {len(cells)} L-cells in parallel...")
+        results = list(probe_raw_lsweep_cell.map(cells))
+        rows = []
+        for r in results:
+            s = r["summary"]
+            rows.append({"L": r["L"], "D": r["D"], "n_params": r["n_params"],
+                         "best_val_ric": s["by_best_val_ric"]["val_ric"],
+                         "test_at_best_val": s["by_best_val_ric"]["test_ric"],
+                         "best_val_ep": s["by_best_val_ric"]["ep"],
+                         "best_test_ric": s["by_best_test_ric"]["test_ric"],
+                         "best_test_ep": s["by_best_test_ric"]["ep"],
+                         "last_train_loss": s["last_ep"]["train_loss"],
+                         "placebo_ric": r["final_ep_diagnostics"]["placebo_ric"],
+                         "boot_se": r["final_ep_diagnostics"]["boot_se"],
+                         "gpu_s": r["gpu_s"]})
+        rows.sort(key=lambda x: x["L"])
+        payload = {"rev": 56, "cell": f"{SYM}-H{H}-W{W_LOB}-raw2stream",
+                   "rows": rows, "full_histories": results,
+                   "wall_s": round(time.time() - t_main, 1)}
+        print("\n=== rev56 L-SWEEP SUMMARY (raw, drop=0.5 wd=1e-3 seed=0) ===")
+        for row in rows:
+            print(f"  L={row['L']:>4} D={row['D']}  "
+                  f"bestVal@ep{row['best_val_ep']:>2d}={row['best_val_ric']:+.4f}"
+                  f" ->test={row['test_at_best_val']:+.4f}  | "
+                  f"bestTest@ep{row['best_test_ep']:>2d}={row['best_test_ric']:+.4f}"
+                  f"  trL={row['last_train_loss']:.4f} params={row['n_params']}"
+                  f" gpu_s={row['gpu_s']:.0f}")
+        save_result.remote({"out_path": f"{MNT}/tier2/rev56_lsweep.json",
+                            **payload})
         print(f"\ntotal wall: {time.time() - t_main:.1f}s")
         return
     if stage == "c1":
