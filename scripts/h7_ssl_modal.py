@@ -178,7 +178,7 @@ def _build_classifier(device):
 # pretrain_encoder — masked LOB modeling on pooled TRAIN rows (embargoed)
 # =========================================================================
 @app.function(image=GPU_IMG, gpu="A10G", timeout=14400, volumes={MNT: VOL},
-              retries=0)
+              memory=65536, retries=0)
 def pretrain_encoder(epochs: int = 20, samples_cap: int = 0,
                      smoke: int = 0, syms: list = None):
     """One shared encoder, masked-reconstruction on pooled per-symbol
@@ -203,7 +203,7 @@ def pretrain_encoder(epochs: int = 20, samples_cap: int = 0,
         n = int(P["n"])
         tr, _, _ = C.honest_split(n)
         parts.append(P["X"][tr].astype(np.float32))   # (ntr, L, F)
-    Xtr = np.concatenate(parts)                        # (N, L, F)
+    Xtr = np.concatenate(parts); del parts             # (N, L, F)
     rng = np.random.default_rng(42)
     if smoke:
         epochs = 1
@@ -277,7 +277,7 @@ def pretrain_encoder(epochs: int = 20, samples_cap: int = 0,
 # finetune_cell — one (sym): both arms x SEEDS, OOS rank_IC
 # =========================================================================
 @app.function(image=GPU_IMG, gpu="A10G", timeout=10800, volumes={MNT: VOL},
-              retries=1)
+              memory=32768, retries=1)
 def finetune_cell(sym: str, seeds: list, smoke: int = 0):
     import numpy as np
     import torch
