@@ -76,7 +76,9 @@ class PatchTSTBackbone(nn.Module):
             d_model=cfg.d_model, nhead=cfg.n_heads, dim_feedforward=cfg.ffn_dim,
             dropout=cfg.dropout, activation="gelu", batch_first=True, norm_first=True,
         )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=cfg.n_layers)
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=cfg.n_layers,
+            enable_nested_tensor=False)  # eval fast-path CUDA-crashes on A10G
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, C, T)
