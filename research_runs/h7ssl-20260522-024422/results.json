@@ -1,0 +1,62 @@
+{
+  "run_id": "h7ssl-20260522-024422",
+  "hypothesis": "H7 rev3",
+  "H": 180,
+  "L": 256,
+  "HEADLINE_delta_ric_surface": [
+    {
+      "sym": "SOL-USDT-PERP",
+      "H": 180,
+      "ssl_ric_mean": 0.001498,
+      "ssl_seed_sd": 0.004336,
+      "scratch_ric_mean": -0.003888,
+      "scratch_seed_sd": 0.002554,
+      "delta_ric_ssl_minus_scratch": 0.005386,
+      "delta_gt_1se": true
+    },
+    {
+      "sym": "BTC-USDT-PERP",
+      "H": 180,
+      "ssl_ric_mean": 0.021269,
+      "ssl_seed_sd": 0.000857,
+      "scratch_ric_mean": 0.021263,
+      "scratch_seed_sd": 0.000878,
+      "delta_ric_ssl_minus_scratch": 6e-06,
+      "delta_gt_1se": false
+    },
+    {
+      "sym": "ETH-USDT-PERP",
+      "H": 180,
+      "ssl_ric_mean": 0.004407,
+      "ssl_seed_sd": 0.002585,
+      "scratch_ric_mean": 0.004482,
+      "scratch_seed_sd": 0.000196,
+      "delta_ric_ssl_minus_scratch": -7.5e-05,
+      "delta_gt_1se": false
+    },
+    {
+      "sym": "LTC-USDT-PERP",
+      "H": 180,
+      "ssl_ric_mean": -0.001217,
+      "ssl_seed_sd": 0.002897,
+      "scratch_ric_mean": -0.000556,
+      "scratch_seed_sd": 0.004349,
+      "delta_ric_ssl_minus_scratch": -0.000661,
+      "delta_gt_1se": false
+    }
+  ],
+  "argmax_cell": {
+    "sym": "SOL-USDT-PERP",
+    "H": 180,
+    "ssl_ric_mean": 0.001498,
+    "ssl_seed_sd": 0.004336,
+    "scratch_ric_mean": -0.003888,
+    "scratch_seed_sd": 0.002554,
+    "delta_ric_ssl_minus_scratch": 0.005386,
+    "delta_gt_1se": true
+  },
+  "cross_symbol_consistent_ge3of4": false,
+  "falsification_gate_note": "SSL lift confirmed iff delta_ric > +1 block-boot SE AND consistent sign across >=3/4 cells",
+  "secondary_section5_per_arm": "see experiments.jsonl recs",
+  "finished": "2026-05-22T04:17:41Z"
+}
