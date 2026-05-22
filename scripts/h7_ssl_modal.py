@@ -521,8 +521,6 @@ def coordinator(smoke: int = 0, epochs: int = 20):
 
 @app.local_entrypoint()
 def main(smoke: int = 0, epochs: int = 20):
-    print(f"[h7-ssl] smoke={smoke} epochs={epochs} -- spawning coordinator")
-    h = coordinator.spawn(smoke=smoke, epochs=epochs)
-    print(f"[spawn] coordinator id={getattr(h, 'object_id', '?')}; "
-          f"results land on Volume /out/<run_id> (collect with the modal "
-          f"volume CLI). Server-side; disconnect-immune.")
+    print(f"[h7-ssl] smoke={smoke} epochs={epochs} -- running coordinator")
+    out = coordinator.remote(smoke=smoke, epochs=epochs)
+    print("COORDINATOR_RESULT " + json.dumps(out, default=str))
