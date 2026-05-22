@@ -117,12 +117,13 @@ def fetch_pack(syms: list = None):
     out = {}
     for sym in (syms or SYMS):
         dst = f"{MNT}/packed/{sym}.npz"
-        if os.path.exists(dst):
+        blob = bk.blob(f"{PACK_PREFIX}/{sym}.npz")
+        blob.reload()                          # GCS object size
+        if os.path.exists(dst) and os.path.getsize(dst) == (blob.size or -1):
             out[sym] = {"cached": True, "bytes": os.path.getsize(dst)}
             continue
-        key = f"{PACK_PREFIX}/{sym}.npz"
-        bk.blob(key).download_to_filename(dst)
-        out[sym] = {"bytes": os.path.getsize(dst)}
+        blob.download_to_filename(dst)         # (re)download if missing/partial
+        out[sym] = {"bytes": os.path.getsize(dst), "redownloaded": True}
         VOL.commit()       # persist each symbol as it lands (preempt-safe)
     return out
 
