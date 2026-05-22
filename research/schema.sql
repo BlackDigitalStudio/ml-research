@@ -38,6 +38,8 @@ CREATE TABLE hypotheses (
     status            TEXT NOT NULL
         CHECK (status IN ('active','testing','confirmed','refuted',
                           'blocked','superseded','informative')),
+        -- 'informative' = a diagnostic/result rev that records findings WITHOUT
+        -- changing the hypothesis verdict (e.g. HD1 rev51 lcurve diagnostic).
     result_experiment_id TEXT,                -- FK -> experiments(experiment_id)
     note              TEXT,
     PRIMARY KEY (hypothesis_id, rev)

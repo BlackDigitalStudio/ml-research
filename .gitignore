@@ -13,3 +13,9 @@ _tmp_*
 catboost_info/
 research/research.db
 .gcp/
+
+# HD2 local working data (downloads, samples, sweep results)
+.data_inspect/
+.smoke/
+hd2res/
+*.row.json
