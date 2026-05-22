@@ -63,7 +63,7 @@ IO_IMG = (modal.Image.debian_slim(python_version="3.11")
           .pip_install("numpy==2.2.4", "google-cloud-storage"))
 GPU_IMG = (modal.Image.debian_slim(python_version="3.11")
            .pip_install("numpy==2.2.4", "scikit-learn", "torch",
-                        "google-cloud-storage")
+                        "google-cloud-storage", "pyarrow")
            .add_local_dir(str(REPO), "/root/proj", ignore=_IGN))
 VOL = modal.Volume.from_name("h7-ssl-cache", create_if_missing=True)
 MNT = "/cache"
