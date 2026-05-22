@@ -331,7 +331,10 @@ def finetune_cell(sym: str, seeds: list, smoke: int = 0):
                                     weight_decay=1e-4)
             sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, 30)
             scaler = torch.amp.GradScaler("cuda", enabled=dev == "cuda")
-            bs, best_val, patience, best_state = 512, 1e9, 0, None
+            # bs kept small: PatchTST is channel-independent, so the
+            # transformer batch dim is bs*F(46); >~1400 overflows CUDA's
+            # 65535 grid-dim cap in SDPA. 256*46=11776 (== pretrain, safe).
+            bs, best_val, patience, best_state = 256, 1e9, 0, None
             ifit = np.arange(Xfit.shape[0])
             for ep in range(epochs):
                 net.train(); np.random.shuffle(ifit)
@@ -352,8 +355,8 @@ def finetune_cell(sym: str, seeds: list, smoke: int = 0):
                 with torch.no_grad(), torch.amp.autocast(
                         "cuda", enabled=dev == "cuda"):
                     vp = []
-                    for s in range(0, Xval.shape[0], 4096):
-                        vp.append(net(Xval[s:s + 4096].to(dev)).float().cpu())
+                    for s in range(0, Xval.shape[0], 256):
+                        vp.append(net(Xval[s:s + 256].to(dev)).float().cpu())
                     vp = torch.cat(vp)
                     vloss = float((Fnn.binary_cross_entropy_with_logits(
                         vp, yval, reduction="none") * wval).sum()
@@ -372,8 +375,8 @@ def finetune_cell(sym: str, seeds: list, smoke: int = 0):
             with torch.no_grad(), torch.amp.autocast(
                     "cuda", enabled=dev == "cuda"):
                 pl = []
-                for s in range(0, Xte.shape[0], 4096):
-                    pl.append(net(Xte[s:s + 4096].to(dev)).float().cpu())
+                for s in range(0, Xte.shape[0], 256):
+                    pl.append(net(Xte[s:s + 256].to(dev)).float().cpu())
                 p = torch.sigmoid(torch.cat(pl)).numpy()
             ric = C.auc(yte, p) - 0.5
             per_seed.append({"seed": seed, "ric": round(ric, 6),
