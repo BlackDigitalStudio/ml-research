@@ -62,7 +62,8 @@ _IGN = ["**/.git/**", "**/__pycache__/**", "data/**", "models/**",
 IO_IMG = (modal.Image.debian_slim(python_version="3.11")
           .pip_install("numpy==2.2.4", "google-cloud-storage"))
 GPU_IMG = (modal.Image.debian_slim(python_version="3.11")
-           .pip_install("numpy==2.2.4", "scikit-learn", "torch")
+           .pip_install("numpy==2.2.4", "scikit-learn", "torch",
+                        "google-cloud-storage")
            .add_local_dir(str(REPO), "/root/proj", ignore=_IGN))
 VOL = modal.Volume.from_name("h7-ssl-cache", create_if_missing=True)
 MNT = "/cache"
@@ -110,11 +111,11 @@ def _gcs():
 # =========================================================================
 @app.function(image=IO_IMG, timeout=3600, volumes={MNT: VOL},
               secrets=[modal.Secret.from_name("h7-gcs")])
-def fetch_pack():
+def fetch_pack(syms: list = None):
     bk = _gcs()
     os.makedirs(f"{MNT}/packed", exist_ok=True)
     out = {}
-    for sym in SYMS:
+    for sym in (syms or SYMS):
         dst = f"{MNT}/packed/{sym}.npz"
         if os.path.exists(dst):
             out[sym] = {"cached": True, "bytes": os.path.getsize(dst)}
@@ -122,7 +123,7 @@ def fetch_pack():
         key = f"{PACK_PREFIX}/{sym}.npz"
         bk.blob(key).download_to_filename(dst)
         out[sym] = {"bytes": os.path.getsize(dst)}
-    VOL.commit()
+        VOL.commit()       # persist each symbol as it lands (preempt-safe)
     return out
 
 
@@ -179,7 +180,7 @@ def _build_classifier(device):
 @app.function(image=GPU_IMG, gpu="A10G", timeout=14400, volumes={MNT: VOL},
               retries=0)
 def pretrain_encoder(epochs: int = 20, samples_cap: int = 0,
-                     smoke: int = 0):
+                     smoke: int = 0, syms: list = None):
     """One shared encoder, masked-reconstruction on pooled per-symbol
     TRAIN rows only (honest_split tr mask => strictly pre-test => the
     SSL-specific embargo). Saves backbone state_dict to the Volume."""
@@ -191,9 +192,13 @@ def pretrain_encoder(epochs: int = 20, samples_cap: int = 0,
     t0 = time.time()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     VOL.reload()
+    bb_path = f"{MNT}/ssl/backbone{'_smoke' if smoke else ''}.pt"
+    if os.path.exists(bb_path) and not smoke:
+        return {"cached": True, "backbone": bb_path}
+    syms = syms or SYMS
     # pool TRAIN rows across symbols (embargo: never a test row)
     parts = []
-    for sym in SYMS:
+    for sym in syms:
         P = np.load(f"{MNT}/packed/{sym}.npz")
         n = int(P["n"])
         tr, _, _ = C.honest_split(n)
@@ -262,7 +267,7 @@ def pretrain_encoder(epochs: int = 20, samples_cap: int = 0,
 
     os.makedirs(f"{MNT}/ssl", exist_ok=True)
     sd = {k: v.detach().cpu() for k, v in model.backbone.state_dict().items()}
-    torch.save(sd, f"{MNT}/ssl/backbone.pt")
+    torch.save(sd, bb_path)
     VOL.commit()
     return {"N": int(N), "epochs": epochs, "loss_hist": hist,
             "gpu_seconds": round(time.time() - t0, 1)}
@@ -306,7 +311,7 @@ def finetune_cell(sym: str, seeds: list, smoke: int = 0):
     yfit = torch.from_numpy(up[fit_m]); yval = torch.from_numpy(up[val_m])
     wfit = torch.from_numpy(w1[fit_m]); wval = torch.from_numpy(w1[val_m])
 
-    bb_path = f"{MNT}/ssl/backbone.pt"
+    bb_path = f"{MNT}/ssl/backbone{'_smoke' if smoke else ''}.pt"
     out = {"sym": sym, "n_tr": ntr, "n_oos": nte, "block": block, "arms": {}}
     epochs = 1 if smoke else 30
     seeds = seeds[:1] if smoke else seeds
@@ -401,18 +406,18 @@ def coordinator(smoke: int = 0, epochs: int = 20):
     from research import ledger as Lg
 
     run_id = f"h7ssl-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}"
-    fp = fetch_pack.remote()
+    syms = ["LTC-USDT-PERP"] if smoke else list(SYMS)
+    fp = fetch_pack.remote(syms)
     print(f"[fetch] {fp}", flush=True)
-    pre = pretrain_encoder.remote(epochs=epochs, smoke=smoke)
-    print(f"[pretrain] {({k: pre[k] for k in ('N', 'epochs', 'gpu_seconds')})} "
-          f"loss[-1]={pre['loss_hist'][-1]:.5f}", flush=True)
+    pre = pretrain_encoder.remote(epochs=epochs, smoke=smoke, syms=syms)
+    print(f"[pretrain] {pre}", flush=True)
 
-    cells = list(finetune_cell.starmap([(s, list(SEEDS), smoke) for s in SYMS]))
+    cells = list(finetune_cell.starmap([(s, list(SEEDS), smoke) for s in syms]))
     by = {c["sym"]: c for c in cells if "error" not in c}
 
     # ---- Delta rank_IC surface (HEADLINE) + frozen section-5 (secondary)
     surface, signs = [], []
-    for sym in SYMS:
+    for sym in syms:
         c = by.get(sym)
         if not c:
             surface.append({"sym": sym, "error": "no result"}); continue
@@ -433,7 +438,7 @@ def coordinator(smoke: int = 0, epochs: int = 20):
                  key=lambda s: s["delta_ric_ssl_minus_scratch"], default=None)
 
     recs = []
-    for sym in SYMS:
+    for sym in syms:
         c = by.get(sym)
         if not c:
             continue
