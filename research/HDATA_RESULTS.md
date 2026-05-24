@@ -13,7 +13,7 @@ GCS bucket: `gs://blackdigital-scalper-data/`.
 ## ANSWER — HDATA main question: which FREE data gives the strongest harvestable directional signal (≥ 0.13% cost)?
 Synthesis across EXP-1..7 + EV-A..C + the aggTrades sub-minute test. Numbers, framed as the conditional surface (not a gate verdict).
 
-1. **Continuous ML / data-composition axis → weak DIRECTION (<0.05 rank_IC); it marks vol, not direction.** Best free-panel: pooled momentum **+0.0275 @24h** (EXP-3); +cross-section +0.0119 @8h; +macro-daily global_orth +0.0283 @8h (EXP-4, but cross-sectionally constant → low n_eff, slow). Raw-L2 sequence: XGB BTC **+0.054 @H180** solo (EXP-1, sub-cost horizon); HD2 Mamba raw-L2 **~0.05 @H180** (sub-economic, cross-symbol-inconsistent). All <0.05, mostly sub-cost. Pooling MORE crypto ≈ redundant (high correlation → marginal n_eff→0); cross-MARKET data lifts generic-representation robustness, not crypto-specific alpha (idiosyncratic: funding/liq/listings/24-7), and raw cross-market L2 is the most paywalled data of all.
+1. **Continuous ML / data-composition axis → weak DIRECTION (<0.05 rank_IC); it marks vol, not direction.** Best free-panel: pooled momentum **+0.0275 @24h** (EXP-3); +cross-section +0.0119 @8h; +macro-daily global_orth +0.0283 @8h (EXP-4, but cross-sectionally constant → low n_eff, slow). Raw-L2 sequence: XGB BTC **+0.054 @H180** solo (EXP-1, sub-cost horizon); HD2 Mamba raw-L2 **~0.05 @H180** (sub-economic, cross-symbol-inconsistent). All <0.05, mostly sub-cost. RAW lagged BARS → XGB (§12 RAWBARS, incl 1m + taker-flow): pooled ≈ 0 (−0.006…+0.007), per-sym ≤ +0.010, **1m the weakest** — for XGB, engineered rollups ENCODE more than flattened raw bars, and bars lack L2 microstructure. Pooling MORE crypto ≈ redundant (high correlation → marginal n_eff→0); cross-MARKET data lifts generic-representation robustness, not crypto-specific alpha (idiosyncratic: funding/liq/listings/24-7), and raw cross-market L2 is the most paywalled data of all.
 
 2. **Strongest directional edge = crypto-native discrete EVENTS, by a wide margin — but latency-gated.** Exchange listing/airdrop announcements (EV-B): the first **~10s is a violent, directionally-clean PUMP** (LONG win ~**0.84** at the instant, mean several %), dwarfing every continuous signal. Harvestable IFF detection+execution **<10s** — exactly the 1–3 ms infra + a fast announcement feed. The slower executable fade (short 10–30s after) is modest (+44…+280bp/event, win 0.60–0.68, cohort-dependent, cost-sensitive on illiquid alts). Liquidation cascades (EXP-5) + macro (EV-C vol-amp 3–5×) also flag events but with ~0 / underpowered direction.
 
@@ -257,7 +257,22 @@ Surface read: macro releases are robust VOL amplifiers on crypto (FOMC/NFP 3–5
 
 ---
 
-## 12. Methodology facts
+## 12. RAWBARS — raw lagged bars {1m,5m,15m} + taker-flow, pooled XGB (HDATA cell)
+Does feeding the RAW bar stream (not engineered rollups) to XGBoost give short-horizon direction? 120 longest-history symbols, klines_1m resampled to {1m,5m,15m}; per-bar RAW feats = [log-ret, range, log-vol, **TAKER-FLOW imbalance** = taker_buy_base/volume−0.5], LOOKBACK=24 bars flattened (96 feats); target sign(fwd logret @ abs-H); pooled, per-symbol train-fit z-score, honest GLOBAL 70/30 + 24h embargo, R1 |move|-weighted, rank_IC=AUC−0.5. n_oos ~2.51M/cell. VM n2-standard-96 (~10 min, torn down). `hdata_rawbars.py` + `startup_rawbars.sh` → `research_runs/hdata_rawbars/`. XGBoost only (user-scoped).
+
+| feed | H15m | H60m | H240m |
+|---|---|---|---|
+| 1m | −0.0058 / +0.0041 | −0.0056 / +0.0036 | −0.0029 / +0.0034 |
+| 5m | +0.0054 / +0.0096 | −0.0038 / +0.0013 | +0.0010 / +0.0056 |
+| 15m | +0.0050 / +0.0081 | −0.0003 / +0.0020 | +0.0066 / +0.0086 |
+
+(cells = pooled rank_IC / per-symbol-median rank_IC). top-decile |move| 0.28–1.21% (clears cost; direction ~random).
+
+Surface: raw lagged bars → **pooled rank_IC ≈ 0** (−0.006…+0.007); per-symbol median only **+0.001…+0.010** (best 5m/H15m +0.0096; 15m +0.008–0.009). **1m is the WEAKEST** (pooled negative, per-sym lowest) — highest-frequency raw bars + taker-flow are the noisiest, not the richest. Ranks BELOW engineered rollups (EXP-3 bars+xs +0.0119 @8h, +0.0275 @24h) and far below L2 microstructure (EXP-1 +0.054 @H180). Reading: for XGB, hand-engineered long-window rollups ENCODE structure that flattened raw lags do not (XGB can't learn temporal smoothing from raw lags), and bars — even 1m + taker-flow — lack the order-book microstructure (ofi/imbalance/microprice) that carries the short-horizon edge. CAVEAT: XGB-specific — a sequence model (TCN/Mamba) may extract more from the raw stream (why HD1/HD2 use raw L2); not tested here (user scoped to XGBoost).
+
+---
+
+## 13. Methodology facts
 - rank_IC = AUC−0.5; AUC computed via Mann-Whitney (numpy).
 - Splits: honest temporal 70/30 + embargo (64 dp / 24h); per-symbol train-fit z-score on bars feats; cross-sectional feats not z-scored.
 - Objective: R1 = logloss, sample_weight = |fwd move| clipped p99.
@@ -265,9 +280,9 @@ Surface read: macro releases are robust VOL amplifiers on crypto (FOMC/NFP 3–5
 - pandas 2.x dt-resolution fix: all merge keys cast `datetime64[ns,UTC]` (ms vs ns merge_asof error).
 - Compute: GCP n2-standard-8 europe-west1, startup-script + freecode-via-metadata, results→GCS, all VMs deleted. BQ free-tier usage this session ≈ 420 GB of 1000 GB/mo.
 
-## 13. Code (C:\Dev\sb-data-poc\)
+## 14. Code (C:\Dev\sb-data-poc\)
 pulls: pull_full.py, pull_orthogonal.py, pull_news.py, pull_gkg.py, pull_gkg_events.py
-experiments: hdata_freepanel.py, hdata_freepanel2.py, hdata_freepanel3.py, hdata_liqcascade.py, news_backtest.py, news_events_backtest.py, ev_onboarding.py (EV-A), ev_b_listings.py + ev_b_probe.py + ev_b_control.py + ev_b_harden.py + ev_b_aggtrades.py (EV-B), ev_c_macro.py (EV-C)
+experiments: hdata_freepanel.py, hdata_freepanel2.py, hdata_freepanel3.py, hdata_liqcascade.py, news_backtest.py, news_events_backtest.py, ev_onboarding.py (EV-A), ev_b_listings.py + ev_b_probe.py + ev_b_control.py + ev_b_harden.py + ev_b_aggtrades.py (EV-B), ev_c_macro.py (EV-C), hdata_rawbars.py + startup_rawbars.sh (RAWBARS, VM)
 result jsons (authoritative on GCS): research_runs/{hdata_pool_poc,hdata_freepanel,hdata_freepanel2,hdata_freepanel3,hdata_liqcascade}/results.json — note hdata_freepanel3/results.json = lag-fixed (EXP-4); EXP-6/7 (news) + EV-A are local-only (not on GCS).
 local json copies: free_results.json (EXP-2), free2.json (EXP-3), free3.json (EXP-4 leaky), free3fix.json (EXP-4 lag-fixed), liq.json (EXP-5), ev_onboarding.json (EV-A), ev_b_listings.json + ev_b_control.json + ev_b_harden.json + ev_b_aggtrades.json (EV-B), ev_c_macro.json (EV-C); EV-B announcements archive on GCS at free_v1/orthogonal/events/listings/announcements.parquet.
 Version control: EV-A..C scripts + this results record committed to the git repo at C:\Dev\sb-VVEBA (branch claude/hdata-rev1): research/ev/*.py + research/HDATA_RESULTS.md. Prior EXP-1..7 code stays local scratch (sb-data-poc, not git); its results are authoritative on GCS + in this record. sb-data-poc itself is NOT a git repo.
