@@ -142,3 +142,16 @@ so the surface is read with throughput in view.
 3. **EV-C** — macro calendar (FRED actuals + consensus) + unlock schedules.
 4. **EV-D** — on-chain flow pulls.
 5. **EV-E** — deferred (live), gated on a positive backtest surface.
+
+## 8. Compute policy (user, 2026-05-25)
+
+Heavy / IO-bound HDATA runs go on a **96-vCPU GCP VM in europe-west1**
+(co-located with `gs://blackdigital-scalper-data` → no egress + high parallel
+GCS bandwidth), via the established startup-script + freecode-via-metadata
+pattern, results→GCS, **VM torn down after**. Use it only when the job
+actually saturates the hardware: full-universe (524-sym) event studies, large
+bootstraps, per-symbol fine-grained reads, ML/panel training. Skip it for small
+external-API pulls (FRED, Etherscan, exchange announcement APIs) that are
+latency-bound on a remote service and cannot use 96 cores — those stay local.
+EV-A and the EV-B firm-up ran local (matched subset, light); EV-C/EV-D heavy
+parts and any full-universe re-runs → VM.

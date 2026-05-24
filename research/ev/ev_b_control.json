@@ -1,0 +1,209 @@
+{
+  "n_tradeable": 292,
+  "null_B": 1000,
+  "UPBIT list(+)": {
+    "n": 130,
+    "h": {
+      "1": {
+        "n": 130,
+        "dir_ret_bp": -8.78,
+        "null_mean_bp": -0.14,
+        "null_sd_bp": 1.88,
+        "z": -4.6,
+        "pctile": 0.001,
+        "rel_dir_ret_bp": -9.01
+      },
+      "5": {
+        "n": 130,
+        "dir_ret_bp": -86.11,
+        "null_mean_bp": -0.16,
+        "null_sd_bp": 4.55,
+        "z": -18.89,
+        "pctile": 0.0,
+        "rel_dir_ret_bp": -86.17
+      },
+      "15": {
+        "n": 130,
+        "dir_ret_bp": 6.16,
+        "null_mean_bp": -0.45,
+        "null_sd_bp": 7.91,
+        "z": 0.83,
+        "pctile": 0.83,
+        "rel_dir_ret_bp": 8.24
+      },
+      "60": {
+        "n": 130,
+        "dir_ret_bp": -100.85,
+        "null_mean_bp": -1.82,
+        "null_sd_bp": 15.74,
+        "z": -6.29,
+        "pctile": 0.002,
+        "rel_dir_ret_bp": -99.04
+      }
+    }
+  },
+  "UPBIT delist+caution(-)": {
+    "n": 18,
+    "h": {
+      "1": {
+        "n": 18,
+        "dir_ret_bp": 3.18,
+        "null_mean_bp": 0.18,
+        "null_sd_bp": 5.06,
+        "z": 0.59,
+        "pctile": 0.745,
+        "rel_dir_ret_bp": 2.62
+      },
+      "5": {
+        "n": 18,
+        "dir_ret_bp": 126.05,
+        "null_mean_bp": 0.31,
+        "null_sd_bp": 10.66,
+        "z": 11.79,
+        "pctile": 1.0,
+        "rel_dir_ret_bp": 124.08
+      },
+      "15": {
+        "n": 18,
+        "dir_ret_bp": 92.48,
+        "null_mean_bp": 1.56,
+        "null_sd_bp": 26.5,
+        "z": 3.43,
+        "pctile": 0.999,
+        "rel_dir_ret_bp": 95.1
+      },
+      "60": {
+        "n": 18,
+        "dir_ret_bp": 125.44,
+        "null_mean_bp": 2.39,
+        "null_sd_bp": 39.38,
+        "z": 3.12,
+        "pctile": 0.998,
+        "rel_dir_ret_bp": 123.49
+      }
+    }
+  },
+  "BINANCE will-list(+)": {
+    "n": 31,
+    "h": {
+      "1": {
+        "n": 31,
+        "dir_ret_bp": -23.16,
+        "null_mean_bp": -0.16,
+        "null_sd_bp": 4.71,
+        "z": -4.88,
+        "pctile": 0.002,
+        "rel_dir_ret_bp": -22.73
+      },
+      "5": {
+        "n": 31,
+        "dir_ret_bp": -167.98,
+        "null_mean_bp": 0.09,
+        "null_sd_bp": 9.27,
+        "z": -18.13,
+        "pctile": 0.0,
+        "rel_dir_ret_bp": -166.11
+      },
+      "15": {
+        "n": 31,
+        "dir_ret_bp": 64.47,
+        "null_mean_bp": -0.13,
+        "null_sd_bp": 16.89,
+        "z": 3.83,
+        "pctile": 0.999,
+        "rel_dir_ret_bp": 64.23
+      },
+      "60": {
+        "n": 31,
+        "dir_ret_bp": 269.08,
+        "null_mean_bp": -0.79,
+        "null_sd_bp": 46.41,
+        "z": 5.82,
+        "pctile": 1.0,
+        "rel_dir_ret_bp": 265.89
+      }
+    }
+  },
+  "BINANCE airdrop(+)": {
+    "n": 33,
+    "h": {
+      "1": {
+        "n": 33,
+        "dir_ret_bp": -133.73,
+        "null_mean_bp": -0.05,
+        "null_sd_bp": 4.11,
+        "z": -32.51,
+        "pctile": 0.0,
+        "rel_dir_ret_bp": -131.91
+      },
+      "5": {
+        "n": 33,
+        "dir_ret_bp": -78.79,
+        "null_mean_bp": 0.0,
+        "null_sd_bp": 9.52,
+        "z": -8.27,
+        "pctile": 0.0,
+        "rel_dir_ret_bp": -79.13
+      },
+      "15": {
+        "n": 33,
+        "dir_ret_bp": -25.59,
+        "null_mean_bp": 0.03,
+        "null_sd_bp": 15.67,
+        "z": -1.63,
+        "pctile": 0.045,
+        "rel_dir_ret_bp": -24.24
+      },
+      "60": {
+        "n": 33,
+        "dir_ret_bp": 16.54,
+        "null_mean_bp": -0.48,
+        "null_sd_bp": 32.99,
+        "z": 0.52,
+        "pctile": 0.74,
+        "rel_dir_ret_bp": 17.13
+      }
+    }
+  },
+  "ALL signed combined": {
+    "n": 268,
+    "h": {
+      "1": {
+        "n": 268,
+        "dir_ret_bp": -22.9,
+        "null_mean_bp": -0.02,
+        "null_sd_bp": 1.53,
+        "z": -14.95,
+        "pctile": 0.0,
+        "rel_dir_ret_bp": -22.34
+      },
+      "5": {
+        "n": 268,
+        "dir_ret_bp": -64.84,
+        "null_mean_bp": -0.03,
+        "null_sd_bp": 3.42,
+        "z": -18.96,
+        "pctile": 0.0,
+        "rel_dir_ret_bp": -64.36
+      },
+      "15": {
+        "n": 268,
+        "dir_ret_bp": 11.05,
+        "null_mean_bp": -0.4,
+        "null_sd_bp": 5.55,
+        "z": 2.06,
+        "pctile": 0.975,
+        "rel_dir_ret_bp": 12.15
+      },
+      "60": {
+        "n": 268,
+        "dir_ret_bp": -62.66,
+        "null_mean_bp": -1.43,
+        "null_sd_bp": 10.62,
+        "z": -5.77,
+        "pctile": 0.0,
+        "rel_dir_ret_bp": -60.42
+      }
+    }
+  }
+}

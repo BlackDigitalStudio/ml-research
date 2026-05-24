@@ -1,0 +1,371 @@
+{
+  "n_announcements": 1249,
+  "n_tradeable": 292,
+  "by_source_kind": {
+    "binance/add": 56,
+    "binance/airdrop": 33,
+    "binance/list": 31,
+    "binance/other": 10,
+    "upbit/caution": 14,
+    "upbit/delist": 4,
+    "upbit/list": 130,
+    "upbit/other": 14
+  },
+  "UPBIT all": {
+    "n": 162,
+    "sign_mix": {
+      "1": 130,
+      "-1": 18,
+      "0": 14
+    },
+    "h": {
+      "1": {
+        "n": 148,
+        "dir_ret_bp": -7.3219,
+        "win": 0.4527,
+        "med_abs_pct": 1.1552,
+        "clear_cost": 0.9189,
+        "bull_bp": -8.7762,
+        "bear_bp": -3.1813
+      },
+      "5": {
+        "n": 148,
+        "dir_ret_bp": -60.3078,
+        "win": 0.4527,
+        "med_abs_pct": 2.1246,
+        "clear_cost": 0.9662,
+        "bull_bp": -86.1106,
+        "bear_bp": -126.0455
+      },
+      "15": {
+        "n": 148,
+        "dir_ret_bp": 16.6564,
+        "win": 0.5068,
+        "med_abs_pct": 3.0237,
+        "clear_cost": 0.973,
+        "bull_bp": 6.1581,
+        "bear_bp": -92.4777
+      },
+      "60": {
+        "n": 148,
+        "dir_ret_bp": -73.3261,
+        "win": 0.4324,
+        "med_abs_pct": 4.379,
+        "clear_cost": 0.9797,
+        "bull_bp": -100.8476,
+        "bear_bp": -125.4398
+      }
+    }
+  },
+  "UPBIT list(+)": {
+    "n": 130,
+    "sign_mix": {
+      "1": 130
+    },
+    "h": {
+      "1": {
+        "n": 130,
+        "dir_ret_bp": -8.7762,
+        "win": 0.4615,
+        "med_abs_pct": 1.2491,
+        "clear_cost": 0.9308,
+        "bull_bp": -8.7762,
+        "bear_bp": null
+      },
+      "5": {
+        "n": 130,
+        "dir_ret_bp": -86.1106,
+        "win": 0.4231,
+        "med_abs_pct": 2.2217,
+        "clear_cost": 0.9692,
+        "bull_bp": -86.1106,
+        "bear_bp": null
+      },
+      "15": {
+        "n": 130,
+        "dir_ret_bp": 6.1581,
+        "win": 0.4846,
+        "med_abs_pct": 3.0757,
+        "clear_cost": 0.9769,
+        "bull_bp": 6.1581,
+        "bear_bp": null
+      },
+      "60": {
+        "n": 130,
+        "dir_ret_bp": -100.8476,
+        "win": 0.4077,
+        "med_abs_pct": 4.6567,
+        "clear_cost": 0.9846,
+        "bull_bp": -100.8476,
+        "bear_bp": null
+      }
+    }
+  },
+  "UPBIT delist+caution(-)": {
+    "n": 18,
+    "sign_mix": {
+      "-1": 18
+    },
+    "h": {
+      "1": {
+        "n": 18,
+        "dir_ret_bp": 3.1813,
+        "win": 0.3889,
+        "med_abs_pct": 0.9447,
+        "clear_cost": 0.8333,
+        "bull_bp": null,
+        "bear_bp": -3.1813
+      },
+      "5": {
+        "n": 18,
+        "dir_ret_bp": 126.0455,
+        "win": 0.6667,
+        "med_abs_pct": 1.4036,
+        "clear_cost": 0.9444,
+        "bull_bp": null,
+        "bear_bp": -126.0455
+      },
+      "15": {
+        "n": 18,
+        "dir_ret_bp": 92.4777,
+        "win": 0.6667,
+        "med_abs_pct": 1.3875,
+        "clear_cost": 0.9444,
+        "bull_bp": null,
+        "bear_bp": -92.4777
+      },
+      "60": {
+        "n": 18,
+        "dir_ret_bp": 125.4398,
+        "win": 0.6111,
+        "med_abs_pct": 2.1122,
+        "clear_cost": 0.9444,
+        "bull_bp": null,
+        "bear_bp": -125.4398
+      }
+    }
+  },
+  "BINANCE all": {
+    "n": 130,
+    "sign_mix": {
+      "1": 120,
+      "0": 10
+    },
+    "h": {
+      "1": {
+        "n": 120,
+        "dir_ret_bp": -42.1227,
+        "win": 0.4667,
+        "med_abs_pct": 1.2795,
+        "clear_cost": 0.9,
+        "bull_bp": -42.1227,
+        "bear_bp": null
+      },
+      "5": {
+        "n": 120,
+        "dir_ret_bp": -70.4301,
+        "win": 0.4917,
+        "med_abs_pct": 2.3585,
+        "clear_cost": 0.9583,
+        "bull_bp": -70.4301,
+        "bear_bp": null
+      },
+      "15": {
+        "n": 120,
+        "dir_ret_bp": 4.1371,
+        "win": 0.5,
+        "med_abs_pct": 2.6986,
+        "clear_cost": 0.975,
+        "bull_bp": 4.1371,
+        "bear_bp": null
+      },
+      "60": {
+        "n": 120,
+        "dir_ret_bp": -49.5014,
+        "win": 0.4167,
+        "med_abs_pct": 7.5292,
+        "clear_cost": 0.9917,
+        "bull_bp": -49.5014,
+        "bear_bp": null
+      }
+    }
+  },
+  "BINANCE will-list(+)": {
+    "n": 31,
+    "sign_mix": {
+      "1": 31
+    },
+    "h": {
+      "1": {
+        "n": 31,
+        "dir_ret_bp": -23.1649,
+        "win": 0.3871,
+        "med_abs_pct": 1.9522,
+        "clear_cost": 0.9355,
+        "bull_bp": -23.1649,
+        "bear_bp": null
+      },
+      "5": {
+        "n": 31,
+        "dir_ret_bp": -167.9753,
+        "win": 0.4839,
+        "med_abs_pct": 3.644,
+        "clear_cost": 1.0,
+        "bull_bp": -167.9753,
+        "bear_bp": null
+      },
+      "15": {
+        "n": 31,
+        "dir_ret_bp": 64.475,
+        "win": 0.5484,
+        "med_abs_pct": 3.5091,
+        "clear_cost": 1.0,
+        "bull_bp": 64.475,
+        "bear_bp": null
+      },
+      "60": {
+        "n": 31,
+        "dir_ret_bp": 269.0826,
+        "win": 0.6129,
+        "med_abs_pct": 8.1276,
+        "clear_cost": 0.9677,
+        "bull_bp": 269.0826,
+        "bear_bp": null
+      }
+    }
+  },
+  "BINANCE will-add(+)": {
+    "n": 56,
+    "sign_mix": {
+      "1": 56
+    },
+    "h": {
+      "1": {
+        "n": 56,
+        "dir_ret_bp": 1.3634,
+        "win": 0.5357,
+        "med_abs_pct": 0.7577,
+        "clear_cost": 0.875,
+        "bull_bp": 1.3634,
+        "bear_bp": null
+      },
+      "5": {
+        "n": 56,
+        "dir_ret_bp": -11.505,
+        "win": 0.5536,
+        "med_abs_pct": 1.3835,
+        "clear_cost": 0.9107,
+        "bull_bp": -11.505,
+        "bear_bp": null
+      },
+      "15": {
+        "n": 56,
+        "dir_ret_bp": -11.749,
+        "win": 0.5,
+        "med_abs_pct": 2.119,
+        "clear_cost": 0.9643,
+        "bull_bp": -11.749,
+        "bear_bp": null
+      },
+      "60": {
+        "n": 56,
+        "dir_ret_bp": -264.7774,
+        "win": 0.3214,
+        "med_abs_pct": 7.8267,
+        "clear_cost": 1.0,
+        "bull_bp": -264.7774,
+        "bear_bp": null
+      }
+    }
+  },
+  "BINANCE airdrop(+)": {
+    "n": 33,
+    "sign_mix": {
+      "1": 33
+    },
+    "h": {
+      "1": {
+        "n": 33,
+        "dir_ret_bp": -133.7264,
+        "win": 0.4242,
+        "med_abs_pct": 1.9868,
+        "clear_cost": 0.9091,
+        "bull_bp": -133.7264,
+        "bear_bp": null
+      },
+      "5": {
+        "n": 33,
+        "dir_ret_bp": -78.7907,
+        "win": 0.3939,
+        "med_abs_pct": 3.9004,
+        "clear_cost": 1.0,
+        "bull_bp": -78.7907,
+        "bear_bp": null
+      },
+      "15": {
+        "n": 33,
+        "dir_ret_bp": -25.5859,
+        "win": 0.4545,
+        "med_abs_pct": 4.8509,
+        "clear_cost": 0.9697,
+        "bull_bp": -25.5859,
+        "bear_bp": null
+      },
+      "60": {
+        "n": 33,
+        "dir_ret_bp": 16.5397,
+        "win": 0.3939,
+        "med_abs_pct": 5.4265,
+        "clear_cost": 1.0,
+        "bull_bp": 16.5397,
+        "bear_bp": null
+      }
+    }
+  },
+  "ALL cohorts combined": {
+    "n": 292,
+    "sign_mix": {
+      "1": 250,
+      "0": 24,
+      "-1": 18
+    },
+    "h": {
+      "1": {
+        "n": 268,
+        "dir_ret_bp": -22.9044,
+        "win": 0.459,
+        "med_abs_pct": 1.2499,
+        "clear_cost": 0.9104,
+        "bull_bp": -24.7826,
+        "bear_bp": -3.1813
+      },
+      "5": {
+        "n": 268,
+        "dir_ret_bp": -64.8402,
+        "win": 0.4701,
+        "med_abs_pct": 2.2276,
+        "clear_cost": 0.9627,
+        "bull_bp": -78.584,
+        "bear_bp": -126.0455
+      },
+      "15": {
+        "n": 268,
+        "dir_ret_bp": 11.0507,
+        "win": 0.5037,
+        "med_abs_pct": 2.8034,
+        "clear_cost": 0.9739,
+        "bull_bp": 5.188,
+        "bear_bp": -92.4777
+      },
+      "60": {
+        "n": 268,
+        "dir_ret_bp": -62.6583,
+        "win": 0.4254,
+        "med_abs_pct": 5.4195,
+        "clear_cost": 0.9851,
+        "bull_bp": -76.2014,
+        "bear_bp": -125.4398
+      }
+    }
+  }
+}
