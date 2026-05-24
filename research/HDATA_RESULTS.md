@@ -10,6 +10,21 @@ GCS bucket: `gs://blackdigital-scalper-data/`.
 
 ---
 
+## ANSWER — HDATA main question: which FREE data gives the strongest harvestable directional signal (≥ 0.13% cost)?
+Synthesis across EXP-1..7 + EV-A..C + the aggTrades sub-minute test. Numbers, framed as the conditional surface (not a gate verdict).
+
+1. **Continuous ML / data-composition axis → weak DIRECTION (<0.05 rank_IC); it marks vol, not direction.** Best free-panel: pooled momentum **+0.0275 @24h** (EXP-3); +cross-section +0.0119 @8h; +macro-daily global_orth +0.0283 @8h (EXP-4, but cross-sectionally constant → low n_eff, slow). Raw-L2 sequence: XGB BTC **+0.054 @H180** solo (EXP-1, sub-cost horizon); HD2 Mamba raw-L2 **~0.05 @H180** (sub-economic, cross-symbol-inconsistent). All <0.05, mostly sub-cost. Pooling MORE crypto ≈ redundant (high correlation → marginal n_eff→0); cross-MARKET data lifts generic-representation robustness, not crypto-specific alpha (idiosyncratic: funding/liq/listings/24-7), and raw cross-market L2 is the most paywalled data of all.
+
+2. **Strongest directional edge = crypto-native discrete EVENTS, by a wide margin — but latency-gated.** Exchange listing/airdrop announcements (EV-B): the first **~10s is a violent, directionally-clean PUMP** (LONG win ~**0.84** at the instant, mean several %), dwarfing every continuous signal. Harvestable IFF detection+execution **<10s** — exactly the 1–3 ms infra + a fast announcement feed. The slower executable fade (short 10–30s after) is modest (+44…+280bp/event, win 0.60–0.68, cohort-dependent, cost-sensitive on illiquid alts). Liquidation cascades (EXP-5) + macro (EV-C vol-amp 3–5×) also flag events but with ~0 / underpowered direction.
+
+3. **Binding lever is SPEED, not data.** The strongest free signal lives in a <10s detection window → the constraint is a low-latency announcement feed + sub-second execution (EV-E, live; the detection leg is NOT backtestable), not "more/better training data." The ML data-composition axis marks WHERE volatility is (events 2–13× cost-clearing) but yields only weak (<0.05) cost-clearing DIRECTION.
+
+4. **Frequency.** Events are low-frequency (~hundreds/2yr, ~1–3/day all classes) → a high-conviction low-frequency overlay, NOT the ≥10/day target. No free continuous signal reaches a robust cost-clearing directional edge at ≥10/day in this program.
+
+**Net:** among free data, the strongest harvestable directional signal is the **crypto-native event pump (listings/airdrops), gated on <10s detection** — not continuous price/feature/cross-market ML (all <0.05 rank_IC, vol-marking not direction). The next lever is live event-detection SPEED (EV-E), not more training data.
+
+---
+
 ## 1. Data acquired (free)
 
 **`free_v1/`** — Binance USD-M perp dumps (data.binance.vision), 521 symbols, 2yr, **23.77 GiB**:
@@ -202,6 +217,14 @@ Interpretation flip: the sign(announcement)→r effect is REAL in DIRECTION (nul
 
 Hardened read: the short-the-announcement (≤5m) and the Binance will-list V-recovery long-leg are POSITIVE-EV in BOTH mean and median, win 0.52–0.77, net magnitudes +58…+424bp (large vs 13bp cost) — BUT cluster-robust significance is MODEST (t mostly 0.7–1.6; only delist-5m t2.24, airdrop-1m t2.20, will-list-V t1.81 approach/cross 2σ) at small n (n_ts 18–120). Economically promising, high-variance, NOT yet statistically nailed at current n — needs more events (forward accrual / more event classes) or live validation. Counter-intuitive: KRW "Upbit-effect" listings fade WEAKER (win 0.52) than non-KRW (0.77, n=26).
 
+**Sub-minute executability** (`ev_b_aggtrades.py` → `ev_b_aggtrades.json`; Binance aggTrades tick dumps, 263 events w/ tick data; second-res price path [ts−300s, ts+300s]; SHORT net bp = −13bp cost, by entry-latency L × horizon). DECISIVE on the 1m caveat — path is **PUMP-then-FADE**, not a clean fade:
+- pre-ts run-up small (ALL +16bp/5min) → announcement ts is FRESH (move is AFTER; overturns the earlier "pump pre-happened" guess).
+- first ~10s = violent UP spike: at L=0 SHORT loses catastrophically (ALL −1077bp@60s → **LONG win 0.78**; UPBIT-list LONG win **0.84**) — tail-huge mean, but win-rate is the robust read: **listings PUMP in the first seconds**.
+- after ~10–30s = fade: SHORT wins modestly (ALL L=30s +37bp@60s, win 0.605). **Crossover ~L=5–10s.**
+- executable fade (L=30s, net bp / win@300s): UPBIT-list +138 / 0.64; **airdrop +280 / 0.68** (best); delist+caution +100 / ~0.55; **BINANCE will-list NEGATIVE (−300bp) → keeps RISING → LONG the recovery (matches 1m V)**.
+
+Reframe: the big directionally-clean edge is the **first-~10s PUMP (LONG, win ~0.84)** — capturable ONLY with <10s detection+execution (the 1m "short wins" was just late entry into the fade zone). The executable-latency fade (short 10–30s after) is modest + cohort-dependent + cost-sensitive (illiquid alts mid-pump: real spread/slippage ≫ the 13bp assumed). Detection-latency itself (when a feed delivers the announcement) is NOT backtestable → EV-E live.
+
 ---
 
 ## 11. EV-C — scheduled macro event-window reaction (HDATA cell EV-C)
@@ -244,8 +267,8 @@ Surface read: macro releases are robust VOL amplifiers on crypto (FOMC/NFP 3–5
 
 ## 13. Code (C:\Dev\sb-data-poc\)
 pulls: pull_full.py, pull_orthogonal.py, pull_news.py, pull_gkg.py, pull_gkg_events.py
-experiments: hdata_freepanel.py, hdata_freepanel2.py, hdata_freepanel3.py, hdata_liqcascade.py, news_backtest.py, news_events_backtest.py, ev_onboarding.py (EV-A), ev_b_listings.py + ev_b_probe.py + ev_b_control.py + ev_b_harden.py (EV-B), ev_c_macro.py (EV-C)
+experiments: hdata_freepanel.py, hdata_freepanel2.py, hdata_freepanel3.py, hdata_liqcascade.py, news_backtest.py, news_events_backtest.py, ev_onboarding.py (EV-A), ev_b_listings.py + ev_b_probe.py + ev_b_control.py + ev_b_harden.py + ev_b_aggtrades.py (EV-B), ev_c_macro.py (EV-C)
 result jsons (authoritative on GCS): research_runs/{hdata_pool_poc,hdata_freepanel,hdata_freepanel2,hdata_freepanel3,hdata_liqcascade}/results.json — note hdata_freepanel3/results.json = lag-fixed (EXP-4); EXP-6/7 (news) + EV-A are local-only (not on GCS).
-local json copies: free_results.json (EXP-2), free2.json (EXP-3), free3.json (EXP-4 leaky), free3fix.json (EXP-4 lag-fixed), liq.json (EXP-5), ev_onboarding.json (EV-A), ev_b_listings.json + ev_b_control.json + ev_b_harden.json (EV-B), ev_c_macro.json (EV-C); EV-B announcements archive on GCS at free_v1/orthogonal/events/listings/announcements.parquet.
+local json copies: free_results.json (EXP-2), free2.json (EXP-3), free3.json (EXP-4 leaky), free3fix.json (EXP-4 lag-fixed), liq.json (EXP-5), ev_onboarding.json (EV-A), ev_b_listings.json + ev_b_control.json + ev_b_harden.json + ev_b_aggtrades.json (EV-B), ev_c_macro.json (EV-C); EV-B announcements archive on GCS at free_v1/orthogonal/events/listings/announcements.parquet.
 Version control: EV-A..C scripts + this results record committed to the git repo at C:\Dev\sb-VVEBA (branch claude/hdata-rev1): research/ev/*.py + research/HDATA_RESULTS.md. Prior EXP-1..7 code stays local scratch (sb-data-poc, not git); its results are authoritative on GCS + in this record. sb-data-poc itself is NOT a git repo.
 event-driven plan (design doc): C:\Dev\sb-VVEBA\research\HDATA_EVENTS_PLAN.md (branch claude/hdata-rev1, commit 4ec8bc7).
