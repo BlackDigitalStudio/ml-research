@@ -18,4 +18,6 @@ research/research.db
 .data_inspect/
 .smoke/
 hd2res/
+hd2obj/
 *.row.json
+mamba2plan.md

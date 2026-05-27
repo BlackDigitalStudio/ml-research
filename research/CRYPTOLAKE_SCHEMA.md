@@ -1,19 +1,23 @@
-# Cryptolake GCS data contract (reverse-engineered 2026-05-16)
+# Cryptolake GCS data contract (reverse-engineered 2026-05-16; bucket migrated 2026-05-26)
 
-`scripts/build_cryptolake_cache.py` was lost with Contabo. This is the
-schema it must be reconstructed against, decoded directly from
-`gs://blackdigital-scalper-data` (project `project-26a24ad0-1059-4f73-93b`,
-`EUROPE-WEST1`). Hard-won; do not re-discover.
+Schema decoded directly from GCS. **Data bucket (MIGRATED 2026-05-26):
+`gs://market-data-0998ac51`** (account `virgin.ship03@gmail.com`, project
+`project-0998ac51-36ba-445c-bc7`, `EUROPE-WEST1`, 585 GB full verified copy of
+the old `gs://blackdigital-scalper-data`/`project-26a24ad0…` whose balance ran
+low). The full-feature recompute tool is the Rust `feature_builder`
+(`rust_ingest/src/bin/feature_builder.rs`) — see DEAD COLUMNS below.
+Hard-won; do not re-discover.
 
 ## Bucket layout
 
 ```
-gs://blackdigital-scalper-data/
-  features_v1/symbol=<SYM>/dt=<YYYY-MM-DD>/features.npy   (3602, 59) float32
-                                          /indices.npy    (3602,)    int64
+gs://market-data-0998ac51/            (was gs://blackdigital-scalper-data)
+  features_v1/symbol=<SYM>/dt=<YYYY-MM-DD>/features.npy   (N, 59) float32  [BOOK-ONLY]
+                                          /indices.npy    (N,)    int64
   raw/book/exchange=BINANCE_FUTURES/symbol=<SYM>/dt=<YYYY-MM-DD>/1.snappy.parquet
-  raw/trades/        ... same partitioning ...
+  raw/trades/        ... same partitioning (hashed filename) ...
   raw/funding/ raw/liquidations/ raw/open_interest/   (same partitioning)
+  hd2_cache_v1/{streams,midts}/   feats_v2/   research_runs/
 ```
 
 - **8 symbols** (Tardis naming, `-USDT-PERP`): BNB, BTC, DOGE, ETH, LINK,
@@ -114,14 +118,30 @@ hurst∈[0.35,0.66], vpin∈[0,1], kyle_lambda~1e-8, ofi_* large signed):
        58 count-like [-26,107] ≈ liquidation magnitude) — light-ID TODO
 ```
 
-**DEAD COLUMNS in this build (empirical, LINK 2026-05-06) — material:**
-all cross-asset/ETH are 100% zero (14,15,16,30,50,51,52,53,54,55) and
-several are constant (5 large_order≡1, 18 long_short_ratio≡0, 19
-liquidation_proximity≡0.015, 20 spoof≡1, 24 sweep≡0). → models in
-HA1/HA5 effectively saw **~46 live features; the ENTIRE cross-asset/ETH
-dimension was literally zeros.** This narrows every prior negative and
-makes **H3 (BTC-lead) concretely actionable**: the cross-asset slots
-exist and are empty; BTC raw is in the same bucket to fill them.
+**⚠️ DEAD COLUMNS = NOT-COMPUTED, NOT "no data" (empirical, LINK 2026-05-06).**
+`features_v1` is **BOOK-ONLY**: ~13 of 59 cols are 100% zero
+(14,15,16,30,50,51,52,53,54,55) + a few constant (5 large_order≡1, 18
+long_short_ratio≡0, 19 liq_proximity≡0.015, 20 spoof≡1, 24 sweep≡0). Models
+in HA1/HA5 effectively saw **~46 live features**. CRITICAL distinction for the
+zero cols — DO NOT lump them as "no data":
+
+- **FILLABLE from `raw/` (the inputs EXIST, just weren't computed):** the ETH
+  leading signals (14 eth_momentum_1s, 15 eth_ofi, 16 eth_leading_signal, 54
+  eth_momentum_60s, 55 eth_btc_corr_30s) — ETH **and** BTC are full symbols in
+  `raw/{book,trades}`. Also note the trade-flow/cvd/funding cols ARE non-zero
+  in features_v1 but the FULL set (incl. these ETH ones) is recomputed by the
+  Rust `feature_builder` (`--depth --trades --funding --eth --indices --out`),
+  fast, on the 96-vCPU VM (`scripts/hd2_feats_vm.py`).
+- **GENUINELY ABSENT (raw = BINANCE_FUTURES only, no cross-exchange feed):**
+  30 cross_exch_mom_500ms, 50 bybit_lead_lag_corr_30s, 51 okx_net_flow_30s,
+  52 bitget_net_flow_30s, 53 gateio_net_flow_30s. These stay zero — the only
+  truly-missing dimension. (Per user: cross-exchange was low-importance anyway;
+  ETH lead-lag was the only directionally-useful cross feature, and it IS
+  fillable.)
+
+→ **Rule: never conclude "no data/signal" from empty features_v1 columns —
+LOOK AT `raw/` first.** H3 (BTC-lead) + ETH lead-lag are concretely actionable:
+slots exist, BTC/ETH raw in the same bucket, recompute via feature_builder.
 
 - `features.npy` `(3602, 59) float32` — per-decision-point matrix,
   **decoded above** (raw-56 + 3 ext; ~46 live, cross-asset/ETH all

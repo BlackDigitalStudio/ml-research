@@ -8,29 +8,60 @@ via `python3 research/ledger.py frontier` — do not hand-maintain it once
 new results land. The ledger *refuses* a result without its fee regime /
 cache / split provenance (the chaos that cost us 3 false positives).
 
-> **Infra state 2026-05-16 (critical — do not lose):** Contabo
-> `root@84.247.154.229` is **LOST**. Every "LIVE on Contabo" cache (§8) and
-> the entire `/root/.claude/projects/-root/memory/*.md` archive are **gone**
-> — the §10 memory pointers and STRATEGY.md host references are historical.
-> New topology: this repo's container = planning node (stdlib only); GCP
-> `blackdigital.kz` 96 vCPU VM = compute node; `gs://blackdigital-scalper-data`
-> (Cryptolake, 287.9 GB, persistent) + `gs://scalper-bot-research-data` =
-> the only durable data. See `research/README.md` → *Infra reality*.
-
-> **GCP recon verified 2026-05-16** (ADC as `blackdigital.kz@gmail.com`,
-> project `project-26a24ad0-1059-4f73-93b` "My First Project"):
-> - `gs://blackdigital-scalper-data` — **ALIVE**, `EUROPE-WEST1`, owned by
->   this project. Layout `features_v1/symbol=<SYM>/dt=<YYYY-MM-DD>/{features.npy,indices.npy}`;
->   symbols are Tardis-style (`BNB-USDT-PERP`, not `BNBUSDT`). The Cryptolake
->   feature asset **survived the Contabo loss**.
-> - `gs://scalper-bot-research-data` — **403 / no access** for this account
->   (volaware checkpoints/oof; volaware was refuted — not blocking).
-> - Compute europe-west1: `CPUS=200` (usage 0), `N2_CPUS=200`,
->   `DISKS_TOTAL_GB=2458`, **`PREEMPTIBLE_CPUS=0` → no spot** (on-demand
->   only), `C2_CPUS=8` (use **N2** for the 96 vCPU box).
-> - Connection: ADC user creds in the ephemeral container's
->   `/root/.config/gcloud` — works this session, **not durable** across
->   container death (re-auth or move to SA-secret to persist).
+> ## ⚠️ DATA REALITY — READ THIS BEFORE EVER WRITING "no data" / "data is missing"
+>
+> Recurring failure: an agent opens `features_v1/.../features.npy`, sees that
+> ~13 of the 59 columns are all-zero, and concludes "we don't have ETH /
+> trades / funding / no signal." **That is FALSE. The raw data EXISTS.**
+> `features_v1` is a **BOOK-ONLY precompute** — the zero columns were simply
+> never computed, not absent. Before any data claim, LOOK AT `raw/`.
+>
+> **What we ACTUALLY have** — `gs://market-data-0998ac51/raw/` (Binance
+> Futures, 8 symbols `*-USDT-PERP`, 2022-12-08 → 2026-05-08, ~585 GB):
+> - `raw/book/`   — 20-level LOB (ns timestamps)
+> - `raw/trades/` — aggtrades (→ trade-flow, cvd, vpin, kyle, intensity)
+> - `raw/funding/` — funding/markprice (→ funding_rate, basis, time-to-next)
+> - `raw/liquidations/`, `raw/open_interest/`
+> - **ETH** is a full symbol here → `eth_momentum/eth_ofi/eth_leading_signal`
+>   are recomputable (they are 0 in features_v1 only because not computed).
+> - **Only genuinely absent:** cross-exchange (bybit/okx/bitget/gateio) — raw
+>   is BINANCE_FUTURES only. So `*_net_flow` cols stay 0 — that one IS no-data.
+>
+> **To get the FULL feature set:** run the Rust `feature_builder`
+> (`rust_ingest/src/bin/feature_builder.rs`: `--depth --trades --funding --eth
+> --indices --out`) on raw → all 46 real + the trade/funding/ETH cols
+> populated. It's fast and built for volume (run on the 96-vCPU VM,
+> `scripts/hd2_feats_vm.py`). `features_v1` decision-point `indices` == the HD2
+> stream-cache decision points (alignment is built-in).
+>
+> ## Infra state (current — 2026-05-26, supersedes the 2026-05-16 note below)
+>
+> - **GCP account: `virgin.ship03@gmail.com`**, project
+>   **`project-0998ac51-36ba-445c-bc7`** ("My First Project"), billing ENABLED.
+> - **Data bucket: `gs://market-data-0998ac51`** (`EUROPE-WEST1`) — full copy
+>   (585 GB, verified) of the old bucket. Layout under `raw/` (above) +
+>   `features_v1/symbol=<SYM>/dt=<DAY>/{features.npy(N×59), indices.npy}` +
+>   `hd2_cache_v1/{streams,midts}/` + `feats_v2/` (full Rust-recomputed
+>   features, when built) + `research_runs/`.
+> - **OLD account `blackdigital.kz@gmail.com` / project
+>   `project-26a24ad0-1059-4f73-93b` / `gs://blackdigital-scalper-data` —
+>   MIGRATED FROM (GCP balance low). Old bucket still exists as source; can be
+>   deleted once migration is trusted.** `gs://scalper-bot-research-data` =
+>   403 (volaware ckpts, refuted — not needed).
+> - Compute: same-region VM (europe-west1) ↔ bucket → **egress free**. New
+>   project: verify Compute Engine API + N2 quota before the next VM build.
+> - Modal account (`virginship08`) + Volume `hd2-cache` are SEPARATE and
+>   intact (Modal was never the balance issue). The Modal secret `hd1-gcp`
+>   (GCP_ACCESS_TOKEN) must be re-minted for `virgin.ship03` before Modal
+>   reads the new bucket.
+>
+> ---
+> _Historical (2026-05-16, superseded above):_ Contabo `root@84.247.154.229`
+> **LOST** (every "LIVE on Contabo" §8 cache + `/root/.claude/.../memory/*.md`
+> archive gone — §10 pointers historical). Then-topology used GCP
+> `blackdigital.kz` 96-vCPU VM + `gs://blackdigital-scalper-data` (287.9 GB at
+> the time; grew to 585 GB by 2026-05). `PREEMPTIBLE_CPUS=0` → no spot (use N2
+> on-demand). Cryptolake feature asset survived the Contabo loss.
 
 > **Phase B first end-to-end run 2026-05-17 (`phaseb-20260517-003320`):**
 > Lost Cryptolake pipeline **reconstructed and run on GCP** (cargo build /
@@ -376,7 +407,9 @@ cache / split provenance (the chaos that cost us 3 false positives).
 > (sequence/temporal, under R1); not a 4-way deliberation.] No
 > compute launched.
 
-**Last updated:** 2026-05-17 (HM6 rev4 — CANONICAL baseline_ref ESTABLISHED. Run phaseb-20260517-203822, {SOL,BTC,ETH,LTC} aligned 2025-05-13..2026-05-07, N=SOL360/BTC359/ETH357/LTC360, 12/12 ingested, ledger PASSED. R0~.509-.536, R1~.507-.542, rank_ic POSITIVE all 12 (mean .024, max .042 BTC-H180, decays w/ H = HA1 shape); weak/sub-economic, program-consistent. HONESTY CORRECTION HM5 rev2: R1>R0 only 8/12 (mean +0.0017, sub-noise, NOT sign-consistent) vs provisional-243's inflated 11/12 and HR1's 6/6 — HM5 NOT refuted (R1 net>=R0, zero-cost, stays default+baseline_ref) but DOWNGRADED to within-noise default, the 'sign-consistent extraction' claim does NOT replicate; future deltas vs R1 treat the R0-gap as noise. LINK dropped (genuine 119d outage)->LTC (verified clean + deepest history). HD1 rev23: rev16(i) groundwork COMPLETE; open = (i) sequence build-scope, (ii) user goal-level call; nothing auto-launched. prior: HM6 rev3/rev2, HD1 rev19, HM5 rev1).
+> **Sub-60s hold feasibility (HH rev1) — CONDITIONAL CLOSE 2026-05-27** (independent run; GCE europe-west1, raw Cryptolake 8 sym, 30 d 2026-04-06..05-05, 250 ms grid, exchange-ts; artifacts in `C:\Dev\sub60s-hold-feasibility`, exp `2026-05-27T1631Z_hh_obi_screen`). Q: profitable trading with hold <60 s at standard fees (maker 2 bp/side, taker 5 bp/side)? **A: YES, conditional on (a) sufficient directional predictivity AND (b) a reaction-latency budget — both now bounded.** (1) **Volatility sufficient (NOT the bind):** a selective perfect-foresight oracle nets **4.6–6.6 bp/trade at taker** (10 bp+spread) on all 8 symbols @60 s (DOGE/ETH/LINK lead), 2.9–4.8 bp/trade at maker — ample tail move over cost; mean |move| understates this (oracle takes the tail, not the average). (2) **Latency budget relaxed:** OBI edge half-life secs→tens-of-secs (ETH ~12 s … LTC >60 s); hundreds-of-ms delay erodes single-digit % of edge → budget **~≤1–2 s**, met by a near-Binance box (1–3 ms RTT). `receipt_timestamp` = Cryptolake vendor ingest, excluded from the budget. (3) **Predictivity = the binding gap:** best deployable no-look-ahead OBI-class signal (L0/L5/L20 imbalance, OBI+TFI sign agreement, conviction top-1%/0.1%, trailing-vol regime) caps at **~1.6 bp gross directional capture/trade < 4 bp maker floor** → sub-cost-alone, a **baseline to stack on, NOT refuted** (selection policy). **Limit:** descriptive microstructure screen (no model fit, no train/test split); bounds the OBI-class rule space only, not achievable predictivity from richer signals (cross-asset lead-lag, flow toxicity, OI/funding/liquidation) — the open direction. Detail: `C:\Dev\sub60s-hold-feasibility\sub60s-hold-feasibility.md` (+ `results*.json`). status=`informative`.
+
+**Last updated:** 2026-05-27 — HH rev1: sub-60s hold feasibility conditional close (YES iff sufficient directional predictivity + reaction-latency budget; budget+volatility resolved, binding gap = predictivity — deployable OBI-class capture ~1.6 bp < 4 bp maker floor, sub-cost-alone = baseline to stack, status=informative, exp 2026-05-27T1631Z_hh_obi_screen). Prior update: 2026-05-17 (HM6 rev4 — CANONICAL baseline_ref ESTABLISHED. Run phaseb-20260517-203822, {SOL,BTC,ETH,LTC} aligned 2025-05-13..2026-05-07, N=SOL360/BTC359/ETH357/LTC360, 12/12 ingested, ledger PASSED. R0~.509-.536, R1~.507-.542, rank_ic POSITIVE all 12 (mean .024, max .042 BTC-H180, decays w/ H = HA1 shape); weak/sub-economic, program-consistent. HONESTY CORRECTION HM5 rev2: R1>R0 only 8/12 (mean +0.0017, sub-noise, NOT sign-consistent) vs provisional-243's inflated 11/12 and HR1's 6/6 — HM5 NOT refuted (R1 net>=R0, zero-cost, stays default+baseline_ref) but DOWNGRADED to within-noise default, the 'sign-consistent extraction' claim does NOT replicate; future deltas vs R1 treat the R0-gap as noise. LINK dropped (genuine 119d outage)->LTC (verified clean + deepest history). HD1 rev23: rev16(i) groundwork COMPLETE; open = (i) sequence build-scope, (ii) user goal-level call; nothing auto-launched. prior: HM6 rev3/rev2, HD1 rev19, HM5 rev1).
 
 ---
 

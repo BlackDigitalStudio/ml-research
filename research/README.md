@@ -123,14 +123,23 @@ The biggest risk to the asset is host loss. It already happened.
 - **This container = planning node.** Stdlib Python only (no
   numpy/pandas/gcloud), no cloud creds, github reachable. Good for the
   ledger; cannot run experiments.
-- **GCP `blackdigital.kz` = compute node.** Cheap 96 vCPU VM quota
-  (provisioned per-run). Real compute (cache rebuild, training, grid
-  sweeps) runs here.
-- **GCS = the only persistent data asset.**
-  `gs://blackdigital-scalper-data` (europe-west1, 287.9 GB raw Cryptolake,
-  8 symbols BINANCE_FUTURES, 1.3 GB feature cache) and
-  `gs://scalper-bot-research-data` (volaware checkpoints/oof). The repo
-  already speaks `gcloud storage` (`scripts/build_stacker_from_oof.py`).
+- **GCP `virgin.ship03@gmail.com` = compute account** (project
+  `project-0998ac51-36ba-445c-bc7`, MIGRATED 2026-05-26 from `blackdigital.kz`
+  / `project-26a24ad0…` whose balance ran low). Cheap 96 vCPU N2 VM quota
+  (provisioned per-run, europe-west1). Real compute runs here.
+- **GCS = the only persistent data asset.** `gs://market-data-0998ac51`
+  (europe-west1, **585 GB**, full verified copy of the old bucket; old
+  `gs://blackdigital-scalper-data` is the source, still exists, deletable).
+  Layout: `raw/{book,trades,funding,liquidations,open_interest}/exchange=BINANCE_FUTURES/symbol=<SYM>/dt=<DAY>/*.parquet`,
+  `features_v1/symbol=<SYM>/dt=<DAY>/{features.npy,indices.npy}`,
+  `hd2_cache_v1/{streams,midts}/`, `feats_v2/`, `research_runs/`.
+- **⚠️ DATA REALITY — do NOT say "no data" from empty `features_v1` columns.**
+  `features_v1/features.npy` (N×59) is **book-only**: ~13 cols are
+  placeholder-ZERO (ETH lead-lag, trade-flow/cvd, funding, cancel/spoof,
+  cross-exchange). The raw inputs (trades, funding, ETH) **exist in `raw/`** —
+  recompute the full set with the Rust `feature_builder`
+  (`rust_ingest/src/bin/feature_builder.rs`). Only cross-exchange
+  (bybit/okx/bitget/gateio) is genuinely absent (raw = BINANCE_FUTURES only).
 
 Rule: a result is not "saved" until its row is committed to
 `experiments.jsonl` and pushed. Artifacts go to GCS; the ledger keeps the

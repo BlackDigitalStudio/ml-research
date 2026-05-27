@@ -109,18 +109,22 @@ for +EV TAKER rows).
 
 ---
 
-### Step 0 — Infra bring-up (GCP `blackdigital.kz`)
+### Step 0 — Infra bring-up (GCP `virgin.ship03@gmail.com`, project `project-0998ac51-36ba-445c-bc7`)
 
 Contabo is lost; this is not optional setup, it is recon + provisioning.
+(MIGRATED 2026-05-26 from `blackdigital.kz`/`gs://blackdigital-scalper-data` —
+old GCP balance ran low; data fully copied to the new bucket below.)
 
-1. Provision the cheap 96 vCPU VM (europe-west1, co-located with
-   `gs://blackdigital-scalper-data` to avoid egress).
+1. Provision the cheap 96 vCPU N2 VM (europe-west1, co-located with
+   `gs://market-data-0998ac51` to avoid egress). Verify Compute API + N2 quota
+   are enabled on the new project first.
 2. Clone repo at the pinned commit; `cd rust_ingest && cargo build
    --release` (≈18 min cold) → produces `feature_builder`, `sim_labels`,
    `build_samples`, `grid_sim`.
-3. `gcloud storage ls gs://blackdigital-scalper-data` — confirm the 8
-   Cryptolake symbols + raw size; `gs://scalper-bot-research-data` for
-   volaware checkpoints/oof.
+3. `gcloud storage ls gs://market-data-0998ac51` — confirm the 8 symbols +
+   `raw/{book,trades,funding,liquidations,open_interest}/`. NOTE: `features_v1`
+   is book-only (13/59 cols zero); use the Rust `feature_builder` on `raw/` to
+   recompute the full feature set (trades/funding/ETH inputs all present).
 4. Recon, then **record infra state** as a note in RESEARCH_LOG §infra
    (what survived, exact bucket inventory). The asset is the record.
 

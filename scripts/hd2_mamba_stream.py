@@ -40,7 +40,8 @@ DEEP_CTX_FRAC = 0.75   # "deep-context" readout subset: context >= 0.75*L
 # =========================================================================
 # Model
 # =========================================================================
-def _make_blocks(cell_kind, d_model, n_layers, d_state):
+def _make_blocks(cell_kind, d_model, n_layers, d_state,
+                 dt_min=0.001, dt_max=0.1, A_init_range=(1, 16), d_conv=4):
     import torch.nn as nn
     if cell_kind == "stub":
         return nn.GRU(d_model, d_model, num_layers=n_layers, batch_first=True)
@@ -49,7 +50,8 @@ def _make_blocks(cell_kind, d_model, n_layers, d_state):
         return nn.ModuleList([
             nn.ModuleDict({
                 "norm": nn.LayerNorm(d_model),
-                "mix": Mamba2(d_model=d_model, d_state=d_state, d_conv=4, expand=2),
+                "mix": Mamba2(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=2,
+                              dt_min=dt_min, dt_max=dt_max, A_init_range=A_init_range),
             }) for _ in range(n_layers)
         ])
     raise ValueError(cell_kind)
@@ -60,7 +62,8 @@ class HD2Mamba2(__import__("torch").nn.Module):
     + 6 last-tick globals -> MLP, fused -> 1 BCE logit."""
 
     def __init__(self, cell_kind="mamba2", d_model=128, n_layers=4,
-                 d_state=128, n_glob=6, dropout=0.1, n_out=1):
+                 d_state=128, n_glob=6, dropout=0.1, n_out=1,
+                 dt_min=0.001, dt_max=0.1, A_init_range=(1, 16), d_conv=4):
         import torch.nn as nn
         super().__init__()
         self.cell_kind = cell_kind
@@ -68,7 +71,9 @@ class HD2Mamba2(__import__("torch").nn.Module):
         self.n_layers = n_layers
         self.n_out = n_out          # multitask: one logit per horizon H
         self.in_proj = nn.Linear(80, d_model)
-        self.blocks = _make_blocks(cell_kind, d_model, n_layers, d_state)
+        self.blocks = _make_blocks(cell_kind, d_model, n_layers, d_state,
+                                   dt_min=dt_min, dt_max=dt_max, A_init_range=A_init_range,
+                                   d_conv=d_conv)
         self.lob_norm = nn.LayerNorm(d_model)
         self.glob = nn.Sequential(
             nn.Linear(n_glob, 32), nn.GELU(), nn.Dropout(dropout))
