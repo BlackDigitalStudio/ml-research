@@ -1,0 +1,14 @@
+{
+  "hypothesis_id": "HH",
+  "rev": 1,
+  "ts": "2026-05-27T1631Z",
+  "statement": "Profitable trading is achievable with position holding time < 60 s on Binance USDT-perps at standard fees (maker 0.02%, taker 0.05%).",
+  "expected_lift": null,
+  "compute_cost_usd": "~$1 (GCE e2-standard-8, europe-west1)",
+  "compute_time": "~minutes/run, GCE 8 vCPU",
+  "prerequisites": null,
+  "priority_rank": null,
+  "status": "informative",
+  "result_experiment_id": "2026-05-27T1631Z_hh_obi_screen",
+  "note": "Conditional close: YES iff (a) sufficient directional predictivity AND (b) a reaction-latency budget. Budget & volatility RESOLVED: selective perfect-foresight oracle nets 4.6-6.6 bp/trade at taker (10bp+spread) and 2.9-4.8 at maker on all 8 symbols @60s (ample tail move over cost); OBI edge half-life seconds->tens-of-seconds (ETH ~12s..LTC >60s) => reaction budget ~<=1-2 s, met by a near-Binance box (1-3ms RTT). Binding gap = PREDICTIVITY: best deployable no-look-ahead OBI-class signal ~1.6 bp gross directional capture/trade < 4 bp maker floor => sub-cost-alone, a baseline to stack on, NOT refuted (selection policy). Descriptive microstructure screen only (no model fit, no train/test split); achievable predictivity from richer signals (cross-asset lead-lag, flow toxicity, OI/funding/liquidation) = open direction. receipt_timestamp excluded (Cryptolake vendor ingest, not our path). Detail: C:/Dev/sub60s-hold-feasibility/sub60s-hold-feasibility.md."
+}
