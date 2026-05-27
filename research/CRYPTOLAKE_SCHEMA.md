@@ -143,6 +143,13 @@ zero cols — DO NOT lump them as "no data":
 LOOK AT `raw/` first.** H3 (BTC-lead) + ETH lead-lag are concretely actionable:
 slots exist, BTC/ETH raw in the same bucket, recompute via feature_builder.
 
+> **canon HM7 (anti-redundancy):** before proposing any feature/data
+> hypothesis read HM7 in `hypotheses.jsonl`. "Present in features_v1"
+> ≠ "tested" for DEAD cols above; conversely liquidations are LIVE
+> (EXT 56-58 + per-run `liq_sq/liq_n` aggregates, HA5 refuted) and
+> cross-asset/ETH-lead WAS live-tested (H3 weak, HA2 refuted). Do not
+> re-propose these as novel.
+
 - `features.npy` `(3602, 59) float32` — per-decision-point matrix,
   **decoded above** (raw-56 + 3 ext; ~46 live, cross-asset/ETH all
   zero). Row 0 ≈ zeros (warmup).
