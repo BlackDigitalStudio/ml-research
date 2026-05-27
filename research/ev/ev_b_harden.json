@@ -1,0 +1,261 @@
+{
+  "cost_bp": 13.0,
+  "UPBIT list(+) ALL": {
+    "n_events": 130,
+    "n_ts": 120,
+    "H": {
+      "1": {
+        "gross_bp": 8.8,
+        "net_bp": -4.2,
+        "med_net_bp": -0.5,
+        "win_ev": 0.531,
+        "t_clust": 0.11,
+        "n_ts": 120,
+        "win_ts": 0.508
+      },
+      "5": {
+        "gross_bp": 86.1,
+        "net_bp": 73.1,
+        "med_net_bp": 48.7,
+        "win_ev": 0.569,
+        "t_clust": 1.61,
+        "n_ts": 120,
+        "win_ts": 0.542
+      },
+      "15": {
+        "gross_bp": -6.2,
+        "net_bp": -19.2,
+        "med_net_bp": -4.5,
+        "win_ev": 0.515,
+        "t_clust": -0.33,
+        "n_ts": 120,
+        "win_ts": 0.492
+      },
+      "60": {
+        "gross_bp": 100.8,
+        "net_bp": 87.8,
+        "med_net_bp": 141.1,
+        "win_ev": 0.592,
+        "t_clust": 0.75,
+        "n_ts": 120,
+        "win_ts": 0.558
+      }
+    }
+  },
+  "UPBIT list(+) KRW-market": {
+    "n_events": 104,
+    "n_ts": 103,
+    "H": {
+      "1": {
+        "gross_bp": -5.0,
+        "net_bp": -18.0,
+        "med_net_bp": -20.9,
+        "win_ev": 0.481,
+        "t_clust": -0.19,
+        "n_ts": 103,
+        "win_ts": 0.485
+      },
+      "5": {
+        "gross_bp": 71.3,
+        "net_bp": 58.3,
+        "med_net_bp": 22.1,
+        "win_ev": 0.519,
+        "t_clust": 1.37,
+        "n_ts": 103,
+        "win_ts": 0.524
+      },
+      "15": {
+        "gross_bp": -25.8,
+        "net_bp": -38.8,
+        "med_net_bp": -64.5,
+        "win_ev": 0.471,
+        "t_clust": -0.36,
+        "n_ts": 103,
+        "win_ts": 0.476
+      },
+      "60": {
+        "gross_bp": 86.5,
+        "net_bp": 73.5,
+        "med_net_bp": 109.8,
+        "win_ev": 0.558,
+        "t_clust": 0.71,
+        "n_ts": 103,
+        "win_ts": 0.553
+      }
+    }
+  },
+  "UPBIT list(+) non-KRW": {
+    "n_events": 26,
+    "n_ts": 19,
+    "H": {
+      "1": {
+        "gross_bp": 63.9,
+        "net_bp": 50.9,
+        "med_net_bp": 47.2,
+        "win_ev": 0.731,
+        "t_clust": 0.62,
+        "n_ts": 19,
+        "win_ts": 0.684
+      },
+      "5": {
+        "gross_bp": 145.3,
+        "net_bp": 132.3,
+        "med_net_bp": 130.6,
+        "win_ev": 0.769,
+        "t_clust": 0.97,
+        "n_ts": 19,
+        "win_ts": 0.684
+      },
+      "15": {
+        "gross_bp": 72.3,
+        "net_bp": 59.3,
+        "med_net_bp": 168.1,
+        "win_ev": 0.692,
+        "t_clust": 0.09,
+        "n_ts": 19,
+        "win_ts": 0.632
+      },
+      "60": {
+        "gross_bp": 158.3,
+        "net_bp": 145.3,
+        "med_net_bp": 341.0,
+        "win_ev": 0.731,
+        "t_clust": 0.4,
+        "n_ts": 19,
+        "win_ts": 0.632
+      }
+    }
+  },
+  "UPBIT delist+caution(-)": {
+    "n_events": 18,
+    "n_ts": 18,
+    "H": {
+      "1": {
+        "gross_bp": 3.2,
+        "net_bp": -9.8,
+        "med_net_bp": -19.4,
+        "win_ev": 0.389,
+        "t_clust": 0.08,
+        "n_ts": 18,
+        "win_ts": 0.389
+      },
+      "5": {
+        "gross_bp": 126.0,
+        "net_bp": 113.0,
+        "med_net_bp": 40.2,
+        "win_ev": 0.667,
+        "t_clust": 2.24,
+        "n_ts": 18,
+        "win_ts": 0.667
+      },
+      "15": {
+        "gross_bp": 92.5,
+        "net_bp": 79.5,
+        "med_net_bp": 49.4,
+        "win_ev": 0.667,
+        "t_clust": 1.02,
+        "n_ts": 18,
+        "win_ts": 0.667
+      },
+      "60": {
+        "gross_bp": 125.4,
+        "net_bp": 112.4,
+        "med_net_bp": 70.5,
+        "win_ev": 0.611,
+        "t_clust": 1.06,
+        "n_ts": 18,
+        "win_ts": 0.611
+      }
+    }
+  },
+  "BINANCE will-list(+)": {
+    "n_events": 31,
+    "n_ts": 23,
+    "H": {
+      "1": {
+        "gross_bp": 23.2,
+        "net_bp": 10.2,
+        "med_net_bp": 51.9,
+        "win_ev": 0.581,
+        "t_clust": -0.53,
+        "n_ts": 23,
+        "win_ts": 0.522
+      },
+      "5": {
+        "gross_bp": 168.0,
+        "net_bp": 155.0,
+        "med_net_bp": 36.6,
+        "win_ev": 0.516,
+        "t_clust": 0.39,
+        "n_ts": 23,
+        "win_ts": 0.478
+      },
+      "15": {
+        "gross_bp": -64.5,
+        "net_bp": -77.5,
+        "med_net_bp": -63.2,
+        "win_ev": 0.452,
+        "t_clust": -0.54,
+        "n_ts": 23,
+        "win_ts": 0.435
+      },
+      "60": {
+        "gross_bp": -269.1,
+        "net_bp": -282.1,
+        "med_net_bp": -70.0,
+        "win_ev": 0.387,
+        "t_clust": -1.09,
+        "n_ts": 23,
+        "win_ts": 0.391
+      }
+    }
+  },
+  "BINANCE airdrop(+)": {
+    "n_events": 33,
+    "n_ts": 33,
+    "H": {
+      "1": {
+        "gross_bp": 133.7,
+        "net_bp": 120.7,
+        "med_net_bp": 113.1,
+        "win_ev": 0.576,
+        "t_clust": 2.2,
+        "n_ts": 33,
+        "win_ts": 0.576
+      },
+      "5": {
+        "gross_bp": 78.8,
+        "net_bp": 65.8,
+        "med_net_bp": 105.6,
+        "win_ev": 0.606,
+        "t_clust": 0.69,
+        "n_ts": 33,
+        "win_ts": 0.606
+      },
+      "15": {
+        "gross_bp": 25.6,
+        "net_bp": 12.6,
+        "med_net_bp": 118.0,
+        "win_ev": 0.545,
+        "t_clust": 0.1,
+        "n_ts": 33,
+        "win_ts": 0.545
+      },
+      "60": {
+        "gross_bp": -16.5,
+        "net_bp": -29.5,
+        "med_net_bp": 132.5,
+        "win_ev": 0.606,
+        "t_clust": -0.06,
+        "n_ts": 33,
+        "win_ts": 0.606
+      }
+    }
+  },
+  "BINANCE will-list V long-leg": {
+    "gross_bp": 437.1,
+    "net_bp": 424.1,
+    "t_clust": 1.81,
+    "n_ts": 23
+  }
+}
