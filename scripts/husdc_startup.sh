@@ -35,11 +35,11 @@ echo "[startup] ===== SMOKE ====="
 timeout 600 python3 /root/husdc_run.py --smoke
 echo "[startup] smoke rc=$?"
 
-echo "[startup] ===== FULL ====="
-# lightest-first (DOGE,SOL,ETH,BTC) + incremental GCS saves so an OOM on the
-# heaviest (BTC) cannot lose the lighter symbols; 14d/4 workers for the 16GB box.
+echo "[startup] ===== FULL (run2: matched-freshness label) ====="
+# lightest-first (DOGE,SOL,ETH,BTC) + incremental GCS saves; 14d/4 workers/16GB.
 timeout 3600 python3 /root/husdc_run.py \
-  --symbols DOGE SOL ETH BTC --start 2026-05-01 --end 2026-05-14 --workers 4
+  --symbols DOGE SOL ETH BTC --start 2026-05-01 --end 2026-05-14 \
+  --workers 4 --tag run2 --fresh-tol-s 1.0
 echo "[startup] full rc=$?"
 echo "[startup] complete"
 # trap (EXIT) uploads the log and self-deletes the VM.
