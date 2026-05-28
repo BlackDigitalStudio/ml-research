@@ -24,7 +24,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use scalper_ingest::live_sim::{
-    simulate_trade, simulate_trade_book, BookL1, LiveSimConfig, SimDirection,
+    simulate_maker_entry, simulate_trade, simulate_trade_book, BookL1, FlowL1,
+    LiveSimConfig, SimDirection,
 };
 
 #[derive(Parser, Debug)]
@@ -60,6 +61,28 @@ struct Args {
     /// Optional (n_samples,) f64 per-sample fill latency override.
     #[arg(long)]
     fill_latency_ms_array: Option<PathBuf>,
+
+    // ─── Maker-entry / adverse-selection (opt-in; requires --book-paths).
+    //     When --flow-paths is given, the entry is a RESTING LIMIT order filled
+    //     against the realized taker flow (touch/queue/miss) instead of an
+    //     assumed fill. Unfilled samples get NaN pnl; <prefix>_filled_{long,short}
+    //     .npy (u8) record the per-sample fill mask. Default (no --flow-paths)
+    //     = byte-identical to the legacy assumed-entry behavior.
+    /// Optional (n_samples, horizon, 2) f32 [tick_buy_vol, tick_sell_vol] per fwd tick.
+    #[arg(long)]
+    flow_paths: Option<PathBuf>,
+    /// Optional (n_samples, 2) f64 [bid_qty0, ask_qty0] = queue-ahead at entry.
+    #[arg(long)]
+    entry_q: Option<PathBuf>,
+    /// Maker rest level offset as a fraction of the near price (0 = join bid/ask).
+    #[arg(long, default_value_t = 0.0)]
+    maker_offset_frac: f64,
+    /// Max forward ticks to wait for a maker fill before MISS.
+    #[arg(long, default_value_t = 30)]
+    entry_window_ticks: i64,
+    /// Queue-ahead to clear = queue_mult × entry_q (0 = touch / Q0=0).
+    #[arg(long, default_value_t = 0.0)]
+    queue_mult: f64,
 
     /// Output prefix. Writes <prefix>_pnl_long.npy and <prefix>_pnl_short.npy
     /// of shape (n_configs, n_samples) f64.
@@ -272,7 +295,15 @@ fn compute_metrics(
         let p = pred_h[i];
         let mp = max_prob_h[i];
         let gate = p != FL_CLS && mp >= min_prob;
-        let take = gate && fill_mask_h[i];
+        let dir_pnl = if p == UP_CLS {
+            pnl_long_h[i]
+        } else if p == DN_CLS {
+            pnl_short_h[i]
+        } else {
+            0.0
+        };
+        // maker mode marks unfilled entries as NaN pnl -> treat as no-trade.
+        let take = gate && fill_mask_h[i] && dir_pnl.is_finite();
         let mut realised = 0.0;
         let size = if kelly_active {
             kelly_frac * kelly_size(mp, b, kelly_cap)
@@ -280,13 +311,6 @@ fn compute_metrics(
             kelly_frac
         };
         if take {
-            let dir_pnl = if p == UP_CLS {
-                pnl_long_h[i]
-            } else if p == DN_CLS {
-                pnl_short_h[i]
-            } else {
-                0.0
-            };
             let real = dir_pnl - spread_pct;
             realised = size * real;
             n_trades += 1;
@@ -373,6 +397,20 @@ fn main() -> Result<()> {
         Some(p) => Some(read_npy(p).context("fill_latency_ms_array")?),
         None => None,
     };
+    // Maker-entry inputs (opt-in). flow_paths is f32 on disk (build_samples).
+    let flow_paths: Option<Array3<f32>> = match &a.flow_paths {
+        Some(p) => Some(read_npy(p).context("flow_paths")?),
+        None => None,
+    };
+    let entry_q_arr: Option<Array2<f64>> = match &a.entry_q {
+        Some(p) => Some(read_npy(p).context("entry_q")?),
+        None => None,
+    };
+    let maker = flow_paths.is_some();
+    anyhow::ensure!(
+        !maker || a.book_paths.is_some(),
+        "maker-entry (--flow-paths) requires --book-paths"
+    );
 
     let configs_raw = fs::read_to_string(&a.configs).context("read configs json")?;
     let configs: Vec<OuterCfg> =
@@ -398,14 +436,18 @@ fn main() -> Result<()> {
 
     let t_sim = Instant::now();
 
-    // Per-sample result: Vec<(pnl_long, pnl_short)> of length nc.
-    // Rayon-parallel across samples; inner config loop walks the same
-    // mid_path row 27 times → mid stays L1/L2-resident.
-    let per_sample: Vec<Vec<(f64, f64)>> = (0..ns)
+    // Per-sample result: (Vec<(pnl_long, pnl_short)> len nc, (filled_long, filled_short)).
+    // Rayon-parallel across samples; inner config loop walks the same row.
+    // In maker mode the resting-limit entry fill is computed ONCE per sample
+    // (config-independent) then each config runs the exit from the fill tick;
+    // unfilled -> NaN pnl, filled=0.
+    let per_sample: Vec<(Vec<(f64, f64)>, (u8, u8))> = (0..ns)
         .into_par_iter()
         .map(|i| {
             let lat = fill_latency_arr.as_ref().map(|a| a[i]).unwrap_or(scalar_lat);
             let mut row = Vec::with_capacity(nc);
+            let mut filled_l: u8 = 1;
+            let mut filled_s: u8 = 1;
 
             if use_book {
                 let bp = book_paths.as_ref().unwrap();
@@ -434,6 +476,31 @@ fn main() -> Result<()> {
                         ask_qty: 0.0,
                     },
                 };
+                // Resting-limit entry fill (once per sample) when in maker mode.
+                let (fill_l, fill_s) = if maker {
+                    let fv = flow_paths.as_ref().unwrap().index_axis(ndarray::Axis(0), i);
+                    let flowv: Vec<FlowL1> = (0..h)
+                        .map(|t| FlowL1 {
+                            buy_vol: fv[[t, 0]] as f64,
+                            sell_vol: fv[[t, 1]] as f64,
+                        })
+                        .collect();
+                    let q_l = entry_q_arr.as_ref().map(|q| q[[i, 0]]).unwrap_or(0.0) * a.queue_mult;
+                    let q_s = entry_q_arr.as_ref().map(|q| q[[i, 1]]).unwrap_or(0.0) * a.queue_mult;
+                    let lvl_l = eb.bid - eb.bid * a.maker_offset_frac;
+                    let lvl_s = eb.ask + eb.ask * a.maker_offset_frac;
+                    let win = a.entry_window_ticks.max(0) as usize;
+                    (
+                        simulate_maker_entry(SimDirection::Long, lvl_l, q_l, &path, &flowv, win),
+                        simulate_maker_entry(SimDirection::Short, lvl_s, q_s, &path, &flowv, win),
+                    )
+                } else {
+                    (None, None)
+                };
+                if maker {
+                    filled_l = fill_l.is_some() as u8;
+                    filled_s = fill_s.is_some() as u8;
+                }
                 for c in configs.iter() {
                     let cfg = LiveSimConfig {
                         tp_pct: c.tp,
@@ -449,9 +516,28 @@ fn main() -> Result<()> {
                         trailing_step2_sl_ratio: c.trailing_step2_sl_ratio.unwrap_or(base.trailing_step2_sl_ratio),
                         ..base.clone()
                     };
-                    let l = simulate_trade_book(SimDirection::Long, eb, &path, &cfg, lat);
-                    let s = simulate_trade_book(SimDirection::Short, eb, &path, &cfg, lat);
-                    row.push((l.net_pnl_pct, s.net_pnl_pct));
+                    let (l, s) = if maker {
+                        let lp = match fill_l {
+                            Some((k, fpx)) => simulate_trade_book(
+                                SimDirection::Long,
+                                BookL1 { bid: fpx, ask: fpx, bid_qty: 0.0, ask_qty: 0.0 },
+                                &path[k..], &cfg, lat).net_pnl_pct,
+                            None => f64::NAN,
+                        };
+                        let sp = match fill_s {
+                            Some((k, fpx)) => simulate_trade_book(
+                                SimDirection::Short,
+                                BookL1 { bid: fpx, ask: fpx, bid_qty: 0.0, ask_qty: 0.0 },
+                                &path[k..], &cfg, lat).net_pnl_pct,
+                            None => f64::NAN,
+                        };
+                        (lp, sp)
+                    } else {
+                        let l = simulate_trade_book(SimDirection::Long, eb, &path, &cfg, lat);
+                        let s = simulate_trade_book(SimDirection::Short, eb, &path, &cfg, lat);
+                        (l.net_pnl_pct, s.net_pnl_pct)
+                    };
+                    row.push((l, s));
                 }
             } else {
                 let path_row = mid_paths.row(i);
@@ -478,7 +564,7 @@ fn main() -> Result<()> {
                     row.push((l.net_pnl_pct, s.net_pnl_pct));
                 }
             }
-            row
+            (row, (filled_l, filled_s))
         })
         .collect();
 
@@ -493,7 +579,11 @@ fn main() -> Result<()> {
     // (nc, ns) — каждый config'а полный pnl вектор contiguous on disk.
     let mut pnl_long = Array2::<f64>::zeros((nc, ns));
     let mut pnl_short = Array2::<f64>::zeros((nc, ns));
-    for (i, row) in per_sample.iter().enumerate() {
+    let mut filled_long = Array1::<u8>::zeros(ns);
+    let mut filled_short = Array1::<u8>::zeros(ns);
+    for (i, (row, (fl, fs))) in per_sample.iter().enumerate() {
+        filled_long[i] = *fl;
+        filled_short[i] = *fs;
         for (k, &(l, s)) in row.iter().enumerate() {
             pnl_long[[k, i]] = l;
             pnl_short[[k, i]] = s;
@@ -503,6 +593,14 @@ fn main() -> Result<()> {
     let p = &a.out_prefix;
     write_npy(format!("{}_pnl_long.npy", p), &pnl_long)?;
     write_npy(format!("{}_pnl_short.npy", p), &pnl_short)?;
+    if maker {
+        // per-sample maker fill mask (entry filled as a resting limit y/n).
+        write_npy(format!("{}_filled_long.npy", p), &filled_long)?;
+        write_npy(format!("{}_filled_short.npy", p), &filled_short)?;
+        let frl = filled_long.iter().map(|&x| x as f64).sum::<f64>() / ns as f64;
+        let frs = filled_short.iter().map(|&x| x as f64).sum::<f64>() / ns as f64;
+        eprintln!("grid_sim: maker fill-rate long={:.3} short={:.3}", frl, frs);
+    }
 
     // ─── Inner sweep (realise) — when caller provides pred + max_prob + inner_out ────
     if let (Some(pred_path), Some(max_prob_path), Some(inner_out)) =

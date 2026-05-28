@@ -29,6 +29,18 @@ pub struct LiveSimConfig {
     pub timeout_limit_ticks: i64,
     pub partial_enabled: bool,
     pub trailing_enabled: bool,
+    // ─── Maker-entry / adverse-selection (opt-in; default OFF = legacy behavior).
+    // When `maker_entry_enabled`, the entry is a RESTING LIMIT order that fills
+    // only if realized taker flow reaches our level (see simulate_trade_maker):
+    //   maker_offset_ticks  : levels below bid (long) / above ask (short) to rest
+    //                         at, in price-fraction units of entry mid (0 = join bid).
+    //   entry_window_ticks  : max forward ticks to wait for a fill before MISS.
+    //   queue_mult          : queue-ahead to clear = queue_mult × entry_q (resting
+    //                         size at our level when we join). 0 = touch (Q0=0).
+    pub maker_entry_enabled: bool,
+    pub maker_offset_frac: f64,
+    pub entry_window_ticks: i64,
+    pub queue_mult: f64,
 }
 
 impl Default for LiveSimConfig {
@@ -51,6 +63,10 @@ impl Default for LiveSimConfig {
             timeout_limit_ticks: 20,
             partial_enabled: true,
             trailing_enabled: true,
+            maker_entry_enabled: false,
+            maker_offset_frac: 0.0,
+            entry_window_ticks: 30,
+            queue_mult: 0.0,
         }
     }
 }
@@ -707,6 +723,157 @@ pub fn simulate_trade_book(
     )
 }
 
+// ============================================================================
+// Maker-entry / adverse-selection simulator (opt-in). The existing
+// simulate_trade* ASSUME the entry is filled (book version even enters taker).
+// This models a RESTING LIMIT order: it fills only when realized taker flow
+// reaches our price level and clears the queue ahead, and it MISSES when price
+// runs away (the favorable runaways) — so adverse selection emerges from the
+// realized path, not from a fill-probability parameter.
+// ============================================================================
+
+/// Per-forward-tick taker flow: aggressive buy and sell volume in that tick.
+/// `sell_vol` (taker sells, hit the bid) clears a resting BUY's queue;
+/// `buy_vol` clears a resting SELL's queue.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct FlowL1 {
+    pub buy_vol: f64,
+    pub sell_vol: f64,
+}
+
+/// Simulate a resting limit order at `level_px` against the realized book +
+/// flow path. `q0` is the queue-ahead size to clear (resting size at our level
+/// when we join, already scaled by queue_mult). Returns (fill_tick, fill_px) or
+/// None (MISS — price ran away / queue uncleared within `window`).
+///
+/// Long = maker BUY at level (on the bid): consumed by taker SELLs while the
+/// best bid is at/below our level; a strict gap below our level fills us at the
+/// level. Short is the mirror (maker SELL on the ask, consumed by taker BUYs).
+pub fn simulate_maker_entry(
+    direction: SimDirection,
+    level_px: f64,
+    q0: f64,
+    book_path: &[BookL1],
+    flow_path: &[FlowL1],
+    window: usize,
+) -> Option<(usize, f64)> {
+    if level_px <= 0.0 {
+        return None;
+    }
+    let eps = level_px * 1e-7;
+    let mut queue = q0.max(0.0);
+    let n = book_path.len().min(flow_path.len()).min(window);
+    for k in 0..n {
+        let b = book_path[k];
+        let f = flow_path[k];
+        match direction {
+            SimDirection::Long => {
+                if b.bid <= 0.0 {
+                    continue;
+                }
+                // Price gapped strictly below our resting buy => filled at level.
+                if b.bid < level_px - eps {
+                    return Some((k, level_px));
+                }
+                // Best bid is at our level (within a tick): taker sells clear queue.
+                if b.bid <= level_px + eps {
+                    queue -= f.sell_vol;
+                    if queue <= 0.0 {
+                        return Some((k, level_px));
+                    }
+                }
+                // else best bid above our level => we wait (no consumption).
+            }
+            SimDirection::Short => {
+                if b.ask <= 0.0 {
+                    continue;
+                }
+                if b.ask > level_px + eps {
+                    return Some((k, level_px));
+                }
+                if b.ask >= level_px - eps {
+                    queue -= f.buy_vol;
+                    if queue <= 0.0 {
+                        return Some((k, level_px));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Outcome of a maker-entry trade: the forward exit TradeOutcome plus whether
+/// the entry actually filled (caller excludes unfilled from EV / counts the
+/// fill rate). On MISS, `filled=false` and the outcome is a zero NoForwardData.
+#[derive(Clone, Debug)]
+pub struct MakerOutcome {
+    pub outcome: TradeOutcome,
+    pub filled: bool,
+    pub fill_tick: i64,
+}
+
+/// Full maker trade: rest a limit at bid−offset (long) / ask+offset (short),
+/// fill it against realized flow (or MISS), then run the existing book-aware
+/// exit forward FROM the fill tick (entry at the fill price = no extra spread).
+pub fn simulate_trade_maker(
+    direction: SimDirection,
+    entry_book: BookL1,
+    book_path: &[BookL1],
+    flow_path: &[FlowL1],
+    entry_q: f64,
+    cfg: &LiveSimConfig,
+    fill_latency_ms: f64,
+) -> MakerOutcome {
+    let miss = || MakerOutcome {
+        outcome: TradeOutcome {
+            net_pnl_pct: 0.0,
+            gross_pnl_pct: 0.0,
+            exit_reason: ExitReason::NoForwardData,
+            duration_ticks: 0,
+            partial_filled: false,
+            trailing_step_reached: 0,
+        },
+        filled: false,
+        fill_tick: -1,
+    };
+    let near = match direction {
+        SimDirection::Long => entry_book.bid,
+        SimDirection::Short => entry_book.ask,
+    };
+    if near <= 0.0 || book_path.is_empty() || flow_path.is_empty() {
+        return miss();
+    }
+    let off = near * cfg.maker_offset_frac;
+    let level_px = match direction {
+        SimDirection::Long => near - off,
+        SimDirection::Short => near + off,
+    };
+    let window = cfg.entry_window_ticks.max(0) as usize;
+    let q0 = entry_q.max(0.0) * cfg.queue_mult;
+    match simulate_maker_entry(direction, level_px, q0, book_path, flow_path, window) {
+        None => miss(),
+        Some((k, fill_px)) => {
+            // Exit leg: reuse the book-aware sim. Entry fills at fill_px (both
+            // sides = fill_px so long@ask and short@bid both enter at the maker
+            // level — no second spread), forward path starts at the fill tick.
+            let eb = BookL1 {
+                bid: fill_px,
+                ask: fill_px,
+                bid_qty: 0.0,
+                ask_qty: 0.0,
+            };
+            let sub = &book_path[k..];
+            let o = simulate_trade_book(direction, eb, sub, cfg, fill_latency_ms);
+            MakerOutcome {
+                outcome: o,
+                filled: true,
+                fill_tick: k as i64,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,5 +967,100 @@ mod tests {
             "gross_pnl != tp_pct: {}",
             out.gross_pnl_pct
         );
+    }
+
+    // ─── Maker-entry / adverse-selection tests (mirror husdc_makersim prototype) ──
+    fn bk(bid: f64, ask: f64) -> BookL1 {
+        BookL1 { bid, ask, bid_qty: 0.0, ask_qty: 0.0 }
+    }
+    fn fl(sell: f64, buy: f64) -> FlowL1 {
+        FlowL1 { buy_vol: buy, sell_vol: sell }
+    }
+
+    #[test]
+    fn test_maker_touch_fills_immediately() {
+        // q0=0, bid at level, a sell present -> fill on tick 0 at the level.
+        let book: Vec<BookL1> = (0..30).map(|_| bk(100.0, 100.01)).collect();
+        let flow: Vec<FlowL1> = (0..30).map(|_| fl(1.0, 0.0)).collect();
+        let r = simulate_maker_entry(SimDirection::Long, 100.0, 0.0, &book, &flow, 30);
+        assert_eq!(r, Some((0, 100.0)));
+    }
+
+    #[test]
+    fn test_maker_queue_delays_fill() {
+        // q0=5, 1 sell/tick -> queue clears at tick 4 (5-1-1-1-1-1=0).
+        let book: Vec<BookL1> = (0..30).map(|_| bk(100.0, 100.01)).collect();
+        let flow: Vec<FlowL1> = (0..30).map(|_| fl(1.0, 0.0)).collect();
+        let r = simulate_maker_entry(SimDirection::Long, 100.0, 5.0, &book, &flow, 30);
+        assert_eq!(r, Some((4, 100.0)));
+    }
+
+    #[test]
+    fn test_maker_miss_when_price_runs_up() {
+        // best bid stays above our level -> never fills (the favorable runaway).
+        let book: Vec<BookL1> = (0..30).map(|_| bk(101.0, 101.01)).collect();
+        let flow: Vec<FlowL1> = (0..30).map(|_| fl(5.0, 0.0)).collect();
+        let r = simulate_maker_entry(SimDirection::Long, 100.0, 1.0, &book, &flow, 30);
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn test_maker_gap_through_fills() {
+        // bid above level for 2 ticks then gaps strictly below -> fill at level.
+        let mut book: Vec<BookL1> = (0..30).map(|_| bk(100.5, 100.51)).collect();
+        book[2] = bk(99.0, 99.01);
+        let flow: Vec<FlowL1> = (0..30).map(|_| fl(0.0, 0.0)).collect(); // no sells
+        let r = simulate_maker_entry(SimDirection::Long, 100.0, 1e9, &book, &flow, 30);
+        assert_eq!(r, Some((2, 100.0)));
+    }
+
+    #[test]
+    fn test_maker_short_mirror() {
+        // maker SELL at ask=100; taker BUYs clear queue; q0=0 -> fill tick 0.
+        let book: Vec<BookL1> = (0..30).map(|_| bk(99.99, 100.0)).collect();
+        let flow: Vec<FlowL1> = (0..30).map(|_| fl(0.0, 1.0)).collect();
+        let r = simulate_maker_entry(SimDirection::Short, 100.0, 0.0, &book, &flow, 30);
+        assert_eq!(r, Some((0, 100.0)));
+    }
+
+    #[test]
+    fn test_simulate_trade_maker_miss() {
+        // entry bid 100; forward bids stay at 100.5 (price rose) -> MISS.
+        let cfg = LiveSimConfig {
+            maker_entry_enabled: true, entry_window_ticks: 30, queue_mult: 1.0,
+            maker_offset_frac: 0.0, ..LiveSimConfig::default()
+        };
+        let eb = bk(100.0, 100.01);
+        let book: Vec<BookL1> = (0..50).map(|_| bk(100.5, 100.51)).collect();
+        let flow: Vec<FlowL1> = (0..50).map(|_| fl(5.0, 0.0)).collect();
+        let r = simulate_trade_maker(SimDirection::Long, eb, &book, &flow, 10.0, &cfg, 150.0);
+        assert!(!r.filled, "should MISS");
+    }
+
+    #[test]
+    fn test_simulate_trade_maker_fills_then_tp() {
+        // entry bid 100 (level=100, offset 0); fill tick0; then bid rises to TP.
+        let cfg = LiveSimConfig {
+            tp_pct: 0.20, sl_pct: 1.0, timeout_ticks: 100,
+            partial_enabled: false, trailing_enabled: false,
+            maker_entry_enabled: true, entry_window_ticks: 30, queue_mult: 0.0,
+            maker_offset_frac: 0.0, ..LiveSimConfig::default()
+        };
+        let eb = bk(100.0, 100.0);
+        // tick0 at level (fills), then bids climb above tp_px=100*(1.002)=100.2.
+        let mut book: Vec<BookL1> = Vec::new();
+        book.push(bk(100.0, 100.0));               // fill here
+        for t in 1..100 {
+            let b = 100.0 + (t as f64) * 0.05;      // rises ~0.05/tick
+            book.push(bk(b, b));
+        }
+        let flow: Vec<FlowL1> = (0..100).map(|_| fl(1.0, 0.0)).collect();
+        let r = simulate_trade_maker(SimDirection::Long, eb, &book, &flow, 0.0, &cfg, 150.0);
+        assert!(r.filled, "should fill");
+        assert_eq!(r.fill_tick, 0);
+        assert_eq!(r.outcome.exit_reason, ExitReason::TpHit);
+        // entered at maker level 100 (no spread) -> gross ~ tp_pct.
+        assert!((r.outcome.gross_pnl_pct - cfg.tp_pct).abs() < 1e-9,
+                "gross {} != tp {}", r.outcome.gross_pnl_pct, cfg.tp_pct);
     }
 }

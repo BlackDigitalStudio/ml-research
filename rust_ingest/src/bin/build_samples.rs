@@ -262,7 +262,17 @@ fn main() -> Result<()> {
     let mut book_paths_writer = NpyRowStream::<f64>::create(
         a.out_dir.join("book_paths.npy"), &[ns, h as usize, 2],
     )?;
+    // flow_paths[i, t] = [tick_buy_vol, tick_sell_vol] at end+1+t — realized
+    // taker flow per forward tick. Consumed by the maker-entry simulator
+    // (live_sim::simulate_trade_maker) to model resting-limit fills + adverse
+    // selection. Additive output; legacy consumers ignore it.
+    let mut flow_paths_writer = NpyRowStream::<f32>::create(
+        a.out_dir.join("flow_paths.npy"), &[ns, h as usize, 2],
+    )?;
     let mut entry_book = Array2::<f64>::zeros((ns, 2));
+    // entry_q[i] = [bid_qty0, ask_qty0] at entry — the top-1 resting size a
+    // maker order must clear (queue-ahead) when it joins the near side.
+    let mut entry_q = Array2::<f64>::zeros((ns, 2));
     let mut x_lob_writer = NpyRowStream::<f32>::create(
         a.out_dir.join("X_lob.npy"), &[ns, 3, DEPTH_LEVELS, w as usize],
     )?;
@@ -320,8 +330,10 @@ fn main() -> Result<()> {
                 &mut top5_bid,
                 &mut top5_ask,
                 &mut entry_book,
+                &mut entry_q,
                 &mut mid_paths_writer,
                 &mut book_paths_writer,
+                &mut flow_paths_writer,
                 &mut x_lob_writer,
             )?;
             next_sample_i += 1;
@@ -374,8 +386,10 @@ fn main() -> Result<()> {
     write_npy(a.out_dir.join("top5_bid.npy"), &top5_bid)?;
     write_npy(a.out_dir.join("top5_ask.npy"), &top5_ask)?;
     write_npy(a.out_dir.join("entry_book.npy"), &entry_book)?;
+    write_npy(a.out_dir.join("entry_q.npy"), &entry_q)?;
     mid_paths_writer.finish()?;
     book_paths_writer.finish()?;
+    flow_paths_writer.finish()?;
     x_lob_writer.finish()?;
     eprintln!("build_samples: all outputs written ({} samples)", ns);
     Ok(())
@@ -398,8 +412,10 @@ fn emit_sample(
     top5_bid: &mut Array1<f64>,
     top5_ask: &mut Array1<f64>,
     entry_book: &mut Array2<f64>,
+    entry_q: &mut Array2<f64>,
     mid_paths_writer: &mut NpyRowStream<f64>,
     book_paths_writer: &mut NpyRowStream<f64>,
+    flow_paths_writer: &mut NpyRowStream<f32>,
     x_lob_writer: &mut NpyRowStream<f32>,
 ) -> Result<()> {
     let end = s + w - 1;
@@ -427,6 +443,8 @@ fn emit_sample(
         entry_short[i] = ap0;
         entry_book[[i, 0]] = bp0;
         entry_book[[i, 1]] = ap0;
+        entry_q[[i, 0]] = bq_row[0];   // top-1 bid resting size (queue-ahead, long)
+        entry_q[[i, 1]] = aq_row[0];   // top-1 ask resting size (queue-ahead, short)
         if bp0 > 0.0 && ap0 > 0.0 {
             mid_at_sample[i] = 0.5 * (bp0 + ap0);
         }
@@ -445,6 +463,7 @@ fn emit_sample(
     // book_paths[i, :h, :2] = [bid, ask] at end+1+k — stream-write.
     let mut mid_path_row = vec![0f64; h];
     let mut book_path_row = vec![0f64; h * 2];
+    let mut flow_path_row = vec![0f32; h * 2];
     for k in 0..h {
         let row = end + 1 + k;
         let (bp0, ap0, _bq, _aq) = get(row);
@@ -453,9 +472,12 @@ fn emit_sample(
         }
         book_path_row[k * 2] = bp0;
         book_path_row[k * 2 + 1] = ap0;
+        flow_path_row[k * 2] = tick_buy_vol[row];
+        flow_path_row[k * 2 + 1] = tick_sell_vol[row];
     }
     mid_paths_writer.write_row(&mid_path_row)?;
     book_paths_writer.write_row(&book_path_row)?;
+    flow_paths_writer.write_row(&flow_path_row)?;
 
     // X_lob[i] = (3, 20, w) f32. Channel 0/1: bid/ask qtys per level per tick.
     // Channel 2 row 0/1: tick_buy/sell_vol at each tick. Rest zero.
