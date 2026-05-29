@@ -16,6 +16,7 @@ host (it did: Contabo is gone — see *Infra reality* below).
 | `ledger.py` | Stdlib-only gate: `validate` / `append` / `build-db` / `frontier` / `check`. | committed |
 | `research.db` | SQLite, **derived** from the JSONL. Rebuilt, never hand-edited. | gitignored |
 | `PLAN.md` | Cheap-hypothesis plan (Phase A deliverable 2). | committed |
+| `MAKER_SIM.md` | Operator guide: realistic maker-fill / adverse-selection sim (`grid_sim --flow-paths` + `build_samples` flow/entry_q, native flat L2). See HUSDC rev6/rev7. | committed |
 
 JSONL (not a binary .db, not Parquet) is the source of truth because it is
 human-diffable, merge-friendly, zero-dependency, and git-durable. SQLite is
