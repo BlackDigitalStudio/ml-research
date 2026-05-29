@@ -40,7 +40,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
-use arrow::array::{Array, BooleanArray, FixedSizeListArray, Float64Array, Int64Array};
+use arrow::array::{Array, BooleanArray, FixedSizeListArray, Float64Array, Int64Array, StringArray};
 use clap::Parser;
 use ndarray::{Array1, Array2};
 use ndarray_npy::{write_npy, WriteNpyExt};
@@ -84,9 +84,63 @@ impl SlimBatch {
     }
 }
 
+/// Depth schema resolution. Two accepted schemas (mirrors lib.rs):
+///   NESTED (ingest_tardis): bid_prices: FixedSizeList<f64,20>, ts in ms.
+///   FLAT   (raw cryptolake): bid_0_price..ask_19_size scalars, ts NANOSECONDS.
+enum DepthCols {
+    Nested { ts: usize, bp: usize, bq: usize, ap: usize, aq: usize },
+    Flat {
+        ts: usize,
+        bp0: usize,
+        ap0: usize,
+        bq: [usize; DEPTH_LEVELS],
+        aq: [usize; DEPTH_LEVELS],
+    },
+}
+
+impl DepthCols {
+    fn is_flat(&self) -> bool {
+        matches!(self, DepthCols::Flat { .. })
+    }
+    fn ts(&self) -> usize {
+        match self {
+            DepthCols::Nested { ts, .. } | DepthCols::Flat { ts, .. } => *ts,
+        }
+    }
+}
+
+fn resolve_depth_cols(schema: &arrow::datatypes::Schema) -> Result<DepthCols> {
+    let ts = schema.index_of("timestamp").context("depth missing `timestamp`")?;
+    if schema.index_of("bid_prices").is_ok() {
+        Ok(DepthCols::Nested {
+            ts,
+            bp: schema.index_of("bid_prices")?,
+            bq: schema.index_of("bid_qtys").context("depth missing bid_qtys")?,
+            ap: schema.index_of("ask_prices").context("depth missing ask_prices")?,
+            aq: schema.index_of("ask_qtys").context("depth missing ask_qtys")?,
+        })
+    } else {
+        let mut bq = [0usize; DEPTH_LEVELS];
+        let mut aq = [0usize; DEPTH_LEVELS];
+        for k in 0..DEPTH_LEVELS {
+            bq[k] = schema.index_of(&format!("bid_{}_size", k))
+                .with_context(|| format!("depth flat missing bid_{}_size", k))?;
+            aq[k] = schema.index_of(&format!("ask_{}_size", k))
+                .with_context(|| format!("depth flat missing ask_{}_size", k))?;
+        }
+        Ok(DepthCols::Flat {
+            ts,
+            bp0: schema.index_of("bid_0_price").context("depth flat missing bid_0_price")?,
+            ap0: schema.index_of("ask_0_price").context("depth flat missing ask_0_price")?,
+            bq,
+            aq,
+        })
+    }
+}
+
 /// First pass: stream depth, capture only the timestamp column into a
-/// pre-sized Vec. Also counts total rows — reported by the reader's first
-/// batch metadata.
+/// pre-sized Vec (ms; FLAT schema timestamps are NANOSECONDS -> /1e6). Also
+/// counts total rows — reported by the reader's first batch metadata.
 fn read_depth_timestamps(path: &PathBuf) -> Result<Vec<i64>> {
     let file = File::open(path).with_context(|| format!("open {:?}", path))?;
     let metadata = parquet::file::reader::SerializedFileReader::new(
@@ -95,10 +149,10 @@ fn read_depth_timestamps(path: &PathBuf) -> Result<Vec<i64>> {
     use parquet::file::reader::FileReader;
     let total_rows: usize = metadata.metadata().file_metadata().num_rows() as usize;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    // Column projection: just `timestamp`.
-    let schema = builder.schema();
-    let ts_col = schema.index_of("timestamp")
-        .context("depth parquet missing `timestamp`")?;
+    // Column projection: just `timestamp`. FLAT schema => ts is nanoseconds.
+    let dcols = resolve_depth_cols(builder.schema())?;
+    let flat = dcols.is_flat();
+    let ts_col = dcols.ts();
     let mask = parquet::arrow::ProjectionMask::roots(
         builder.parquet_schema(), vec![ts_col],
     );
@@ -109,7 +163,11 @@ fn read_depth_timestamps(path: &PathBuf) -> Result<Vec<i64>> {
         let b = b?;
         let ts = b.column(0).as_any().downcast_ref::<Int64Array>()
             .ok_or_else(|| anyhow!("timestamp column not Int64"))?;
-        out.extend_from_slice(ts.values());
+        if flat {
+            out.extend(ts.values().iter().map(|v| v / 1_000_000)); // ns -> ms
+        } else {
+            out.extend_from_slice(ts.values());
+        }
     }
     if out.len() != total_rows {
         return Err(anyhow!(
@@ -121,47 +179,74 @@ fn read_depth_timestamps(path: &PathBuf) -> Result<Vec<i64>> {
 }
 
 /// Decode one RecordBatch into a SlimBatch (top-1 prices + top-20 qtys + ts).
+/// Handles both NESTED (FixedSizeList) and FLAT (scalar bid_k_*/ask_k_*) depth.
 fn decode_slim(
     b: &arrow::record_batch::RecordBatch,
     global_start: usize,
-    ts_idx: usize, bp_idx: usize, bq_idx: usize, ap_idx: usize, aq_idx: usize,
+    cols: &DepthCols,
 ) -> Result<SlimBatch> {
     let n = b.num_rows();
-    let ts = b.column(ts_idx).as_any().downcast_ref::<Int64Array>()
-        .ok_or_else(|| anyhow!("timestamp not Int64"))?;
-    let fsl = |col_idx: usize, name: &str| -> Result<&FixedSizeListArray> {
-        b.column(col_idx).as_any().downcast_ref::<FixedSizeListArray>()
-            .ok_or_else(|| anyhow!("{} not FixedSizeList", name))
-    };
-    let bp_fsl = fsl(bp_idx, "bid_prices")?;
-    let bq_fsl = fsl(bq_idx, "bid_qtys")?;
-    let ap_fsl = fsl(ap_idx, "ask_prices")?;
-    let aq_fsl = fsl(aq_idx, "ask_qtys")?;
-    fn floats<'a>(fsl_arr: &'a FixedSizeListArray, n: usize, name: &str) -> Result<&'a [f64]> {
-        let v = fsl_arr.values().as_any().downcast_ref::<Float64Array>()
-            .ok_or_else(|| anyhow!("{} child not Float64", name))?;
-        let off = fsl_arr.offset() * DEPTH_LEVELS;
-        Ok(&v.values()[off..off + n * DEPTH_LEVELS])
+    match cols {
+        DepthCols::Nested { ts, bp, bq, ap, aq } => {
+            let tsa = b.column(*ts).as_any().downcast_ref::<Int64Array>()
+                .ok_or_else(|| anyhow!("timestamp not Int64"))?;
+            let fsl = |col_idx: usize, name: &str| -> Result<&FixedSizeListArray> {
+                b.column(col_idx).as_any().downcast_ref::<FixedSizeListArray>()
+                    .ok_or_else(|| anyhow!("{} not FixedSizeList", name))
+            };
+            let bp_fsl = fsl(*bp, "bid_prices")?;
+            let bq_fsl = fsl(*bq, "bid_qtys")?;
+            let ap_fsl = fsl(*ap, "ask_prices")?;
+            let aq_fsl = fsl(*aq, "ask_qtys")?;
+            fn floats<'a>(fsl_arr: &'a FixedSizeListArray, n: usize, name: &str) -> Result<&'a [f64]> {
+                let v = fsl_arr.values().as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| anyhow!("{} child not Float64", name))?;
+                let off = fsl_arr.offset() * DEPTH_LEVELS;
+                Ok(&v.values()[off..off + n * DEPTH_LEVELS])
+            }
+            let bp_all = floats(bp_fsl, n, "bid_prices")?;
+            let ap_all = floats(ap_fsl, n, "ask_prices")?;
+            let bq_all = floats(bq_fsl, n, "bid_qtys")?;
+            let aq_all = floats(aq_fsl, n, "ask_qtys")?;
+            let mut bp0 = Vec::with_capacity(n);
+            let mut ap0 = Vec::with_capacity(n);
+            for i in 0..n {
+                bp0.push(bp_all[i * DEPTH_LEVELS]);
+                ap0.push(ap_all[i * DEPTH_LEVELS]);
+            }
+            Ok(SlimBatch {
+                global_start, ts: tsa.values().to_vec(), bp0, ap0,
+                bq: bq_all.to_vec(), aq: aq_all.to_vec(),
+            })
+        }
+        DepthCols::Flat { ts, bp0, ap0, bq, aq } => {
+            let tsa = b.column(*ts).as_any().downcast_ref::<Int64Array>()
+                .ok_or_else(|| anyhow!("timestamp not Int64"))?;
+            let f64col = |idx: usize| -> Result<&Float64Array> {
+                b.column(idx).as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| anyhow!("depth flat col {} not Float64", idx))
+            };
+            let bp0a = f64col(*bp0)?;
+            let ap0a = f64col(*ap0)?;
+            let bqc: Vec<&Float64Array> = bq.iter().map(|&i| f64col(i)).collect::<Result<_>>()?;
+            let aqc: Vec<&Float64Array> = aq.iter().map(|&i| f64col(i)).collect::<Result<_>>()?;
+            let mut bp0v = Vec::with_capacity(n);
+            let mut ap0v = Vec::with_capacity(n);
+            let mut bqv = vec![0f64; n * DEPTH_LEVELS];
+            let mut aqv = vec![0f64; n * DEPTH_LEVELS];
+            let mut tsv = Vec::with_capacity(n);
+            for i in 0..n {
+                bp0v.push(bp0a.value(i));
+                ap0v.push(ap0a.value(i));
+                tsv.push(tsa.value(i) / 1_000_000); // ns -> ms (unused downstream; ms for consistency)
+                for k in 0..DEPTH_LEVELS {
+                    bqv[i * DEPTH_LEVELS + k] = bqc[k].value(i);
+                    aqv[i * DEPTH_LEVELS + k] = aqc[k].value(i);
+                }
+            }
+            Ok(SlimBatch { global_start, ts: tsv, bp0: bp0v, ap0: ap0v, bq: bqv, aq: aqv })
+        }
     }
-    let bp_all = floats(bp_fsl, n, "bid_prices")?;
-    let ap_all = floats(ap_fsl, n, "ask_prices")?;
-    let bq_all = floats(bq_fsl, n, "bid_qtys")?;
-    let aq_all = floats(aq_fsl, n, "ask_qtys")?;
-
-    let mut bp0 = Vec::with_capacity(n);
-    let mut ap0 = Vec::with_capacity(n);
-    for i in 0..n {
-        bp0.push(bp_all[i * DEPTH_LEVELS]);
-        ap0.push(ap_all[i * DEPTH_LEVELS]);
-    }
-    Ok(SlimBatch {
-        global_start,
-        ts: ts.values().to_vec(),
-        bp0,
-        ap0,
-        bq: bq_all.to_vec(),
-        aq: aq_all.to_vec(),
-    })
 }
 
 fn main() -> Result<()> {
@@ -203,36 +288,62 @@ fn main() -> Result<()> {
             .with_context(|| format!("open {:?}", trades_path))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
         let schema = builder.schema();
-        let ts_col = schema.index_of("timestamp")?;
-        let qty_col = schema.index_of("quantity")?;
-        let side_col = schema.index_of("is_buyer_maker")?;
-        let mask = parquet::arrow::ProjectionMask::roots(
-            builder.parquet_schema(), vec![ts_col, qty_col, side_col],
-        );
-        let reader = builder.with_projection(mask).build()?;
+        // NESTED (ingest_tardis): quantity + is_buyer_maker(bool), ts ms.
+        // FLAT   (raw cryptolake): amount + side(str "buy"/"sell"), ts NANOSECONDS.
+        let nested_tr = schema.index_of("quantity").is_ok();
         let mut nt = 0_usize;
-        for b in reader {
-            let b = b?;
-            // Columns in projection order: ts, qty, side.
-            let ts = b.column(0).as_any().downcast_ref::<Int64Array>()
-                .ok_or_else(|| anyhow!("trades ts not Int64"))?;
-            let qty = b.column(1).as_any().downcast_ref::<Float64Array>()
-                .ok_or_else(|| anyhow!("trades quantity not Float64"))?;
-            let sdl = b.column(2).as_any().downcast_ref::<BooleanArray>()
-                .ok_or_else(|| anyhow!("trades is_buyer_maker not Bool"))?;
-            for i in 0..b.num_rows() {
-                let t = ts.value(i);
-                let q = qty.value(i) as f32;
-                // searchsorted_right(depth_ts, t) - 1, clipped.
-                let r = depth_ts.partition_point(|probe| *probe <= t);
-                let idx = if r == 0 { 0 } else { (r - 1).min(n - 1) };
-                if sdl.value(i) {
-                    tick_sell_vol[idx] += q;
-                } else {
-                    tick_buy_vol[idx] += q;
+        if nested_tr {
+            let ts_col = schema.index_of("timestamp")?;
+            let qty_col = schema.index_of("quantity")?;
+            let side_col = schema.index_of("is_buyer_maker")?;
+            let mask = parquet::arrow::ProjectionMask::roots(
+                builder.parquet_schema(), vec![ts_col, qty_col, side_col],
+            );
+            let reader = builder.with_projection(mask).build()?;
+            for b in reader {
+                let b = b?;
+                // Columns in projection order: ts, qty, side.
+                let ts = b.column(0).as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| anyhow!("trades ts not Int64"))?;
+                let qty = b.column(1).as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| anyhow!("trades quantity not Float64"))?;
+                let sdl = b.column(2).as_any().downcast_ref::<BooleanArray>()
+                    .ok_or_else(|| anyhow!("trades is_buyer_maker not Bool"))?;
+                for i in 0..b.num_rows() {
+                    let t = ts.value(i);
+                    let q = qty.value(i) as f32;
+                    let r = depth_ts.partition_point(|probe| *probe <= t);
+                    let idx = if r == 0 { 0 } else { (r - 1).min(n - 1) };
+                    if sdl.value(i) { tick_sell_vol[idx] += q; } else { tick_buy_vol[idx] += q; }
                 }
+                nt += b.num_rows();
             }
-            nt += b.num_rows();
+        } else {
+            // FLAT: read full batches, downcast by index; side str, ts ns -> ms.
+            let ts_idx = schema.index_of("timestamp")?;
+            let amt_idx = schema.index_of("amount").context("trades flat missing amount")?;
+            let side_idx = schema.index_of("side").context("trades flat missing side")?;
+            let reader = builder.build()?;
+            for b in reader {
+                let b = b?;
+                let ts = b.column(ts_idx).as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| anyhow!("trades ts not Int64"))?;
+                let amt = b.column(amt_idx).as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| anyhow!("trades amount not Float64"))?;
+                let side_arr = arrow::compute::cast(
+                    b.column(side_idx), &arrow::datatypes::DataType::Utf8)
+                    .map_err(|e| anyhow!("trades.side cast to Utf8: {e}"))?;
+                let side = side_arr.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| anyhow!("trades.side not Utf8 after cast"))?;
+                for i in 0..b.num_rows() {
+                    let t = ts.value(i) / 1_000_000; // ns -> ms
+                    let q = amt.value(i) as f32;
+                    let r = depth_ts.partition_point(|probe| *probe <= t);
+                    let idx = if r == 0 { 0 } else { (r - 1).min(n - 1) };
+                    if side.value(i) == "sell" { tick_sell_vol[idx] += q; } else { tick_buy_vol[idx] += q; }
+                }
+                nt += b.num_rows();
+            }
         }
         eprintln!(
             "build_samples: {} trades aggregated in {:.2}s",
@@ -281,12 +392,7 @@ fn main() -> Result<()> {
     let t_stream = Instant::now();
     let file = File::open(&a.depth)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let schema = builder.schema();
-    let ts_idx = schema.index_of("timestamp")?;
-    let bp_idx = schema.index_of("bid_prices")?;
-    let bq_idx = schema.index_of("bid_qtys")?;
-    let ap_idx = schema.index_of("ask_prices")?;
-    let aq_idx = schema.index_of("ask_qtys")?;
+    let dcols = resolve_depth_cols(builder.schema())?;
     let reader = builder.build()?;
 
     // Rolling buffer of SlimBatches. We retain batches that still overlap
@@ -300,7 +406,7 @@ fn main() -> Result<()> {
         let b = b?;
         let n_b = b.num_rows();
         let slab_start = global_start + buffered_rows;
-        let slab = decode_slim(&b, slab_start, ts_idx, bp_idx, bq_idx, ap_idx, aq_idx)?;
+        let slab = decode_slim(&b, slab_start, &dcols)?;
         buffered_rows += n_b;
         buffer.push_back(slab);
 
