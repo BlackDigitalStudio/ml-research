@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use arrow::array::{Array, BooleanArray, FixedSizeListArray, Float64Array, Int64Array};
+use arrow::array::{Array, BooleanArray, FixedSizeListArray, Float64Array, Int64Array, StringArray};
 use ndarray::{Array1, Array2};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -80,16 +80,11 @@ pub fn read_depth_parquet(path: &Path) -> Result<DepthData> {
     }
 
     let schema = batches[0].schema();
-    let idx = |name: &str| -> Result<usize> {
-        schema
-            .index_of(name)
-            .with_context(|| format!("column {} missing", name))
-    };
-    let ts_idx = idx("timestamp")?;
-    let bp_idx = idx("bid_prices")?;
-    let bq_idx = idx("bid_qtys")?;
-    let ap_idx = idx("ask_prices")?;
-    let aq_idx = idx("ask_qtys")?;
+    let ts_idx = schema.index_of("timestamp").context("depth missing timestamp")?;
+    // Two accepted schemas:
+    //   NESTED (scripts/ingest_tardis.py): bid_prices: FixedSizeList<f64,20>, ts in ms.
+    //   FLAT  (raw cryptolake): bid_0_price..ask_19_size scalars, ts in NANOSECONDS.
+    let nested = schema.index_of("bid_prices").is_ok();
 
     let mut timestamps = Array1::<i64>::zeros(total_rows);
     let mut bid_prices = Array2::<f64>::zeros((total_rows, DEPTH_LEVELS));
@@ -97,25 +92,62 @@ pub fn read_depth_parquet(path: &Path) -> Result<DepthData> {
     let mut ask_prices = Array2::<f64>::zeros((total_rows, DEPTH_LEVELS));
     let mut ask_qtys = Array2::<f64>::zeros((total_rows, DEPTH_LEVELS));
 
-    let mut off: usize = 0;
-    for b in batches {
-        let n = b.num_rows();
-
-        let ts = b
-            .column(ts_idx)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| anyhow!("timestamp not Int64"))?;
-        for i in 0..n {
-            timestamps[off + i] = ts.value(i);
+    if nested {
+        let bp_idx = schema.index_of("bid_prices").unwrap();
+        let bq_idx = schema.index_of("bid_qtys").context("depth missing bid_qtys")?;
+        let ap_idx = schema.index_of("ask_prices").context("depth missing ask_prices")?;
+        let aq_idx = schema.index_of("ask_qtys").context("depth missing ask_qtys")?;
+        let mut off: usize = 0;
+        for b in &batches {
+            let n = b.num_rows();
+            let ts = b.column(ts_idx).as_any().downcast_ref::<Int64Array>()
+                .ok_or_else(|| anyhow!("timestamp not Int64"))?;
+            timestamps.as_slice_mut().unwrap()[off..off + n].copy_from_slice(&ts.values()[..n]);
+            copy_fsl_into(b.column(bp_idx), &mut bid_prices, off, n, "bid_prices")?;
+            copy_fsl_into(b.column(bq_idx), &mut bid_qtys, off, n, "bid_qtys")?;
+            copy_fsl_into(b.column(ap_idx), &mut ask_prices, off, n, "ask_prices")?;
+            copy_fsl_into(b.column(aq_idx), &mut ask_qtys, off, n, "ask_qtys")?;
+            off += n;
         }
-
-        copy_fsl_into(b.column(bp_idx), &mut bid_prices, off, n, "bid_prices")?;
-        copy_fsl_into(b.column(bq_idx), &mut bid_qtys, off, n, "bid_qtys")?;
-        copy_fsl_into(b.column(ap_idx), &mut ask_prices, off, n, "ask_prices")?;
-        copy_fsl_into(b.column(aq_idx), &mut ask_qtys, off, n, "ask_qtys")?;
-
-        off += n;
+    } else {
+        // FLAT raw cryptolake: resolve 80 scalar columns; ts ns -> ms.
+        let col = |name: String| -> Result<usize> {
+            schema.index_of(&name).with_context(|| format!("depth flat missing {}", name))
+        };
+        let mut bp_i = [0usize; DEPTH_LEVELS]; let mut bq_i = [0usize; DEPTH_LEVELS];
+        let mut ap_i = [0usize; DEPTH_LEVELS]; let mut aq_i = [0usize; DEPTH_LEVELS];
+        for k in 0..DEPTH_LEVELS {
+            bp_i[k] = col(format!("bid_{}_price", k))?;
+            bq_i[k] = col(format!("bid_{}_size", k))?;
+            ap_i[k] = col(format!("ask_{}_price", k))?;
+            aq_i[k] = col(format!("ask_{}_size", k))?;
+        }
+        let mut off: usize = 0;
+        for b in &batches {
+            let n = b.num_rows();
+            let ts = b.column(ts_idx).as_any().downcast_ref::<Int64Array>()
+                .ok_or_else(|| anyhow!("timestamp not Int64"))?;
+            for i in 0..n {
+                timestamps[off + i] = ts.value(i) / 1_000_000; // ns -> ms
+            }
+            for k in 0..DEPTH_LEVELS {
+                let bp = b.column(bp_i[k]).as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| anyhow!("depth flat bid_price not Float64"))?;
+                let bq = b.column(bq_i[k]).as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| anyhow!("depth flat bid_size not Float64"))?;
+                let ap = b.column(ap_i[k]).as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| anyhow!("depth flat ask_price not Float64"))?;
+                let aq = b.column(aq_i[k]).as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| anyhow!("depth flat ask_size not Float64"))?;
+                for i in 0..n {
+                    bid_prices[[off + i, k]] = bp.value(i);
+                    bid_qtys[[off + i, k]] = bq.value(i);
+                    ask_prices[[off + i, k]] = ap.value(i);
+                    ask_qtys[[off + i, k]] = aq.value(i);
+                }
+            }
+            off += n;
+        }
     }
 
     Ok(DepthData {
@@ -213,15 +245,18 @@ pub fn read_trades_parquet(path: &Path) -> Result<TradesData> {
     }
 
     let schema = batches[0].schema();
-    let idx = |name: &str| -> Result<usize> {
-        schema
-            .index_of(name)
-            .with_context(|| format!("trades column {} missing", name))
+    let ts_idx = schema.index_of("timestamp").context("trades missing timestamp")?;
+    let price_idx = schema.index_of("price").context("trades missing price")?;
+    // NESTED (ingest_tardis): quantity:f64 + is_buyer_maker:bool, ts in ms.
+    // FLAT  (raw cryptolake): amount:f64 + side:str("buy"/"sell"), ts NANOSECONDS.
+    let nested = schema.index_of("quantity").is_ok();
+    let (qty_idx, side_idx) = if nested {
+        (schema.index_of("quantity").unwrap(),
+         schema.index_of("is_buyer_maker").context("trades missing is_buyer_maker")?)
+    } else {
+        (schema.index_of("amount").context("trades missing amount")?,
+         schema.index_of("side").context("trades missing side")?)
     };
-    let ts_idx = idx("timestamp")?;
-    let price_idx = idx("price")?;
-    let qty_idx = idx("quantity")?;
-    let side_idx = idx("is_buyer_maker")?;
 
     let mut ts = Array1::<i64>::zeros(total);
     let mut price = Array1::<f64>::zeros(total);
@@ -229,39 +264,39 @@ pub fn read_trades_parquet(path: &Path) -> Result<TradesData> {
     let mut is_sell = vec![false; total];
 
     let mut off = 0usize;
-    for b in batches {
+    for b in &batches {
         let n = b.num_rows();
 
-        let ts_col = b
-            .column(ts_idx)
-            .as_any()
-            .downcast_ref::<Int64Array>()
+        let ts_col = b.column(ts_idx).as_any().downcast_ref::<Int64Array>()
             .ok_or_else(|| anyhow!("trades.timestamp not Int64"))?;
-        let price_col = b
-            .column(price_idx)
-            .as_any()
-            .downcast_ref::<Float64Array>()
+        let price_col = b.column(price_idx).as_any().downcast_ref::<Float64Array>()
             .ok_or_else(|| anyhow!("trades.price not Float64"))?;
-        let qty_col = b
-            .column(qty_idx)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or_else(|| anyhow!("trades.quantity not Float64"))?;
-        let side_col = b
-            .column(side_idx)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .ok_or_else(|| anyhow!("trades.is_buyer_maker not Bool"))?;
+        let qty_col = b.column(qty_idx).as_any().downcast_ref::<Float64Array>()
+            .ok_or_else(|| anyhow!("trades quantity/amount not Float64"))?;
 
-        ts.as_slice_mut().unwrap()[off..off + n]
-            .copy_from_slice(&ts_col.values()[..n]);
-        price.as_slice_mut().unwrap()[off..off + n]
-            .copy_from_slice(&price_col.values()[..n]);
-        qty.as_slice_mut().unwrap()[off..off + n]
-            .copy_from_slice(&qty_col.values()[..n]);
-        for i in 0..n {
-            is_sell[off + i] = side_col.value(i);
+        if nested {
+            ts.as_slice_mut().unwrap()[off..off + n].copy_from_slice(&ts_col.values()[..n]);
+            let side_col = b.column(side_idx).as_any().downcast_ref::<BooleanArray>()
+                .ok_or_else(|| anyhow!("trades.is_buyer_maker not Bool"))?;
+            for i in 0..n {
+                is_sell[off + i] = side_col.value(i);
+            }
+        } else {
+            for i in 0..n {
+                ts[off + i] = ts_col.value(i) / 1_000_000; // ns -> ms
+            }
+            // raw aggressor side: "sell" => taker sold => is_sell (== is_buyer_maker).
+            // `side` may be plain Utf8 OR dictionary-encoded -> cast to Utf8 first.
+            let side_arr = arrow::compute::cast(b.column(side_idx), &arrow::datatypes::DataType::Utf8)
+                .map_err(|e| anyhow!("trades.side cast to Utf8: {e}"))?;
+            let side_col = side_arr.as_any().downcast_ref::<StringArray>()
+                .ok_or_else(|| anyhow!("trades.side not Utf8 after cast"))?;
+            for i in 0..n {
+                is_sell[off + i] = side_col.value(i) == "sell";
+            }
         }
+        price.as_slice_mut().unwrap()[off..off + n].copy_from_slice(&price_col.values()[..n]);
+        qty.as_slice_mut().unwrap()[off..off + n].copy_from_slice(&qty_col.values()[..n]);
         off += n;
     }
 
@@ -282,13 +317,27 @@ pub struct FundingData {
 }
 
 pub fn read_funding_parquet(path: &Path) -> Result<FundingData> {
-    let (ts, cols) = load_scalar_parquet(path, &["funding_rate", "mark_price"])?;
-    let mut it = cols.into_iter();
-    Ok(FundingData {
-        timestamps: ts,
-        funding_rate: it.next().unwrap(),
-        mark_price: it.next().unwrap(),
-    })
+    // NESTED (ingest_tardis): funding_rate + mark_price, ts in ms.
+    // FLAT  (raw cryptolake): rate + mark_price, ts in NANOSECONDS.
+    match load_scalar_parquet(path, &["funding_rate", "mark_price"]) {
+        Ok((ts, cols)) => {
+            let mut it = cols.into_iter();
+            Ok(FundingData {
+                timestamps: ts,
+                funding_rate: it.next().unwrap(),
+                mark_price: it.next().unwrap(),
+            })
+        }
+        Err(_) => {
+            let (ts_ns, cols) = load_scalar_parquet(path, &["rate", "mark_price"])?;
+            let mut it = cols.into_iter();
+            Ok(FundingData {
+                timestamps: ts_ns.mapv(|v| v / 1_000_000), // ns -> ms
+                funding_rate: it.next().unwrap(),
+                mark_price: it.next().unwrap(),
+            })
+        }
+    }
 }
 
 /// Derivatives parquet — schema: {timestamp:i64, open_interest:f64, long_short_ratio:f64}.
@@ -306,6 +355,70 @@ pub fn read_derivatives_parquet(path: &Path) -> Result<DerivativesData> {
         open_interest: it.next().unwrap(),
         long_short_ratio: it.next().unwrap(),
     })
+}
+
+/// Liquidations — raw cryptolake flat: {side:str, quantity:f64, price:f64,
+/// status:str, timestamp:i64 NANOSECONDS}. side "buy" = short-position liquidation
+/// (forced buy -> up pressure), "sell" = long liquidation (down pressure).
+pub struct LiquidationData {
+    pub timestamps: Array1<i64>,      // ms
+    pub signed_notional: Array1<f64>, // +|qty*price| buy(short-liq), -|qty*price| sell
+    pub abs_notional: Array1<f64>,
+}
+
+pub fn read_liquidations_parquet(path: &Path) -> Result<LiquidationData> {
+    let file = File::open(path).with_context(|| format!("open {:?}", path))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+    let mut batches = Vec::new();
+    let mut total = 0usize;
+    for b in reader {
+        let b = b?;
+        total += b.num_rows();
+        batches.push(b);
+    }
+    if batches.is_empty() {
+        return Ok(LiquidationData {
+            timestamps: Array1::zeros(0),
+            signed_notional: Array1::zeros(0),
+            abs_notional: Array1::zeros(0),
+        });
+    }
+    let schema = batches[0].schema();
+    let ts_idx = schema.index_of("timestamp").context("liq missing timestamp")?;
+    let side_idx = schema.index_of("side").context("liq missing side")?;
+    let qty_idx = schema.index_of("quantity").context("liq missing quantity")?;
+    let price_idx = schema.index_of("price").context("liq missing price")?;
+    let mut ts = Array1::<i64>::zeros(total);
+    let mut sn = Array1::<f64>::zeros(total);
+    let mut an = Array1::<f64>::zeros(total);
+    let mut off = 0usize;
+    for b in &batches {
+        let n = b.num_rows();
+        let tsc = b.column(ts_idx).as_any().downcast_ref::<Int64Array>()
+            .ok_or_else(|| anyhow!("liq.timestamp not Int64"))?;
+        let side_arr = arrow::compute::cast(b.column(side_idx), &arrow::datatypes::DataType::Utf8)
+            .map_err(|e| anyhow!("liq.side cast to Utf8: {e}"))?;
+        let sc = side_arr.as_any().downcast_ref::<StringArray>()
+            .ok_or_else(|| anyhow!("liq.side not Utf8 after cast"))?;
+        let qc = b.column(qty_idx).as_any().downcast_ref::<Float64Array>()
+            .ok_or_else(|| anyhow!("liq.quantity not Float64"))?;
+        let pc = b.column(price_idx).as_any().downcast_ref::<Float64Array>()
+            .ok_or_else(|| anyhow!("liq.price not Float64"))?;
+        for i in 0..n {
+            ts[off + i] = tsc.value(i) / 1_000_000; // ns -> ms
+            let notional = qc.value(i).abs() * pc.value(i);
+            an[off + i] = notional;
+            sn[off + i] = if sc.value(i) == "buy" { notional } else { -notional };
+        }
+        off += n;
+    }
+    Ok(LiquidationData { timestamps: ts, signed_notional: sn, abs_notional: an })
+}
+
+/// Open interest — raw cryptolake flat: {open_interest:f64, timestamp:i64 NS}.
+pub fn read_open_interest_parquet(path: &Path) -> Result<(Array1<i64>, Array1<f64>)> {
+    let (ts_ns, cols) = load_scalar_parquet(path, &["open_interest"])?;
+    Ok((ts_ns.mapv(|v| v / 1_000_000), cols.into_iter().next().unwrap()))
 }
 
 /// Cross-exchange trades: {ts, signed_qty} where signed_qty = +qty for buy,

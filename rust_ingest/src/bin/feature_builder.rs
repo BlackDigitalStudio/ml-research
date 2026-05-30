@@ -22,13 +22,14 @@ use clap::Parser;
 use ndarray_npy::{read_npy, write_npy};
 use scalper_ingest::{
     features::{
-        compute_lob_features, fill_cross_ex_feature, fill_deriv_features, fill_eth_features,
-        fill_funding_features, fill_horizon_features, fill_horizon_features_b,
-        fill_horizon_features_c, fill_horizon_features_d, fill_microstructure_depth,
-        fill_microstructure_trades, fill_trade_features,
+        compute_lob_features, fill_cross_ex_feature, fill_deep_book, fill_deriv_features,
+        fill_eth_features, fill_funding_features, fill_horizon_features, fill_horizon_features_b,
+        fill_horizon_features_c, fill_horizon_features_d, fill_liquidation_features,
+        fill_microstructure_depth, fill_microstructure_trades, fill_oi_features,
+        fill_trade_features,
     },
     read_cross_ex_parquet, read_depth_parquet, read_derivatives_parquet, read_funding_parquet,
-    read_trades_parquet,
+    read_liquidations_parquet, read_open_interest_parquet, read_trades_parquet,
 };
 
 #[derive(Parser, Debug)]
@@ -39,7 +40,10 @@ struct Args {
     #[arg(long)]
     indices: PathBuf,
     #[arg(long)]
-    out: PathBuf,
+    out: Option<PathBuf>,
+    /// sub-60s: emit raw 80-ch LOB tick stream (whole day) here. Independent of --out.
+    #[arg(long)]
+    lob_out: Option<PathBuf>,
     #[arg(long)]
     trades: Option<PathBuf>,
     #[arg(long)]
@@ -48,6 +52,10 @@ struct Args {
     derivs: Option<PathBuf>,
     #[arg(long)]
     eth: Option<PathBuf>,
+    #[arg(long)]
+    liquidations: Option<PathBuf>,
+    #[arg(long)]
+    open_interest: Option<PathBuf>,
     #[arg(long)]
     bybit: Option<PathBuf>,
     #[arg(long)]
@@ -61,12 +69,29 @@ struct Args {
 fn main() -> Result<()> {
     let a = Args::parse();
 
-    let t0 = Instant::now();
     let depth = read_depth_parquet(&a.depth)?;
+
+    // sub-60s stream-1: emit the raw 80-ch LOB tick stream (whole day), independent
+    // of feature computation. Decision book-indices (--indices) double as t0.
+    if let Some(lp) = a.lob_out.as_ref() {
+        let lob = scalper_ingest::features::lob_stream_80(&depth);
+        write_npy(lp, &lob).with_context(|| format!("write lob {:?}", lp))?;
+        eprintln!("lob_stream: ticks={} dims=80 -> {:?}", lob.nrows(), lp);
+    }
+
+    // features (stream-2 / legacy 64-col) only when --out is given (skip for LOB-only).
+    let out_path = match a.out.as_ref() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    let t0 = Instant::now();
     let trades = a.trades.as_ref().map(|p| read_trades_parquet(p)).transpose()?;
     let funding = a.funding.as_ref().map(|p| read_funding_parquet(p)).transpose()?;
     let derivs = a.derivs.as_ref().map(|p| read_derivatives_parquet(p)).transpose()?;
     let eth = a.eth.as_ref().map(|p| read_trades_parquet(p)).transpose()?;
+    let liquidations = a.liquidations.as_ref().map(|p| read_liquidations_parquet(p)).transpose()?;
+    let open_interest = a.open_interest.as_ref().map(|p| read_open_interest_parquet(p)).transpose()?;
     let bybit = a.bybit.as_ref().map(|p| read_cross_ex_parquet(p, "bybit")).transpose()?;
     let okx = a.okx.as_ref().map(|p| read_cross_ex_parquet(p, "okx")).transpose()?;
     let bitget = a.bitget.as_ref().map(|p| read_cross_ex_parquet(p, "bitget")).transpose()?;
@@ -105,6 +130,15 @@ fn main() -> Result<()> {
     if let Some(e) = eth.as_ref() {
         fill_eth_features(&mut feat, &depth, is, e);
     }
+    // sub-60s additions from the full raw feeds: full-book L20 imbalance [61],
+    // liquidation signed-flow [56-58], open-interest delta [59,60].
+    fill_deep_book(&mut feat, &depth, is);
+    if let Some(l) = liquidations.as_ref() {
+        fill_liquidation_features(&mut feat, &depth, is, l);
+    }
+    if let Some((ots, ov)) = open_interest.as_ref() {
+        fill_oi_features(&mut feat, &depth, is, ots.as_slice().unwrap(), ov.as_slice().unwrap());
+    }
     let mut cross: Vec<&scalper_ingest::CrossExTrades> = Vec::new();
     for o in [bybit.as_ref(), okx.as_ref(), bitget.as_ref(), gateio.as_ref()] {
         if let Some(x) = o {
@@ -116,7 +150,7 @@ fn main() -> Result<()> {
     }
     let t_feat = t1.elapsed();
 
-    write_npy(&a.out, &feat).with_context(|| format!("write {:?}", a.out))?;
+    write_npy(out_path, &feat).with_context(|| format!("write {:?}", out_path))?;
     eprintln!(
         "feature_builder: depth={} trades={} funding={} derivs={} eth={} cross={} samples={} load={:.2}s feat={:.2}s",
         depth.n_rows(),

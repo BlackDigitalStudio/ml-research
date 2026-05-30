@@ -571,3 +571,89 @@ These contain raw session notes. The frontier table above subsumes their decisio
 - Compare nets at different Kelly fractions without renormalizing.
 - Report "WR > X%" without specifying base rate AND that it is direction-aware realized.
 - Quote a result from this file without verifying against the cited memory or live code (per global Law #2 — facts > theories).
+
+## 12. 2026-05-28 — sub-60s corrected-feature substrate + grid_sim economics
+
+**Context**: new GCP (virgin.ship03 / market-data-0998ac51). Built a CORRECTED sub-60s
+feature substrate from RAW and characterized the alpha continuously (no discrete gates,
+per CLAUDE.md frame). Full recovery/ops detail in `mamba2plan.md`; scripts `scripts/subs60_*.py`.
+
+**Pipeline fix (was blocking feats_v2)**: the Rust `feature_builder` expected a converted
+nested schema (`bid_prices` FSL, `quantity`/`is_buyer_maker`, `funding_rate`) that does NOT
+exist in the bucket — raw is FLAT (`bid_0_price..`, `side`+`amount`, `rate`), ts in **ns** not ms.
+Patched the 3 readers to read flat raw + convert ns→ms; repurposed the weak ETH cols
+(1s-VWAP-diff, IC~0.03) to clean point-to-point `eth_ret_{1,2,5}s` (IC~0.05); added
+liquidation/OI features + an OBI ladder (L1/L5/L10/L20). `NUM_FEATURES=64`. Built
+`gs://…/feats_sub60/` (2776 sym-days, dense 1s grid, X/td/mid/rH_{15,30,45,60}/valid).
+
+**Two-axis decomposition (OOS, purged split):**
+- VOLATILITY predictable: `vol_AUC` 0.78–0.89 (predict |move|≥13bp). But the ≥13bp event is
+  RARE (≥13bp@15s base ~0.5-1%; @60s ~3-19%), so operating-point PRECISION is only ~21–40%.
+  Opportunity is strongly regime-dependent (vol clustering: DOGE 2.7%@360d vs 0.8%@recent-30d).
+- DIRECTION = the harder axis (not a hard wall): selective-tail dir_acc 0.55–0.65.
+
+**grid_sim TP/SL economics** (Rust, fixed-unit EV/trade, NET of commission; universal argmax
+**tp=0.30/sl=0.05 (RR 6:1), hold 45–60s**, WR 42–50%):
+- Oracle (realized ≥13bp gate = perfect vol-head, CEILING): VIP0 **+5.4…7.2 bp/tr**, maker
+  **+0.7…1.7 bp** (7/8 syms +, ETH ~0), taker −2.8…4.6. tr/day(gated) ~1k-2.8k.
+- Deployable (vol-MODEL gate): VIP0 **+0.9…2.0 bp/tr**, maker **−4.1…5.0 bp**, taker −8…9.
+- Fine 100ms path recovers ~1.3–1.85× the gross of the coarse 1s path (1s undercounts TP touches
+  by ~30-45%); our live recorder is sub-ms so prod path is cleaner than the cryptolake backtest.
+- Fine path + extreme selectivity (top-0.2% combined vol+dir conviction, ~26–43 tr/day, overlap
+  negligible): VIP0 +1…3.6 bp (DOGE/LTC/XRP best), **maker STILL −2…6 bp**.
+
+**BINDING CONSTRAINT = deployable vol-model PRECISION** (not direction-wall, not path coarseness,
+not selectivity — all tested). The gross edge (+1-3.6 bp/tr) is below the maker round-trip (~6 bp),
+so **net-positive only at zero-fee/VIP0**. Fee tier (constant Binance standard) is the swing factor;
+VIP0 is the "show-the-fund" number.
+
+**Note (overlap bug, found & scoped)**: earlier "1000–4500 tr/day" were RAW signal firings
+(60s holds can't overlap that much, ≤1440/day non-overlap). Per-trade EV is unaffected; only
+throughput was inflated. At the selective ~30/day operating point overlap is negligible.
+
+**Next levers** (user-ordered): #4 fine-path DONE; #2 selectivity DONE (doesn't flip maker alone);
+#1 improve vol-head precision (bigger TF + fundamental data) = top remaining lever; #3 Mamba-2
+stream-2 (curated feats_sub60) + raw stream-1 (nonlinearity to lift gross above maker).
+
+
+## 13. 2026-05-29 — Mamba2 vs sized-GRU head-to-head (sub-60s 2×2 cascade)
+
+**Context**: lever #3 from §12 — does a heavier nonlinear sequence cell (Mamba2)
+on the 2-stream cascade beat a small GRU? Clean head-to-head: **A** FLAT/NON-FLAT
+vol-gate (per-symbol) and **B** UP/DN direction (pooled top-3, non-flat windows,
+IC/capture objective), each 2-stream (raw LOB80 + curated feat71), training cell
+swapped between `cell=mamba2` and `cell=stub` (GRU). Modal L4, per-epoch OOS +
+best-val. Scripts `scripts/mamba2_cascade.py`, `scripts/mamba2_sub60_modal.py`.
+Ledger `hd2-20260529_mamba2_vs_gru` (HD2, exploratory).
+
+**Data / training**: `hd2_sub60_cache/{DOGE,ETH,LINK}-USDT-PERP` (cryptolake
+2025-05-09→2026-05-08). stream-1 = raw 20-level LOB ticks (80-ch); stream-2 = 71
+feats (feats_sub60 + signed BTC-lead{5,30,60}s + ToD). dec-stride 25 s, bounded
+context L=3000 ticks, warmup 300. A all windows (max_days 300/sym, 6 ep); B
+non-flat pooled (max_days 150/sym, 8 ep). **Params**: Mamba2 d1=d2=256, n1=n2=1
+(mamba_ssm 2.2.2 kernel locks d_model=256 → shrink via n_layers, not d) →
+**A 1,036,337 / B 1,038,409**; sized GRU → **A 263,297** (d128/n2/d64), **B 70,745**
+(d64/n2/d32) — ~4× (A) / ~15× (B) smaller.
+
+**Test**: purged day-split — train earliest ~65 % of days, embargo ≥60 s, test
+newest ~32 % (per-symbol). n_test: A DOGE 172,756 / ETH 289,205 / LINK 212,702;
+B pool 41,048 decisions. Best-val selection (never last-epoch).
+
+**Result (surface)**:
+- **A (vol-gate)** — AUC is ~**tied** (Mamba2 0.780/0.814/0.722 vs GRU
+  0.782/0.818/0.742, DOGE/ETH/LINK), but **GRU has clearly better
+  operating-point precision** (prec@0.2 % 0.623/0.690/0.675 vs Mamba2
+  0.571/0.609/0.574) and **Mamba2 overfits early** (best_ep
+  0/1/2 of 5 vs GRU 4/4/5).
+- **B (direction, pooled)** — GRU wins decisively: cap@10 % **+4.68 bp** vs
+  Mamba2 +3.03; cap@20 % **+4.12** vs +2.73; dir-acc@10 %
+  **0.612** vs 0.564 — at ~15× fewer params.
+
+**Argmax / takeaway**: best cell for this tier = the **sized GRU**, not Mamba2.
+Mamba2 ties on vol-AUC but loses on deployable precision and on direction, while
+overfitting from near epoch 0. **Decision: drop Mamba2 for sub-60s** — capacity
+must match n_eff (overlapping 60 s labels ⇒ n_eff ≪ rows); Mamba2's long-range
+memory + parallel-scan strengths are wasted at short (sec–min) context + small
+n_eff, and the broken small-d kernel forced an oversized d=256. *Complexity is an
+arena, not an edge in itself.* Artifacts: `gru_models/*_m2.best.pt` (+ `_gru`),
+modal vol `hd2-cache:/results/sub60/*_m2.json`.

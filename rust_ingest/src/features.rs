@@ -9,12 +9,46 @@
 
 use ndarray::{s, Array1, Array2};
 
-use crate::{CrossExTrades, DepthData, DerivativesData, FundingData, TradesData};
+use crate::{CrossExTrades, DepthData, DerivativesData, FundingData, LiquidationData, TradesData, DEPTH_LEVELS};
 
-pub const NUM_FEATURES: usize = 56;
+// 0..=55 legacy set; 56..=63 sub-60s additions from the FULL raw feeds:
+//   56 liq_signed_5s  57 liq_signed_30s  58 liq_intensity_60s
+//   59 oi_delta_30s   60 oi_delta_300s   61 OBI_L20
+//   62 OBI_L1 (top-of-book)   63 OBI_L10   (OBI@L5 already = col1 imbalance_ratio)
+pub const NUM_FEATURES: usize = 64;
 
 /// Must match `src/features.py::QUEUE_DECAY_ALPHA`.
 pub const QUEUE_DECAY_ALPHA: f64 = 0.1;
+
+/// sub-60s stream-1: raw 20-level L2 -> (n_ticks, 80) f32. Byte-parity with the
+/// Python `_lob_stream_80` (hd2_stream_build) encoding: order [bid_p|bid_s|ask_p|
+/// ask_s]; prices (p-mid)/mid; sizes sign*log1p(|s|); non-finite -> 0. Stored f32
+/// (caller may cast to f16: (p-mid)/mid ~1e-3, sign*log1p|s| <~15 are f16-safe).
+pub fn lob_stream_80(depth: &DepthData) -> Array2<f32> {
+    let n = depth.n_rows();
+    let mid = depth.mid_prices();
+    let mut out = Array2::<f32>::zeros((n, 80));
+    for i in 0..n {
+        let m = mid[i];
+        let pos = m > 0.0;
+        let safe = if pos { m } else { 1.0 };
+        for k in 0..DEPTH_LEVELS {
+            let bp = depth.bid_prices[[i, k]];
+            let ap = depth.ask_prices[[i, k]];
+            let bs = depth.bid_qtys[[i, k]];
+            let aq = depth.ask_qtys[[i, k]];
+            let v_bp = if pos { ((bp - m) / safe) as f32 } else { 0.0 };
+            let v_ap = if pos { ((ap - m) / safe) as f32 } else { 0.0 };
+            let v_bs = (bs.signum() * bs.abs().ln_1p()) as f32;
+            let v_as = (aq.signum() * aq.abs().ln_1p()) as f32;
+            out[[i, k]] = if v_bp.is_finite() { v_bp } else { 0.0 };
+            out[[i, 20 + k]] = if v_bs.is_finite() { v_bs } else { 0.0 };
+            out[[i, 40 + k]] = if v_ap.is_finite() { v_ap } else { 0.0 };
+            out[[i, 60 + k]] = if v_as.is_finite() { v_as } else { 0.0 };
+        }
+    }
+    out
+}
 
 /// Compute features for `indices` into `depth`. Output shape (n_samples, NUM_FEATURES) f32.
 ///
@@ -638,6 +672,18 @@ pub fn fill_microstructure_trades(
 ///   [15] eth_ofi (500ms):  (buys-sells)/(buys+sells)
 ///   [16] eth_leading_signal: (btc_mid/eth_mid - mean_ratio) / (mean_ratio + 1e-10)
 ///        where mean_ratio is computed across all samples with ratio>0.
+/// Last trade price at-or-before `t` (0.0 if none). For clean leading-asset
+/// point-to-point returns (validated strongest sub-60s directional feature).
+fn last_price_at(ts: &[i64], price: &[f64], t: i64) -> f64 {
+    let j = searchsorted_right_i64(ts, t);
+    if j > 0 { price[j - 1] } else { 0.0 }
+}
+
+#[inline]
+fn eth_logret(p_now: f64, p_prev: f64) -> f64 {
+    if p_now > 0.0 && p_prev > 0.0 { (p_now / p_prev).ln() } else { 0.0 }
+}
+
 pub fn fill_eth_features(
     feat: &mut Array2<f32>,
     depth: &DepthData,
@@ -695,49 +741,122 @@ pub fn fill_eth_features(
         let pp = cum_pv[left_1s] - cum_pv[left_2s];
         vwap_prev[s_idx] = if qp > 0.0 { pp / qp } else { 0.0 };
 
-        let bz = cum_buy[right] - cum_buy[left_500];
-        let sz = cum_sell[right] - cum_sell[left_500];
+        let bz = cum_buy[right] - cum_buy[left_1s];
+        let sz = cum_sell[right] - cum_sell[left_1s];
         let tot = bz + sz;
         flow_imb[s_idx] = if tot > 0.0 { (bz - sz) / tot } else { 0.0 };
 
-        // [14]
-        let v1 = vwap_1s[s_idx];
-        let vp = vwap_prev[s_idx];
-        feat[[s_idx, 14]] = if v1 > 0.0 && vp > 0.0 {
-            ((v1 - vp) / vp) as f32
-        } else {
-            0.0
-        };
-        // [15]
+        // CORRECTED sub-60s ETH lead-lag. The old defs (1s-VWAP-diff [14],
+        // BTC/ETH-ratio dev [16]) scored IC_30s ~0.03 / ~0.01; the validated
+        // strong signal is the clean point-to-point ETH log-return (IC_30s
+        // ~0.13). Model consumes stream-2 as an opaque vector, so columns are
+        // repurposed: [14]=eth_ret_1s [16]=eth_ret_2s [54]=eth_ret_5s,
+        // [15]=eth flow-imbalance (1s window), [55] left as eth_btc_corr.
+        let p_now = last_price_at(ts, price, sample_ts);
+        feat[[s_idx, 14]] = eth_logret(p_now, last_price_at(ts, price, sample_ts - 1_000)) as f32;
+        feat[[s_idx, 16]] = eth_logret(p_now, last_price_at(ts, price, sample_ts - 2_000)) as f32;
+        feat[[s_idx, 54]] = eth_logret(p_now, last_price_at(ts, price, sample_ts - 5_000)) as f32;
         feat[[s_idx, 15]] = flow_imb[s_idx] as f32;
     }
+}
 
-    // [16] ratio mean across ALL samples — matches Python's global reduction
-    let mut ratio = vec![0f64; ns];
-    let mut sum_pos = 0f64;
-    let mut cnt_pos = 0usize;
-    for (s_idx, &raw_idx) in indices.iter().enumerate() {
-        let idx = raw_idx as usize;
-        let btc_mid = mids[idx];
-        let eth_mid = vwap_1s[s_idx];
-        let r = if eth_mid > 0.0 { btc_mid / eth_mid } else { 0.0 };
-        ratio[s_idx] = r;
-        if r > 0.0 {
-            sum_pos += r;
-            cnt_pos += 1;
+/// Cols [56,57,58] — liquidation signed-notional imbalance (5s, 30s) + intensity
+/// (60s). Raw liquidations are sparse impulse events: side "buy" = short-position
+/// liquidation (forced buy -> UP pressure) => +notional; "sell" = long liquidation
+/// (down pressure) => -notional. Mostly 0 between cascades (an event feature).
+pub fn fill_liquidation_features(
+    feat: &mut Array2<f32>,
+    depth: &DepthData,
+    indices: &[i64],
+    liq: &LiquidationData,
+) {
+    let nt = liq.timestamps.len();
+    if nt == 0 {
+        return;
+    }
+    let ts = liq.timestamps.as_slice().unwrap();
+    let sn = liq.signed_notional.as_slice().unwrap();
+    let an = liq.abs_notional.as_slice().unwrap();
+    let mut csn = vec![0f64; nt + 1];
+    let mut can = vec![0f64; nt + 1];
+    for i in 0..nt {
+        csn[i + 1] = csn[i] + sn[i];
+        can[i + 1] = can[i] + an[i];
+    }
+    for (s, &raw) in indices.iter().enumerate() {
+        let t = depth.timestamps[raw as usize];
+        let r = searchsorted_right_i64(ts, t);
+        let l5 = searchsorted_left_i64(ts, t - 5_000);
+        let l30 = searchsorted_left_i64(ts, t - 30_000);
+        let l60 = searchsorted_left_i64(ts, t - 60_000);
+        let a5 = can[r] - can[l5];
+        let a30 = can[r] - can[l30];
+        feat[[s, 56]] = if a5 > 0.0 { ((csn[r] - csn[l5]) / a5) as f32 } else { 0.0 };
+        feat[[s, 57]] = if a30 > 0.0 { ((csn[r] - csn[l30]) / a30) as f32 } else { 0.0 };
+        feat[[s, 58]] = ((can[r] - can[l60]).max(0.0) + 1.0).ln() as f32;
+    }
+}
+
+/// Cols [59,60] — open-interest delta over 30s / 300s: (OI_t - OI_{t-W}) / OI_t.
+/// Positioning-regime shift (raw/open_interest, ~4 s cadence).
+pub fn fill_oi_features(
+    feat: &mut Array2<f32>,
+    depth: &DepthData,
+    indices: &[i64],
+    oi_ts: &[i64],
+    oi: &[f64],
+) {
+    if oi_ts.is_empty() {
+        return;
+    }
+    for (s, &raw) in indices.iter().enumerate() {
+        let t = depth.timestamps[raw as usize];
+        let r = searchsorted_right_i64(oi_ts, t);
+        if r == 0 {
+            continue;
+        }
+        let now = oi[r - 1];
+        if now <= 0.0 {
+            continue;
+        }
+        let j30 = searchsorted_right_i64(oi_ts, t - 30_000);
+        let j300 = searchsorted_right_i64(oi_ts, t - 300_000);
+        if j30 > 0 {
+            feat[[s, 59]] = ((now - oi[j30 - 1]) / now) as f32;
+        }
+        if j300 > 0 {
+            feat[[s, 60]] = ((now - oi[j300 - 1]) / now) as f32;
         }
     }
-    // Python gate: `if ratio.sum() > 0` — guards the whole block; otherwise col stays 0.
-    let ratio_sum: f64 = ratio.iter().sum();
-    if ratio_sum > 0.0 && cnt_pos > 0 {
-        let ratio_mean = sum_pos / cnt_pos as f64;
-        let denom = ratio_mean + 1e-10;
-        for s_idx in 0..ns {
-            let r = ratio[s_idx];
-            if r > 0.0 {
-                feat[[s_idx, 16]] = ((r - ratio_mean) / denom) as f32;
+}
+
+/// OBI depth-ladder: [61]=OBI@L20, [62]=OBI@L1 (top-of-book), [63]=OBI@L10.
+/// OBI@L5 already exists as col1 (imbalance_ratio). OBI = (Σbid-Σask)/(Σbid+Σask).
+pub fn fill_deep_book(feat: &mut Array2<f32>, depth: &DepthData, indices: &[i64]) {
+    for (s, &raw) in indices.iter().enumerate() {
+        let i = raw as usize;
+        let b1 = depth.bid_qtys[[i, 0]];
+        let a1 = depth.ask_qtys[[i, 0]];
+        let mut b10 = 0f64;
+        let mut a10 = 0f64;
+        let mut b20 = 0f64;
+        let mut a20 = 0f64;
+        for k in 0..DEPTH_LEVELS {
+            let bq = depth.bid_qtys[[i, k]];
+            let aq = depth.ask_qtys[[i, k]];
+            b20 += bq;
+            a20 += aq;
+            if k < 10 {
+                b10 += bq;
+                a10 += aq;
             }
         }
+        let t1 = b1 + a1;
+        let t10 = b10 + a10;
+        let t20 = b20 + a20;
+        feat[[s, 61]] = if t20 > 0.0 { ((b20 - a20) / t20) as f32 } else { 0.0 };
+        feat[[s, 62]] = if t1 > 0.0 { ((b1 - a1) / t1) as f32 } else { 0.0 };
+        feat[[s, 63]] = if t10 > 0.0 { ((b10 - a10) / t10) as f32 } else { 0.0 };
     }
 }
 
