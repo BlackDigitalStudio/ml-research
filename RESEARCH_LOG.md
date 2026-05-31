@@ -603,9 +603,17 @@ liquidation/OI features + an OBI ladder (L1/L5/L10/L20). `NUM_FEATURES=64`. Buil
   negligible): VIP0 +1…3.6 bp (DOGE/LTC/XRP best), **maker STILL −2…6 bp**.
 
 **BINDING CONSTRAINT = deployable vol-model PRECISION** (not direction-wall, not path coarseness,
-not selectivity — all tested). The gross edge (+1-3.6 bp/tr) is below the maker round-trip (~6 bp),
-so **net-positive only at zero-fee/VIP0**. Fee tier (constant Binance standard) is the swing factor;
-VIP0 is the "show-the-fund" number.
+not selectivity — all tested). The gross edge (+1-3.6 bp/tr) is below the maker round-trip (~4 bp RT),
+so **net-negative at the only fees we actually have**.
+
+> **⚠️ FEE-REALITY CORRECTION (user, 2026-05-31).** Earlier entries call positive-gross
+> numbers "VIP0 / zero-fee / show-the-fund". **That framing is RETRACTED.** There is NO
+> VIP0 tier on Binance and the user has NO fund / preferential-fee access — it was a
+> one-off joke that agents wrongly turned into a target. Only **standard Binance fees**
+> apply: maker 0.02%/side = **0.04% RT**, taker 0.05%/side = **0.10% RT**. Read every
+> "VIP0"/"zero-fee" in §12 and the 2026-05-28 ledger rows as **gross-before-cost only**
+> (a diagnostic upper bound), never as a deployable target. Deploy criterion = net at
+> standard fees; maker-maker 0.04% RT is the best real tariff.
 
 **Note (overlap bug, found & scoped)**: earlier "1000–4500 tr/day" were RAW signal firings
 (60s holds can't overlap that much, ≤1440/day non-overlap). Per-trade EV is unaffected; only
@@ -705,7 +713,8 @@ cells sized to n_eff (**A 263 k**: d128/n2 + d64/n1; **B 70.7 k**: d64/n2 + d32/
 **Argmax / takeaway**: the **GRU is the right sub-60s model** (beats model-free and
 Mamba2 at 4–15× fewer params; A no-overfit, B the directional lever). On the
 **deployable surface**, net>0 appears only under **high conviction + TAKER entry**
-(or 0 %-maker/VIP0) — **passive maker entry structurally loses to adverse
+(at STANDARD Binance fees — there is NO VIP/zero-fee tier; maker-maker 0.04% RT is
+the best real tariff) — **passive maker entry structurally loses to adverse
 selection**, and that is robust across 116 days and all 18 policies.
 
 **⚠️ CAVEAT (do not deploy on these magnitudes)**: the positive fine-tune / grid /
