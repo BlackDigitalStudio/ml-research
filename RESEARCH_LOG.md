@@ -727,3 +727,59 @@ decay is largely train-staleness, removed by daily retrain). Artifacts:
 `gru_models/*.best.pt`, `research_runs/{gru_gridsim,gru_finetune,gru_makergrid}/`;
 scripts `scripts/subs60_{gru_gridsim,maker_grid,entry_policy_sweep}.py`,
 `scripts/mamba2_cascade.py` (B2 objective).
+
+
+## 15. 2026-05-31 — XGBoost A/B on MAKER-REALISTIC (adverse-selection) labels — conditional surface
+
+**Context**: exploratory tier "under what conditions is XGBoost strongest?" (HD3 rev1,
+exp `xgb-20260531_makerlabels_AB`, GCE n2-standard-8). Two deliberate departures from §13/§14:
+(1) **labels carry adverse selection** — built a per-symbol dataset (all 8 syms, ~2826 sym-days,
+`research_runs/maker_labels/{SYM}.npz`) where each feats decision point gets a REALISTIC maker
+P&L from the HUSDC maker-sim (resting limit fills on realized taker-flow touch/queue, MISSES on
+runaway → adverse selection from the path), for ALL 3 cfgs (hold-60s/RR6/RR2) × 2 queue-mults
+(touch/queue). (2) **Model A vol-gate is per-symbol VOL-ADAPTIVE** (user insight): a fixed
+`|rH60|≥13bp` is 2.37σ/3.4 %-of-windows for BTC but 1.25σ/15.6 % for LINK — incomparable gates;
+replaced by per-symbol TRAIN-p95(|rH60|) → uniform ~5 % non-flat target. Same 71 feats as the NN.
+Optuna tunes HPs only (target/threshold/config are explicit swept CONDITIONS, not auto-collapsed).
+Fully instrumented (all trials/importances/val-curves + per-sample test preds with pA+pB+all-cfg×qm
+payoffs saved → any operating-point/config surface recomputable offline w/o retraining;
+`scripts/subs60_xgb_surface.py`).
+
+**SURFACE (headline):**
+- **(A) Vol-gate** — AUC robust **0.818–0.859 across ALL 8 symbols**; deployable prec@0.2 %
+  argmax **BTC 0.62** (low-vol symbol's rare big moves predict cleanest) > ETH .57 > XRP .56 >
+  LINK/SOL .54 > BNB/LTC .51 > DOGE .45. Volatility is strongly + uniformly predictable.
+- **(B) Direction skill** (oracle-gated on realized non-flat) — dir-acc@conv-top10 % **0.658–0.767**
+  (BTC .767, BNB .746 best); REAL side-selection skill. But executed maker EV is −8…−14 bp because
+  on realized big-move windows BOTH passive-maker sides lose to adverse selection (qm=1).
+- **(C) Honest cascade** (gate by Model-A PREDICTION top-g % × B side, net after 4 bp maker RT) —
+  **argmax cell per symbol**: **LTC +2.01 bp** and **LINK +1.23 bp** (both **hold / TOUCH, A-top-0.2 %**,
+  dir-acc .54–.56, ~12–18 trades/day) go **net-POSITIVE**; XRP −0.78, DOGE −1.10 ≈ breakeven;
+  BNB −2.86, ETH −4.28, BTC −4.71 (RR6/touch top-5 %), SOL −5.02 stay negative.
+
+**What maximizes XGBoost's maker alpha (surface shape):** `touch ≫ queue` (first-touch passive fill
+far less adverse than queue-clear) · **extreme selectivity** (A-top-0.2 %) · **hold-60s > RR** (except
+BTC favours wider RR6). The **binding constraint on net is adverse selection on passive maker fills**,
+not direction skill (which is real) nor vol predictability (strong everywhere).
+
+**Caveat (do not deploy on these magnitudes):** val≠test (Optuna on val) and the A-gate threshold are
+train-only/honest, BUT the per-symbol argmax is a MAX over ~30 cells (cfg × qm × selectivity) **on the
+test surface** → selection-over-conditions optimism. LTC/LINK net-positive cells are **CANDIDATE
+CONDITIONS for OOS (walk-forward) confirmation, not a deploy verdict** (§5 gate is a separate question).
+Artifacts: `research_runs/xgb_maker/{A_{SYM},B_pool}.{json,xgb.json}`, `preds_{SYM}.npz`, `MANIFEST.json`,
+`SURFACE.json`; scripts `scripts/subs60_{makerlabel_build,xgb_makerlabel,xgb_surface,vol_inventory}.py`.
+
+**OOS WALK-FORWARD CONFIRMATION (exp `xgb-20260531_makerlabels_walkforward`, 4 folds, op-point
+cfg/qm chosen on VAL@A-top1 % then measured on a later disjoint TEST; HPs reused).** The single-split
+argmax **does NOT survive**. Mean test-EV by A-top 5/2/1/0.5/0.2 %: BTC −4.9/−5.0/−5.1/−5.3/−5.4 ·
+ETH −5.1/../−5.7 · BNB −5.2/../−6.3 · SOL −5.4/../−5.8 · DOGE −5.9/../−3.1 · XRP −5.5/../−3.4 ·
+LTC −5.3/../−2.7 — **7/8 symbols stable NET-NEGATIVE every fold** (dir-acc ≈ 0.50–0.51). **LINK** appears
+positive (+6.8 @top1 %, +23.9 @top0.2 %) but it is **driven entirely by fold 0** (earliest OOS window:
++38.9/+95.3 bp, n 1896/375) while folds 1/2/3 are ≈0/negative → a single-fold **regime spike, not a
+stable edge** (LINK = least data, 244 d incl. 119 d outage). **Confirmatory verdict:** the maker-realistic
+XGBoost cascade does **not** confirm a deployable positive maker edge OOS; the single-split +2.0/+1.2 bp
+was selection-over-conditions optimism + small-sample top-0.2 % noise. Binding loss = **adverse selection
+on PASSIVE MAKER fills**, not model quality (vol-AUC 0.82–0.86 / dir-acc 0.66–0.77 are real). Corroborates
+§14 (passive maker flips the edge negative; positive only with TAKER entry, +5.6 bp). **Next lever is
+EXECUTION (taker / alt mechanics), not more boosting.** Result `research_runs/xgb_maker/WALKFORWARD.json`,
+script `scripts/subs60_xgb_walkforward.py`.
