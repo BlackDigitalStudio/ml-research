@@ -657,3 +657,64 @@ memory + parallel-scan strengths are wasted at short (sec–min) context + small
 n_eff, and the broken small-d kernel forced an oversized d=256. *Complexity is an
 arena, not an edge in itself.* Artifacts: `gru_models/*_m2.best.pt` (+ `_gru`),
 modal vol `hd2-cache:/results/sub60/*_m2.json`.
+
+
+## 14. 2026-05-29 — GRU (sized-to-n_eff) = the chosen sub-60s cell, + downstream economics
+
+**Context**: the §13 head-to-head picked the **GRU** over Mamba2. This section
+records the GRU itself (the deployable model) and everything we ran on its
+signal: Stage-2 executed-payoff fine-tune, grid_sim R:R per symbol, the HUSDC
+realistic maker-fill sim, and an 18-policy entry sweep. Ledger
+`hd2-20260529_gru_cascade` (HD2, exploratory). Same data/cache/split as §13.
+
+**Model (best-val, purged day-split, test newest ~32 %)** — 2×2 cascade, GRU
+cells sized to n_eff (**A 263 k**: d128/n2 + d64/n1; **B 70.7 k**: d64/n2 + d32/n1):
+- **A (vol-gate, per-symbol)** vol-AUC **0.782 / 0.818 / 0.742**
+  (DOGE/ETH/LINK), prec@0.2 % **0.623 / 0.690 / 0.675**, best_ep
+  4/4/5 of 5 (still improving — no overfit, unlike Mamba2's ep0 peak).
+- **B (direction, pooled top-3, non-flat, IC objective)** cap@10 % **+4.68 bp**,
+  cap@20 % **+4.12 bp**, dir-acc@10 % **0.612**, best_ep 6 (n_test 41,048).
+  GRU beats model-free + OBI on direction; this is the binding head.
+
+**Downstream economics on the GRU signal (all sub-60s, MAKER-first fees):**
+
+1. **grid_sim TP/SL @MID-entry** (optimistic; per-symbol R:R discovery), top-0.2 %
+   gate, net@maker-maker: **DOGE** RR 22.8 (rails to grid corner) −1.13 bp WR 0.16;
+   **ETH** RR 1.78 −1.39 WR 0.55; **LINK** RR 6.45 −1.02 WR 0.55. → optimal R:R is
+   per-symbol (ETH≈hold-like wide, LINK≈5–13, DOGE corner) — confirms Stage-2 must
+   be per-symbol. All net-negative @maker-maker on the broad gate.
+
+2. **Stage-2 executed-payoff fine-tune (B2, ETH, hold)** — differentiable
+   `L=−E[σ(z)·PL+(1−σ(z))·PS]`, early-stop best_ep 17/22: exec_gross **+4.98 bp**,
+   net@mm **+0.98**, WR 0.615; by |logit| conviction net@mm **+6.23/+7.60/+9.00/
+   +9.45 bp** at top-20/10/5/2 %. The payoff objective + σ(z) recalibration fixed
+   the direction-selector (base |B| was a dead selector).
+
+3. **Realistic maker entry (HUSDC maker-sim, ETH 116 d, 96,996 samples)** — resting
+   limit filled against realized taker flow (touch/queue/MISS; adverse selection
+   emerges from the path). HOLD-60s gross **−1.97 bp** (touch, fill 0.95) / **−2.44**
+   (queue, fill 0.91), WR **0.45**. Passive entry **FLIPS the directional edge
+   negative** — you fill on adverse moves and miss the favorable runaways. The
+   +6…+9 bp "maker-maker" of (2) assumed the fill and ignored adverse selection.
+
+4. **Entry-policy sweep (18 policies)** — taker > maker everywhere. At top-0.05 %
+   conviction: **taker** gross **+5.64 bp** (WR 0.52), maker_off0 +4.42,
+   cancel-on-toxic_p90 +2.73 (no help — adverse is smeared, not in rare bursts, so
+   chasing it via cancellation/colocation is not worth it). Broad gate all negative.
+
+**Argmax / takeaway**: the **GRU is the right sub-60s model** (beats model-free and
+Mamba2 at 4–15× fewer params; A no-overfit, B the directional lever). On the
+**deployable surface**, net>0 appears only under **high conviction + TAKER entry**
+(or 0 %-maker/VIP0) — **passive maker entry structurally loses to adverse
+selection**, and that is robust across 116 days and all 18 policies.
+
+**⚠️ CAVEAT (do not deploy on these magnitudes)**: the positive fine-tune / grid /
+policy numbers carry **test=val inflation** — best-val/early-stop AND the A-gate
+threshold were both chosen on the *same* test set (day-clustered t≈12–21 is
+implausibly high). They are **upper bounds**. Pre-deploy requires the agreed
+**60-20-20 (or CPCV / walk-forward) with val ≠ test**, plus the user's daily
+rolling-retrain (the static far-split is a pessimistic floor; the §12/§13 half-split
+decay is largely train-staleness, removed by daily retrain). Artifacts:
+`gru_models/*.best.pt`, `research_runs/{gru_gridsim,gru_finetune,gru_makergrid}/`;
+scripts `scripts/subs60_{gru_gridsim,maker_grid,entry_policy_sweep}.py`,
+`scripts/mamba2_cascade.py` (B2 objective).
