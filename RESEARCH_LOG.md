@@ -783,3 +783,38 @@ on PASSIVE MAKER fills**, not model quality (vol-AUC 0.82–0.86 / dir-acc 0.66�
 §14 (passive maker flips the edge negative; positive only with TAKER entry, +5.6 bp). **Next lever is
 EXECUTION (taker / alt mechanics), not more boosting.** Result `research_runs/xgb_maker/WALKFORWARD.json`,
 script `scripts/subs60_xgb_walkforward.py`.
+
+**RECENCY / regime-drift diagnostic (exp `xgb-20260531_makerlabels_recency`).** Tested the hypothesis
+that the val→test degradation is **market drift** (training recency), not HP overfit: HP + #rounds +
+per-symbol vol-threshold held **FIXED** (reused from the main run), only the training WINDOW varied,
+measured on the SAME clean test [0.68,1.0). Mean over 8 syms — old10[0,0.0975] / val10[0.5525,0.65]
+(equal size, isolates recency) / train[0,0.5525] / trainval[0,0.65]: A-AUC **0.835 / 0.838 / 0.846 /
+0.847**, prec@0.2 % 0.463/0.453/0.536/0.534, cascEV@1 % −6.17/−6.54/−5.12/−5.10. **Hypothesis NOT
+supported:** at equal size the most-recent slice (val10, adjacent to test) ≈ the oldest (old10, ~0.58
+history away) — mean ΔAUC +0.003, within noise, sign-inconsistent per symbol (LINK +0.012 .. DOGE −0.006);
+no consistent maker-EV recency gain. **DATA VOLUME is what helps** (train/trainval beat both 10 % windows
+on every symbol; AUC +0.01–0.03, prec 0.53 vs 0.46); adding recent val to train (trainval vs train) ≈ 0.
+⇒ the model trained on year-old data generalizes to the distant test ≈ as well as on recent data; the
+val>test gap is **operating-point selection optimism (confirmed via walk-forward) + volume/coverage, NOT
+non-stationarity**. Practical: **daily rolling-retrain (the §14 staleness fix) likely helps THIS model
+little — volume > freshness.** Caveat: maker-EV is net-negative everywhere (adverse-selection floor) so
+AUC/prec are the cleaner read; single seed. Result `research_runs/xgb_maker/RECENCY.json`, script
+`scripts/subs60_xgb_recency.py`.
+
+**RECENCY v2 — CORRECTS the diagnostic above (exp `xgb-20260531_makerlabels_recency2`, supersedes v1).**
+v1 was confounded (user catch): its large windows were START-anchored (so "volume" ≡ "old data" — it
+never gave the model a large RECENT window; the only recency-isolating compare was at 10 %, too small),
+and it measured B's dir-acc CROSS-CONFIG (trained qm=1, evaluated touch → ~0.49 noise, masking B's skill).
+v2 fixes both: three **EQUAL-SIZE 45 % windows** sliding old→recent (`old_half`[0,0.45] / `mid_half`[0.10,0.55]
+/ `recent_half`[0.20,0.65]), same fixed HP/rounds/threshold, same clean test; B measured on its **own qm=1
+config** (rank-IC + dir-acc). Mean over 8 syms old→recent: A-AUC **0.845/0.846/0.847 (FLAT)**, A-prec@.2 %
+0.527/0.535/0.531 (flat); B-rankIC −0.058/−0.053/−0.051 (improving), **B-dir-makerside@10 % 0.694/0.700/0.703
+(improving)**, cascEV@1 % −7.04/−5.80/−5.64 (improving). **Per-model verdict: recency is MODEL-SPECIFIC —
+the VOL gate (A) is time-STATIONARY (no recency, +0.001–0.004/sym), the DIRECTION head (B) is mildly
+NON-stationary (recency helps: dir-on-target up on 6/8, mean +0.009; rank-IC up 7/8; cascEV less-negative
+on 6/8, +1.5–3.4 bp, LINK −6.1→−2.7) — though all maker-EV stays net-negative (adverse floor).** So the
+v1 line "volume not recency" is **revised**: a real but modest drift component exists, on B only ⇒
+rolling-retrain helps the direction head a little, not the vol gate, and won't flip maker-EV positive.
+Side-finding: B's side vs RAW price sign is <0.5 / rank-IC<0 → the maker-profitable side anti-correlates
+with the price move (crystallized adverse selection). Result `research_runs/xgb_maker/RECENCY2.json`,
+script `scripts/subs60_xgb_recency2.py`.
