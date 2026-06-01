@@ -38,8 +38,8 @@ tar -xzf /tmp/chronos.tar.gz -C "$REPO"
 rm -rf /tmp/chronos-deploy && mkdir -p /tmp/chronos-deploy
 tar -xzf /tmp/chronos-deploy.tar.gz -C /tmp/chronos-deploy
 # Defensive: strip any CRLF that survived a Windows-built tarball — a CRLF
-# shebang would break the helper scripts on Linux.
-sed -i 's/\r$//' /tmp/chronos-deploy/*.sh /tmp/chronos-deploy/*.service /tmp/chronos-deploy/*.timer 2>/dev/null || true
+# shebang/path would break scripts and the logrotate config on Linux.
+sed -i 's/\r$//' /tmp/chronos-deploy/* 2>/dev/null || true
 
 # overlay project entrypoint at repo root
 install -m 0644 /tmp/chronos-deploy/chronos_run.py "$REPO/chronos_run.py"
