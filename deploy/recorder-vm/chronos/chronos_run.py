@@ -7,8 +7,9 @@ upstream ``scripts/record_data.py`` hard-codes L100 + Coinbase/Deribit):
   LTC, SOL, XRP) on **both USDT and USDC** margin = 16 contracts — **L20**
   depth snapshots (parity with Cryptolake/Tardis ``raw/book``), maintained
   book + REST reconcile, ``@forceOrder`` liquidations, derivatives poll.
-- Cross-venue trades: Bybit, OKX, Bitget, Gate.io on BTC only (bonus data
-  beyond Cryptolake, which is Binance-only — the set we already ran).
+- Cross-venue trades: Bybit, OKX, Bitget, Gate.io — all 8 base coins
+  (USDT perps) on each venue (bonus beyond Cryptolake, which is Binance-only).
+  Enables same-asset cross-exchange lead-lag (e.g. Bybit DOGE -> Binance DOGE).
 - Coinbase / Deribit deliberately OFF — out of the Cryptolake-equivalent
   scope (and Deribit ``.raw`` would need API keys).
 
@@ -79,11 +80,14 @@ async def _main() -> None:
             derivatives_poll_interval_sec=15.0,
         )
 
-    # Cross-venue trades (our existing set).
-    gateway.add_bybit_trades("BTCUSDT")
-    gateway.add_okx_trades("BTC-USDT-SWAP")
-    gateway.add_bitget_trades("BTCUSDT")
-    gateway.add_gateio_trades("BTC_USDT")
+    # Cross-venue trades — all 8 base coins (USDT perps) on each venue.
+    # Verified present on every venue via their REST instrument lists
+    # (2026-06-01). One WS connection per (venue, symbol) = 8x4 = 32.
+    for coin in BASE_COINS:
+        gateway.add_bybit_trades(f"{coin}USDT")
+        gateway.add_okx_trades(f"{coin}-USDT-SWAP")
+        gateway.add_bitget_trades(f"{coin}USDT")
+        gateway.add_gateio_trades(f"{coin}_USDT")
     # Coinbase / Deribit intentionally omitted.
 
     await gateway.start()
