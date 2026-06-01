@@ -1,0 +1,13 @@
+# Installed to /etc/logrotate.d/chronos by startup.sh.
+# systemd writes the log with append: and holds the fd open, so use
+# copytruncate (rotate by copying then truncating in place). size-based so an
+# error burst can't balloon the log between daily cron runs.
+/home/scalper/crypto-market-recorder/logs/chronos.log /var/log/chronos-startup.log {
+    size 200M
+    rotate 5
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

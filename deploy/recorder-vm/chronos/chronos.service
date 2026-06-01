@@ -1,13 +1,22 @@
 [Unit]
-Description=Chronos recorder-v2 (project) — BTC/ETH L20 + cross-venue
+Description=Chronos recorder-v2 (project) — 16 Binance contracts L20 + cross-venue
 After=network-online.target
 Wants=network-online.target
+# Never give up restarting. The default (5 starts / 10s -> permanent failure)
+# could strand the recorder forever after a transient crash burst; for a
+# multi-year 24/7 feed we always want it back.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=scalper
 WorkingDirectory=/home/scalper/crypto-market-recorder
 EnvironmentFile=/home/scalper/crypto-market-recorder/config.env
+# jemalloc curbs glibc heap fragmentation under the pandas/pyarrow + many
+# short-lived buffers workload (slow RSS creep over long runs). Tolerant if
+# the lib is missing — the loader just warns and continues on glibc malloc.
+Environment=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+Environment=MALLOC_ARENA_MAX=2
 ExecStart=/home/scalper/crypto-market-recorder/venv/bin/python /home/scalper/crypto-market-recorder/chronos_run.py
 Restart=always
 RestartSec=5

@@ -16,7 +16,9 @@ REPO="/home/${SVCUSER}/crypto-market-recorder"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y python3-venv python3-pip cloud-guest-utils
+# libjemalloc2: heap-fragmentation control (LD_PRELOAD in the unit).
+# logrotate: ships in base image but ensure present.
+apt-get install -y python3-venv python3-pip cloud-guest-utils libjemalloc2 logrotate
 
 # Grow the root filesystem if the boot disk was resized (idempotent no-op
 # when already at full size). Root is /dev/sda1 on these pd-standard images.
@@ -64,6 +66,9 @@ install -m 0755 /tmp/chronos-deploy/gcs_sync.sh  /usr/local/bin/chronos-gcs-sync
 install -m 0755 /tmp/chronos-deploy/watchdog.sh  /usr/local/bin/chronos-watchdog
 install -m 0755 /tmp/chronos-deploy/retention.sh /usr/local/bin/chronos-retention
 sed -i "s|@BUCKET@|${BUCKET}|g" /usr/local/bin/chronos-gcs-sync
+
+# --- log rotation (chronos.log + startup log grow unbounded otherwise) ---
+install -m 0644 /tmp/chronos-deploy/chronos.logrotate /etc/logrotate.d/chronos
 
 # --- systemd units ---
 install -m 0644 /tmp/chronos-deploy/chronos.service             /etc/systemd/system/

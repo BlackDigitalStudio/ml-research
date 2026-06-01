@@ -21,7 +21,7 @@ tar -czf /tmp/chronos-deploy.tar.gz -C "$HERE" \
   chronos-gcs-sync.service chronos-gcs-sync.timer \
   chronos-watchdog.service chronos-watchdog.timer \
   chronos-retention.service chronos-retention.timer \
-  gcs_sync.sh watchdog.sh retention.sh
+  gcs_sync.sh watchdog.sh retention.sh chronos.logrotate
 gcloud storage cp /tmp/chronos-deploy.tar.gz "gs://$BUCKET/_bootstrap/chronos-deploy.tar.gz"
 
 echo "3/4 point VM startup-script at the chronos variant"
