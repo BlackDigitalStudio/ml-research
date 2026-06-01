@@ -9,7 +9,8 @@ DATA="/home/scalper/crypto-market-recorder/data"
 RETENTION_DAYS=3
 
 [[ -d "$DATA" ]] || exit 0
+# Prune old data files ONLY. Do NOT delete empty dirs — sparse streams
+# (e.g. liquidation) are legitimately empty and their dirs must persist.
 n=$(find "$DATA" -type f \( -name '*.parquet' -o -name '*.jsonl.gz' \) -mtime +${RETENTION_DAYS} -print -delete 2>/dev/null | wc -l)
-find "$DATA" -type d -empty -delete 2>/dev/null || true
 [[ "$n" -gt 0 ]] && logger -t chronos-retention "pruned ${n} files older than ${RETENTION_DAYS}d"
 exit 0
