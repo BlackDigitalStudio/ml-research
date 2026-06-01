@@ -38,10 +38,13 @@ TO_TICKS = 563         # 60s timeout at ~106ms/tick
 ENTRY_WIN = 120        # max forward ticks to wait for a maker fill before MISS (~12s)
 WINDOW = 50            # build_samples lookback window for X_lob (unused here but required)
 MAKER_RT_FEE_PCT = 0.04  # standard Binance maker round-trip (0.02%/side); NO VIP tier exists
-# label configs: hold-60s (pure timeout, the maker analog of rH60) + two R:R for context
-CFGS = [{"tp": 50.0, "sl": 50.0, "to": TO_TICKS, "par": False, "tr": False},   # hold-60s
-        {"tp": 0.30, "sl": 0.05, "to": TO_TICKS, "par": False, "tr": False},   # RR6 (sub60 argmax)
-        {"tp": 0.20, "sl": 0.10, "to": TO_TICKS, "par": False, "tr": False}]   # RR2
+# label configs: hold-60s (pure timeout, maker analog of rH60) + a FINE per-symbol R:R discovery grid
+# (SL x TP, RR in [0.9,13] -> no inverted/garbage configs; grid_sim sweeps all of them cheaply per day).
+_SLS = [0.05, 0.08, 0.10, 0.13]
+_TPS = [0.10, 0.13, 0.16, 0.20, 0.26, 0.34, 0.45, 0.60]
+CFGS = ([{"tp": 50.0, "sl": 50.0, "to": TO_TICKS, "par": False, "tr": False}] +          # hold-60s
+        [{"tp": tp, "sl": sl, "to": TO_TICKS, "par": False, "tr": False}
+         for sl in _SLS for tp in _TPS if 0.9 <= tp / sl <= 13.0])                        # R:R grid (32 cfgs)
 bk = storage.Client(project=PROJ).bucket(BUCKET)
 
 NAMES = ([f"x{c}" for c in range(64)] +
@@ -241,9 +244,12 @@ def main():
     ap.add_argument("--max-samples", type=int, default=2000000)  # high -> our adaptive step wins (no auto-override)
     ap.add_argument("--queue-mults", type=float, nargs="+", default=[0.0, 1.0])
     ap.add_argument("--match-tol-ms", type=float, default=2500.0)
+    ap.add_argument("--out-sub", default="maker_labels")    # output subdir (use a distinct one to not clobber)
     ap.add_argument("--probe", action="store_true")         # don't upload; verbose per-day
     a = ap.parse_args()
+    global OUT; OUT = f"research_runs/{a.out_sub}"
     t0 = time.time()
+    log(f"[out={OUT}] [cfgs={len(CFGS)}] [queue_mults={a.queue_mults}]")
     log(f"[load BTC mid for btc-lead]"); bt, bm = load_btc_mid(8, a.max_days if a.probe else None)
     log(f"[BTC: {len(bt)} ticks]")
     metas = []

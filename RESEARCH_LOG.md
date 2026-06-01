@@ -834,3 +834,30 @@ stays net-negative in both** (adverse floor unbroken by recency or fresh tuning)
 problem is EXECUTION (adverse selection), not training-window or tuning.** Single seed; A operating-point
 (prec) not perfectly apples-to-apples (thresholds re-derived per window), AUC is. Result
 `research_runs/xgb_maker_3mo/SURFACE.json`, scripts `scripts/subs60_xgb_{makerlabel(--train-days),surface(--sub)}.py`.
+
+**DOUBLE-FILTER (A∧B confidence) + 1-trade/symbol/day budget (exp `xgb-20260531_makerlabels_dailybudget`,
+OFFLINE on the main-run test preds).** Combined confidence = `pct_rank(pA)·pct_rank(|pB−0.5|)` (both
+A vol-gate AND B direction must be confident); budget = per (symbol,day) trade the single max-combined
+window, B's side, executed net maker EV (hold-60s). **Two levels:** (1) **DEPLOY-HONEST — 1 trade EVERY
+day** (per-day pick uses only model outputs, no test-selection): pooled **−0.77 bp** (touch) / −1.27 (queue)
+— **near break-even and a big lift over the A-only top-1 % cascade (~−5 bp)**; per-symbol(touch,1/day):
+LTC +4.7, LINK +3.1, SOL +0.9 positive, ETH −0.4, BTC −1.4, BNB −3.9, DOGE −4.0, XRP −5.1 (WR 0.34–0.48,
+few big hold-60 s tail wins). The A-and-B filter + one-window-per-day selection lifts per-trade quality
+far above the A-only cascade. (2) **Cross-day selectivity sweep** (keep top f % of days by combined score)
+is strongly positive + monotone: pooled **+4.0 (top50 %) / +14.1 (top25 %) / +30.9 bp (top10 %)** touch,
+6/8 syms rising steeply (LTC +71.7, DOGE +54, LINK +37.9 @top10 %) — **BUT this selects the best days ON
+TEST → selection-over-conditions optimism** (same failure mode the walk-forward demolished for the
+argmax; n@top10 % ≈ 11 trades/sym). So (2) is **PROMISING-BUT-UNCONFIRMED** — needs OOS (day-selectivity
+threshold chosen on val, measured on disjoint test). Net: the double-filter + daily budget materially
+improves the deployable maker EV to ~break-even, and the confidence-ranked-days gradient hints at real
+signal worth an OOS test — **no positive maker edge is CONFIRMED until that OOS check passes.** Result
+`research_runs/xgb_maker/DAILYBUDGET.json`, script `scripts/subs60_xgb_dailybudget.py`.
+
+**EXPLICIT 2D confidence-window grid (exp `xgb-20260531_makerlabels_dailygrid`).** Strict `pA in top-qA %
+AND |pB−0.5| in top-qB %`, 1 trade/sym/day, on test. Pooled mean EV(bp) rises as BOTH tighten, and
+**A-tightness is the BIGGER lever than B-tightness**: A1 %×B10 % = **+20.0** > A10 %×B1 % = **+13.0**;
+corner A1 %×B1 % = +23.3 bp but only ~0.11 trd/day (~13 trades/sym). touch ≈ queue (within ~0.5 bp →
+robust). Reading: tightening the predictable+stationary VOL gate (A) beats tightening the weaker,
+adverse-selection-bound DIRECTION (B). **Same TEST-selection caveat — the grid is MAP coordinates, not a
+confirmed edge** (honest deploy = a fixed (qA,qB) cell chosen on val, measured on disjoint test; OOS
+pending). Result `research_runs/xgb_maker/DAILYGRID.json`, script `scripts/subs60_xgb_dailygrid.py`.
