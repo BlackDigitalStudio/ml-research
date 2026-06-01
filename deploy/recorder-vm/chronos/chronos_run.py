@@ -3,10 +3,10 @@
 A thin wrapper over ``chronos.Gateway`` tuned for THIS project (the
 upstream ``scripts/record_data.py`` hard-codes L100 + Coinbase/Deribit):
 
-- Binance USDT-M futures — the **8 Cryptolake symbols** (BNB, BTC, DOGE,
-  ETH, LINK, LTC, SOL, XRP) — **L20** depth snapshots (parity with
-  Cryptolake/Tardis ``raw/book``), maintained book + REST reconcile,
-  ``@forceOrder`` liquidations, derivatives poll.
+- Binance USDⓈ-M futures — the 8 base coins (BNB, BTC, DOGE, ETH, LINK,
+  LTC, SOL, XRP) on **both USDT and USDC** margin = 16 contracts — **L20**
+  depth snapshots (parity with Cryptolake/Tardis ``raw/book``), maintained
+  book + REST reconcile, ``@forceOrder`` liquidations, derivatives poll.
 - Cross-venue trades: Bybit, OKX, Bitget, Gate.io on BTC only (bonus data
   beyond Cryptolake, which is Binance-only — the set we already ran).
 - Coinbase / Deribit deliberately OFF — out of the Cryptolake-equivalent
@@ -36,10 +36,12 @@ logger = logging.getLogger("chronos")
 
 DEPTH_LEVELS = 20  # L20 — Cryptolake / Tardis raw/book parity
 
-# The 8 Cryptolake symbols (Tardis -USDT-PERP -> Binance USDT-M futures).
-BINANCE_SYMBOLS = (
-    "BNBUSDT", "BTCUSDT", "DOGEUSDT", "ETHUSDT",
-    "LINKUSDT", "LTCUSDT", "SOLUSDT", "XRPUSDT",
+# The 8 Cryptolake base coins, recorded on BOTH USDT and USDC margin.
+# All 16 are TRADING PERPETUAL on Binance USDⓈ-M (fapi) — verified via
+# exchangeInfo 2026-06-01. USDT first (Cryptolake parity), then USDC.
+BASE_COINS = ("BNB", "BTC", "DOGE", "ETH", "LINK", "LTC", "SOL", "XRP")
+BINANCE_SYMBOLS = tuple(
+    f"{coin}{quote}" for quote in ("USDT", "USDC") for coin in BASE_COINS
 )
 
 
