@@ -861,3 +861,28 @@ robust). Reading: tightening the predictable+stationary VOL gate (A) beats tight
 adverse-selection-bound DIRECTION (B). **Same TEST-selection caveat — the grid is MAP coordinates, not a
 confirmed edge** (honest deploy = a fixed (qA,qB) cell chosen on val, measured on disjoint test; OOS
 pending). Result `research_runs/xgb_maker/DAILYGRID.json`, script `scripts/subs60_xgb_dailygrid.py`.
+
+**PER-SYMBOL R:R CONFIG-AXIS + per-symbol Optuna-tuned B (exp `xgb-20260601_makerlabels_b2grid_optb`).**
+Question raised by the user: does a per-symbol-tuned direction head B let some per-symbol R:R (TP/SL)
+config beat hold-60s OOS? Per symbol: train A + Stage-1 B(hold) → select `c*` = argmax VAL daily-budget
+(10/day) net maker-EV over a **fine 94966-config TP/SL grid** (`grid_sim` on-demand from saved maker
+paths) → retrain Stage-2 B on `c*` nets → eval hold vs `c*` on disjoint TEST. B HPs Optuna-tuned
+per-symbol (`b_trials=25`, inner-val AUC nested in gate_train; main val/test untouched).
+**CONFIG-AXIS surface — net maker-EV(bp) argmax over the config axis is HOLD-60s:** pooled TEST hold
+**−1.80** vs `c*` **−4.07**. Per-symbol (test 1bud, hold→`c*` [config]): BNB −5.31→−4.22 [RR1.7],
+BTC −2.31→−3.77 [RR0.5], DOGE +0.11→**−9.11** [RR1.9], ETH −1.18→−0.49 [c*=hold], LINK −0.28→−3.55
+[c*=hold], LTC +1.17→**−5.84** [RR0.5], SOL −1.78→−1.12 [c*=hold], XRP −4.80→−4.50 [RR2.7]. **Shape:**
+on 3/8 (ETH/LINK/SOL) the val-grid itself picks `c*`=hold; where it commits to a real R:R the OOS is
+**asymmetric** — the rare R:R "win" is marginal and still deep-negative (BNB +1.1, XRP +0.3) while R:R
+losses are large (DOGE −9.2, LTC −7.0; wide-SL `c*` carries a fat left tail the val-selection
+underestimates). So per-symbol-tuned B does **not** lift R:R above hold-60s OOS — consistent with the
+walk-forward row and the (un-finished) reused-HP baseline grid (BNB/BTC/DOGE `c*`=hold or `c*`<hold on
+test). Binding constraint stays **adverse selection on passive maker fills**; next lever = **EXECUTION**
+(taker entry §14 +5.6 bp; realistic resting-maker exit), not R:R/HP tuning. **Method note:** this grid
+models entry-MISS + adverse SL-knockout absent in the §14 GRU grid, legitimately inverting the old
+big-TP/small-SL preference toward **wide SL** (`c*` SL pins near the 0.40 grid ceiling, e.g. BNB 0.391);
+the residual optimism is the **touch-modeled TP exit** (tight TP fills too easily) — so neither grid's
+argmax R:R is ground truth, and the robust read is OOS = hold. Optuna is **not** at fault (it maximises
+inner-val AUC as designed; its window-overfit propagates into the downstream `c*` selection, e.g. DOGE
+val RR1.9 edge +0.26 bp → test −9.2 bp — expected optimizer behaviour). Result
+`research_runs/maker_labels_rr/B2GRID_RESULT_optb.json`, script `scripts/subs60_xgb_b2_grid.py`.
