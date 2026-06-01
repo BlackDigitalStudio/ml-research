@@ -1,0 +1,4 @@
+# Installed to /etc/sudoers.d/chronos-oncall (0440, validated with visudo -c).
+# Lets the on-call agent (running as scalper) manage ONLY the chronos service
+# and read unit logs — no general root. Everything else stays unprivileged.
+scalper ALL=(root) NOPASSWD: /usr/bin/systemctl restart chronos.service, /usr/bin/systemctl start chronos.service, /usr/bin/systemctl stop chronos.service, /usr/bin/systemctl status chronos.service, /usr/bin/systemctl is-active chronos.service, /usr/bin/journalctl -u chronos.service *, /usr/bin/journalctl -u chronos.service

@@ -61,11 +61,29 @@ CHRONOS_HEALTH_FILE=/home/${SVCUSER}/chronos.health
 EOF
 chown "$SVCUSER:$SVCUSER" "$REPO/config.env"
 
+# --- on-call agent runtime: Node + Claude Code CLI (idempotent) ---
+# Subscription creds live at /home/scalper/.claude/.credentials.json (placed
+# out-of-band, NOT in this tarball). If absent, the on-call agent simply can't
+# authenticate — harmless; recording is unaffected.
+if ! command -v claude >/dev/null 2>&1; then
+  apt-get install -y nodejs npm
+  npm install -g @anthropic-ai/claude-code || echo "WARN: claude CLI install failed"
+fi
+
 # --- helper scripts ---
 install -m 0755 /tmp/chronos-deploy/gcs_sync.sh  /usr/local/bin/chronos-gcs-sync
 install -m 0755 /tmp/chronos-deploy/watchdog.sh  /usr/local/bin/chronos-watchdog
 install -m 0755 /tmp/chronos-deploy/retention.sh /usr/local/bin/chronos-retention
+install -m 0755 /tmp/chronos-deploy/oncall.sh    /usr/local/bin/chronos-oncall
+install -m 0644 /tmp/chronos-deploy/oncall-charter.md /usr/local/share/chronos-oncall-charter.md
 sed -i "s|@BUCKET@|${BUCKET}|g" /usr/local/bin/chronos-gcs-sync
+
+# on-call sudoers (scoped to chronos.service mgmt) — validate before installing
+if visudo -c -f /tmp/chronos-deploy/chronos-oncall.sudoers >/dev/null 2>&1; then
+  install -m 0440 /tmp/chronos-deploy/chronos-oncall.sudoers /etc/sudoers.d/chronos-oncall
+else
+  echo "WARN: oncall sudoers failed visudo check — not installed"
+fi
 
 # --- log rotation (chronos.log + startup log grow unbounded otherwise) ---
 install -m 0644 /tmp/chronos-deploy/chronos.logrotate /etc/logrotate.d/chronos
@@ -78,12 +96,15 @@ install -m 0644 /tmp/chronos-deploy/chronos-watchdog.service    /etc/systemd/sys
 install -m 0644 /tmp/chronos-deploy/chronos-watchdog.timer      /etc/systemd/system/
 install -m 0644 /tmp/chronos-deploy/chronos-retention.service   /etc/systemd/system/
 install -m 0644 /tmp/chronos-deploy/chronos-retention.timer     /etc/systemd/system/
+install -m 0644 /tmp/chronos-deploy/chronos-oncall.service      /etc/systemd/system/
+install -m 0644 /tmp/chronos-deploy/chronos-oncall.timer        /etc/systemd/system/
 
 systemctl daemon-reload
 systemctl enable --now chronos.service
 systemctl enable --now chronos-gcs-sync.timer
 systemctl enable --now chronos-watchdog.timer
 systemctl enable --now chronos-retention.timer
+systemctl enable --now chronos-oncall.timer
 # Pick up an edited entrypoint / symbol set on re-run.
 systemctl restart chronos.service
 

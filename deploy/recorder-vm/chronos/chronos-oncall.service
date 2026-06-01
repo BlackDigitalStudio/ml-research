@@ -1,0 +1,9 @@
+[Unit]
+Description=Chronos on-call medic (wakes a headless Claude on incidents)
+
+[Service]
+Type=oneshot
+User=scalper
+# Long enough for one agent run (RUN_TIMEOUT in the script is 600s).
+TimeoutStartSec=900
+ExecStart=/usr/local/bin/chronos-oncall
