@@ -14,7 +14,11 @@ RestartSec=5
 # Graceful shutdown: the entrypoint handles SIGINT -> flush + compact.
 KillSignal=SIGINT
 TimeoutStopSec=30
-MemoryMax=2G
+# 16 symbols x maintained L1000 books + per-stream buffers + gzip raw-archive
+# writers don't fit in 2G (OOM-restart loop observed 2026-06-01). The VM has
+# 8G; give chronos 6G hard / 5.5G soft and leave room for the OS + GCS sync.
+MemoryHigh=5500M
+MemoryMax=6G
 StandardOutput=append:/home/scalper/crypto-market-recorder/logs/chronos.log
 StandardError=append:/home/scalper/crypto-market-recorder/logs/chronos.log
 
