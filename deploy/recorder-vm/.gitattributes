@@ -2,4 +2,5 @@
 *.sh        text eol=lf
 *.service   text eol=lf
 *.timer     text eol=lf
+*.py        text eol=lf
 # status.ps1 stays CRLF (runs on Windows) — default handling is fine.

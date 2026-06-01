@@ -1,0 +1,8 @@
+[Unit]
+Description=Mirror Chronos data to GCS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/chronos-gcs-sync

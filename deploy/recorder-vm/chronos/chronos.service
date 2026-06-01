@@ -1,0 +1,22 @@
+[Unit]
+Description=Chronos recorder-v2 (project) — BTC/ETH L20 + cross-venue
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=scalper
+WorkingDirectory=/home/scalper/crypto-market-recorder
+EnvironmentFile=/home/scalper/crypto-market-recorder/config.env
+ExecStart=/home/scalper/crypto-market-recorder/venv/bin/python /home/scalper/crypto-market-recorder/chronos_run.py
+Restart=always
+RestartSec=5
+# Graceful shutdown: the entrypoint handles SIGINT -> flush + compact.
+KillSignal=SIGINT
+TimeoutStopSec=30
+MemoryMax=2G
+StandardOutput=append:/home/scalper/crypto-market-recorder/logs/chronos.log
+StandardError=append:/home/scalper/crypto-market-recorder/logs/chronos.log
+
+[Install]
+WantedBy=multi-user.target

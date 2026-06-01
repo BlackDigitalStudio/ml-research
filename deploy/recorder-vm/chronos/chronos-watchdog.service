@@ -1,0 +1,6 @@
+[Unit]
+Description=Chronos liveness watchdog
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/chronos-watchdog

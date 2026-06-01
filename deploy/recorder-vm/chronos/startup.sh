@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# GCE startup-script for the Chronos (recorder-v2) deployment. Replaces the
+# legacy scalper-bot recorder on the same VM. Idempotent (runs on every boot
+# and on-demand via `google_metadata_script_runner startup`).
+#
+# Pulls two tarballs from GCS (built by deploy.sh):
+#   _bootstrap/chronos.tar.gz        — crypto-market-recorder repo (the app)
+#   _bootstrap/chronos-deploy.tar.gz — project overlay (entrypoint, units, scripts)
+set -euo pipefail
+exec > >(tee -a /var/log/chronos-startup.log) 2>&1
+echo "=== chronos startup $(date -u) ==="
+
+BUCKET="recorder-data-asia-0998ac51"
+SVCUSER="scalper"
+REPO="/home/${SVCUSER}/crypto-market-recorder"
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y python3-venv python3-pip
+
+id -u "$SVCUSER" &>/dev/null || useradd -m -s /bin/bash "$SVCUSER"
+
+# --- stop the legacy recorder (if present) ---
+systemctl disable --now scalper-recorder.service scalper-gcs-sync.timer scalper-watchdog.timer 2>/dev/null || true
+
+# --- fetch app + overlay ---
+mkdir -p "$REPO"
+gcloud storage cp "gs://${BUCKET}/_bootstrap/chronos.tar.gz" /tmp/chronos.tar.gz
+gcloud storage cp "gs://${BUCKET}/_bootstrap/chronos-deploy.tar.gz" /tmp/chronos-deploy.tar.gz
+tar -xzf /tmp/chronos.tar.gz -C "$REPO"
+rm -rf /tmp/chronos-deploy && mkdir -p /tmp/chronos-deploy
+tar -xzf /tmp/chronos-deploy.tar.gz -C /tmp/chronos-deploy
+
+# overlay project entrypoint at repo root
+install -m 0644 /tmp/chronos-deploy/chronos_run.py "$REPO/chronos_run.py"
+mkdir -p "$REPO"/{data,logs}
+chown -R "$SVCUSER:$SVCUSER" "/home/${SVCUSER}"
+
+# --- venv + deps (chronos needs aiohttp orjson pyarrow pandas) ---
+if [[ ! -x "$REPO/venv/bin/python" ]]; then
+  sudo -u "$SVCUSER" bash -lc "cd '$REPO' && python3 -m venv venv && \
+    ./venv/bin/pip install --upgrade pip wheel && \
+    ./venv/bin/pip install aiohttp orjson pyarrow pandas"
+fi
+
+# --- config.env ---
+cat > "$REPO/config.env" <<EOF
+CHRONOS_ROOT=${REPO}/data
+RECORDER_HOST_ID=chronos-tokyo
+CHRONOS_HEALTH_FILE=/home/${SVCUSER}/chronos.health
+EOF
+chown "$SVCUSER:$SVCUSER" "$REPO/config.env"
+
+# --- helper scripts ---
+install -m 0755 /tmp/chronos-deploy/gcs_sync.sh /usr/local/bin/chronos-gcs-sync
+install -m 0755 /tmp/chronos-deploy/watchdog.sh /usr/local/bin/chronos-watchdog
+sed -i "s|@BUCKET@|${BUCKET}|g" /usr/local/bin/chronos-gcs-sync
+
+# --- systemd units ---
+install -m 0644 /tmp/chronos-deploy/chronos.service             /etc/systemd/system/
+install -m 0644 /tmp/chronos-deploy/chronos-gcs-sync.service    /etc/systemd/system/
+install -m 0644 /tmp/chronos-deploy/chronos-gcs-sync.timer      /etc/systemd/system/
+install -m 0644 /tmp/chronos-deploy/chronos-watchdog.service    /etc/systemd/system/
+install -m 0644 /tmp/chronos-deploy/chronos-watchdog.timer      /etc/systemd/system/
+
+systemctl daemon-reload
+systemctl enable --now chronos.service
+systemctl enable --now chronos-gcs-sync.timer
+systemctl enable --now chronos-watchdog.timer
+
+echo "=== chronos startup complete $(date -u) ==="
