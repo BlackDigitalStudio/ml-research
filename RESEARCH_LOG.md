@@ -818,3 +818,19 @@ rolling-retrain helps the direction head a little, not the vol gate, and won't f
 Side-finding: B's side vs RAW price sign is <0.5 / rank-IC<0 → the maker-profitable side anti-correlates
 with the price move (crystallized adverse selection). Result `research_runs/xgb_maker/RECENCY2.json`,
 script `scripts/subs60_xgb_recency2.py`.
+
+**RECENT-90d + Optuna-FROM-SCRATCH vs FULL-HISTORY (exp `xgb-20260531_makerlabels_3mo`).** Both A+B
+retrained from scratch with fresh Optuna (40 trials) on the **last 90 day-indices** before val (vol-thr
+re-derived on that window), same val + clean test [0.68,1.0); head-to-head vs the full-history main run
+(~200 d train). **Mean Δ (3mo − full) over 8 syms: A-AUC +0.0028, B oracle dir-acc@10 % +0.0016,
+cascEV@1 % −0.34 bp — ALL within noise.** Per-sym A-AUC: BNB .850→.868, BTC .818→.827 (3mo slightly
+better), DOGE .856→.849 / XRP .859→.855 (slightly worse), rest ≈ equal. ⇒ **a model trained on the last
+90 days ≈ the full-history model on the clean test** — neither recency+retuning nor extra volume moves
+test performance. So: vol-gate A is time-STATIONARY (90 d == full, corroborates recency2), direction B
+≈ stationary at this scale, **training volume SATURATES by ~90 d** (older data ≈ inert), and **maker-EV
+stays net-negative in both** (adverse floor unbroken by recency or fresh tuning). Reconciles recency2
+(recent-45 % mildly > old-45 % on B): full-history's predictive content is carried by its recent portion
++ volume saturation. Practical: **no need to retrain on full history — ~90 d suffices; the maker-edge
+problem is EXECUTION (adverse selection), not training-window or tuning.** Single seed; A operating-point
+(prec) not perfectly apples-to-apples (thresholds re-derived per window), AUC is. Result
+`research_runs/xgb_maker_3mo/SURFACE.json`, scripts `scripts/subs60_xgb_{makerlabel(--train-days),surface(--sub)}.py`.

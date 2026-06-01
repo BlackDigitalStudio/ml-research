@@ -37,8 +37,9 @@ PROJ = "project-0998ac51-36ba-445c-bc7"; BUCKET = "market-data-0998ac51"
 SRC = "research_runs/maker_labels"; OUT = "research_runs/xgb_maker"
 SYMS = ["BNB-USDT-PERP", "BTC-USDT-PERP", "DOGE-USDT-PERP", "ETH-USDT-PERP",
         "LINK-USDT-PERP", "LTC-USDT-PERP", "SOL-USDT-PERP", "XRP-USDT-PERP"]
-SCRIPT_TAG = "subs60_xgb_makerlabel.py@2026-05-31-rev2-instrumented"
+SCRIPT_TAG = "subs60_xgb_makerlabel.py@2026-05-31-rev3-trainwindow"
 SPLIT = (0.65, 0.68, 0.85)   # train<0.65 ndays ; embargo gap [0.65,0.68) ; test>=0.68 ; val=last 15% of train days
+TRAIN_DAYS = 0               # 0 = full history train [0,vcut); >0 = restrict train to the last N day-indices before vcut
 IMP_TYPES = ["gain", "weight", "cover", "total_gain", "total_cover"]
 bk = storage.Client(project=PROJ).bucket(BUCKET)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -56,7 +57,8 @@ def split(day, ndays):
     tr = day < cut; te = day >= emb
     tr_days = sorted(set(day[tr].tolist()))
     vcut = tr_days[int(len(tr_days) * SPLIT[2])] if tr_days else cut
-    val = tr & (day >= vcut); trn = tr & (day < vcut)
+    val = tr & (day >= vcut)
+    trn = ((day >= vcut - TRAIN_DAYS) & (day < vcut)) if TRAIN_DAYS > 0 else (tr & (day < vcut))
     return trn, val, te
 
 
@@ -184,11 +186,16 @@ def main():
     ap.add_argument("--trials", type=int, default=40)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--search-cap", type=int, default=600000)
+    ap.add_argument("--train-days", type=int, default=0)   # 0=full history; >0=last N day-indices before val (e.g. 90 = ~3 months)
+    ap.add_argument("--out-sub", default="xgb_maker")       # output subdir (use a distinct one to not clobber the main run)
     a = ap.parse_args()
+    global OUT, TRAIN_DAYS
+    OUT = f"research_runs/{a.out_sub}"; TRAIN_DAYS = a.train_days
     syms = SYMS if a.symbols == ["ALL"] else a.symbols
     t0 = time.time()
     def log(s): print(s, flush=True)
-    log(f"XGB maker-label TRAIN | syms={len(syms)} nf={a.nf_rate} cfg={a.cfg_idx} qm={a.qm} trials={a.trials} seed={a.seed}")
+    log(f"XGB maker-label TRAIN | syms={len(syms)} nf={a.nf_rate} cfg={a.cfg_idx} qm={a.qm} trials={a.trials} seed={a.seed} "
+        f"train_days={TRAIN_DAYS or 'full'} out={OUT}")
 
     # ---- Phase 1: per-symbol Model A + collect B-rows + test bundles ----
     bundlesB, tests, manifest_syms = [], {}, {}

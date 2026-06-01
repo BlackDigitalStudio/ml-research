@@ -60,7 +60,9 @@ def exec_ev(pB, nl, ns, fl, fs, idx):
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("--symbols", nargs="+", default=SYMS); a = ap.parse_args()
+    ap = argparse.ArgumentParser(); ap.add_argument("--symbols", nargs="+", default=SYMS)
+    ap.add_argument("--sub", default="xgb_maker"); a = ap.parse_args()
+    global OUT; OUT = f"research_runs/{a.sub}"
     P = {s: load_preds(s) for s in a.symbols}; P = {k: v for k, v in P.items() if v}
     if not P:
         print("no preds found"); return
