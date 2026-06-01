@@ -1,0 +1,9 @@
+[Unit]
+Description=Mirror recorder parquet to GCS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/scalper-gcs-sync
+# Runs as root: uses the VM's attached SA (metadata) for GCS auth.

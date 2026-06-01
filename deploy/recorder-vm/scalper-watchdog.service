@@ -1,0 +1,6 @@
+[Unit]
+Description=Recorder liveness watchdog (restart if health file is stale)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/scalper-watchdog

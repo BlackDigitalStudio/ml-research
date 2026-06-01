@@ -1,0 +1,13 @@
+[Unit]
+Description=Hourly recorder->GCS sync
+
+[Timer]
+# 5 min past the hour: the prior hour's parts are already compacted into the
+# canonical <hour>.parquet by then. Persistent=true catches missed runs after
+# downtime; a 90s random delay avoids a thundering herd against GCS.
+OnCalendar=*:05:00
+RandomizedDelaySec=90
+Persistent=true
+
+[Install]
+WantedBy=timers.target
