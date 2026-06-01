@@ -68,6 +68,11 @@ async def _main() -> None:
             symbol,
             snapshot_levels=DEPTH_LEVELS,
             maintain_book=True,
+            # Cap maintained depth at 100/side: we only emit L20, and Binance
+            # @depth diffs cover the full book (unbounded RSS otherwise). 100
+            # is a deep buffer for correct top-20 under churn. Seed REST at 100.
+            book_max_levels=100,
+            seed_limit=100,
             subscribe_force_order=True,
             subscribe_secondary_endpoint=False,  # fstream replica 302s from Tokyo
             reconcile_interval_sec=900.0,
