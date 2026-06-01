@@ -1,0 +1,5 @@
+# These ship to a Linux VM — force LF regardless of the committer's OS.
+*.sh        text eol=lf
+*.service   text eol=lf
+*.timer     text eol=lf
+# status.ps1 stays CRLF (runs on Windows) — default handling is fine.
