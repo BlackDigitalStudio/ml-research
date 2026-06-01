@@ -1,0 +1,6 @@
+[Unit]
+Description=Chronos local retention prune
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/chronos-retention

@@ -16,7 +16,12 @@ REPO="/home/${SVCUSER}/crypto-market-recorder"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y python3-venv python3-pip
+apt-get install -y python3-venv python3-pip cloud-guest-utils
+
+# Grow the root filesystem if the boot disk was resized (idempotent no-op
+# when already at full size). Root is /dev/sda1 on these pd-standard images.
+growpart /dev/sda 1 2>/dev/null || true
+resize2fs /dev/sda1 2>/dev/null || true
 
 id -u "$SVCUSER" &>/dev/null || useradd -m -s /bin/bash "$SVCUSER"
 
@@ -55,8 +60,9 @@ EOF
 chown "$SVCUSER:$SVCUSER" "$REPO/config.env"
 
 # --- helper scripts ---
-install -m 0755 /tmp/chronos-deploy/gcs_sync.sh /usr/local/bin/chronos-gcs-sync
-install -m 0755 /tmp/chronos-deploy/watchdog.sh /usr/local/bin/chronos-watchdog
+install -m 0755 /tmp/chronos-deploy/gcs_sync.sh  /usr/local/bin/chronos-gcs-sync
+install -m 0755 /tmp/chronos-deploy/watchdog.sh  /usr/local/bin/chronos-watchdog
+install -m 0755 /tmp/chronos-deploy/retention.sh /usr/local/bin/chronos-retention
 sed -i "s|@BUCKET@|${BUCKET}|g" /usr/local/bin/chronos-gcs-sync
 
 # --- systemd units ---
@@ -65,10 +71,15 @@ install -m 0644 /tmp/chronos-deploy/chronos-gcs-sync.service    /etc/systemd/sys
 install -m 0644 /tmp/chronos-deploy/chronos-gcs-sync.timer      /etc/systemd/system/
 install -m 0644 /tmp/chronos-deploy/chronos-watchdog.service    /etc/systemd/system/
 install -m 0644 /tmp/chronos-deploy/chronos-watchdog.timer      /etc/systemd/system/
+install -m 0644 /tmp/chronos-deploy/chronos-retention.service   /etc/systemd/system/
+install -m 0644 /tmp/chronos-deploy/chronos-retention.timer     /etc/systemd/system/
 
 systemctl daemon-reload
 systemctl enable --now chronos.service
 systemctl enable --now chronos-gcs-sync.timer
 systemctl enable --now chronos-watchdog.timer
+systemctl enable --now chronos-retention.timer
+# Pick up an edited entrypoint / symbol set on re-run.
+systemctl restart chronos.service
 
 echo "=== chronos startup complete $(date -u) ==="

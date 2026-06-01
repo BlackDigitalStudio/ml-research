@@ -3,10 +3,12 @@
 A thin wrapper over ``chronos.Gateway`` tuned for THIS project (the
 upstream ``scripts/record_data.py`` hard-codes L100 + Coinbase/Deribit):
 
-- Binance USDT-M futures BTCUSDT + ETHUSDT — **L20** depth snapshots
-  (parity with Cryptolake/Tardis ``raw/book``), maintained book + REST
-  reconcile, ``@forceOrder`` liquidations, derivatives poll.
-- Cross-venue trades: Bybit, OKX, Bitget, Gate.io (the set we already ran).
+- Binance USDT-M futures — the **8 Cryptolake symbols** (BNB, BTC, DOGE,
+  ETH, LINK, LTC, SOL, XRP) — **L20** depth snapshots (parity with
+  Cryptolake/Tardis ``raw/book``), maintained book + REST reconcile,
+  ``@forceOrder`` liquidations, derivatives poll.
+- Cross-venue trades: Bybit, OKX, Bitget, Gate.io on BTC only (bonus data
+  beyond Cryptolake, which is Binance-only — the set we already ran).
 - Coinbase / Deribit deliberately OFF — out of the Cryptolake-equivalent
   scope (and Deribit ``.raw`` would need API keys).
 
@@ -34,6 +36,12 @@ logger = logging.getLogger("chronos")
 
 DEPTH_LEVELS = 20  # L20 — Cryptolake / Tardis raw/book parity
 
+# The 8 Cryptolake symbols (Tardis -USDT-PERP -> Binance USDT-M futures).
+BINANCE_SYMBOLS = (
+    "BNBUSDT", "BTCUSDT", "DOGEUSDT", "ETHUSDT",
+    "LINKUSDT", "LTCUSDT", "SOLUSDT", "XRPUSDT",
+)
+
 
 async def _main() -> None:
     logging.basicConfig(
@@ -53,7 +61,7 @@ async def _main() -> None:
     gateway = Gateway(recorder)
 
     # Binance core — maintained book + L20 snapshots + liquidations + OI poll.
-    for symbol in ("BTCUSDT", "ETHUSDT"):
+    for symbol in BINANCE_SYMBOLS:
         gateway.add_binance_futures(
             symbol,
             snapshot_levels=DEPTH_LEVELS,
