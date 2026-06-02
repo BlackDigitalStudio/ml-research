@@ -88,6 +88,12 @@ async def _main() -> None:
         gateway.add_okx_trades(f"{coin}-USDT-SWAP")
         gateway.add_bitget_trades(f"{coin}USDT")
         gateway.add_gateio_trades(f"{coin}_USDT")
+        # Cross-venue L2 snapshots (Variant A) for cross-exchange OBI.
+        # Native depth: Gate L20, Bitget L15, OKX L5, Bybit L20(maintained).
+        gateway.add_bybit_depth(f"{coin}USDT")
+        gateway.add_okx_depth(f"{coin}-USDT-SWAP")
+        gateway.add_bitget_depth(f"{coin}USDT")
+        gateway.add_gateio_depth(f"{coin}_USDT")
     # Coinbase / Deribit intentionally omitted.
 
     await gateway.start()
