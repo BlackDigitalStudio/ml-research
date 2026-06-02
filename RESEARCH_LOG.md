@@ -886,3 +886,40 @@ argmax R:R is ground truth, and the robust read is OOS = hold. Optuna is **not**
 inner-val AUC as designed; its window-overfit propagates into the downstream `c*` selection, e.g. DOGE
 val RR1.9 edge +0.26 bp → test −9.2 bp — expected optimizer behaviour). Result
 `research_runs/maker_labels_rr/B2GRID_RESULT_optb.json`, script `scripts/subs60_xgb_b2_grid.py`.
+
+**2026-06-02/03 — EXECUTION-LEVER session (B-universe, abstention, fill-model C, taker-direction).**
+Tier-frame (CLAUDE.md): map *under what conditions* a tradeable edge appears; the maker **apred +3.00 bp,
+7/8 net-positive** (`B2_RESULT_apred`, durably re-saved this session as `…_apred_8sym.{log,json}`) remains
+the best result of the tier — UNCONFIRMED (one split, not walk-forward). Conditions probed (all on
+XGB-snapshot 71-feat, `maker_labels_rr`, single `honest_val_test` split unless noted):
+(a) **B training-universe** (`xgb-20260602_…b_universe`) — pure-maker EV on a FIXED A-top-5% test pool is
+maximised at the NARROWEST B-training gate (apred 5%) at every budget, both symbols; wider (25/100%)
+lowers it monotonically. B's GLOBAL dir-AUC ≈ 0.51 for all → the gap is **train/deploy distribution match**,
+not model quality.
+(b) **Toxicity-gated abstention** (`…_abstain`) — on the fixed A-pool, ranking trades by an adverse-fill
+predictor did not beat B-confidence ranking; the actionable target (`1{filled trade loses}`) was ≈random
+here (abstAUC 0.51–0.54). KEY: the predictable part of adverse selection (MISS-on-runaway, tox-AUC ~0.75)
+is non-actionable for a maker (a MISS pays 0); the actionable part is ≈the unpredictable 60s sign.
+(c) **Model C, fill predictor** (`…_fillmodel_C`) — fill IS strongly predictable (test fill-AUC BTC
+0.73/0.72, LINK 0.64/0.62 ≫ the ~0.52 of 60s direction), but the fill-asymmetry carries ~no 60s direction
+(rank-IC −0.017), and as a 3rd A∧B selection factor it did not raise +3.00 on these conditions (fill-rate
+on B's side already ~0.96 → 'will it fill' near-constant; adverse selection sits in the post-fill outcome).
+(d) **Adverse selection quantified** — on A-non-flat windows, fwd-60s | long-limit FILLED = −0.6 bp (BTC)
+vs | MISSED = +13.4 (BTC) / +33 (LINK) / +29 (SOL): you fill small-adverse moves, miss big favorable
+runaways. (e) **Taker-entry direction pipeline** (`xgb-20260603_…b_taker`, fee_regime=TAKER) — built taker
+labels (8 syms, `research_runs/taker_labels`); Stage-1 predict-the-MOVE (XGB regressor on rH; a true
+global-corr IC obj underfits XGBoost greedy trees) → grid_sim-TAKER c* (captured-alpha on top-3000 val
+conviction) → Stage-2 executed-payoff. Taker entry **captures positive GROSS** (+2.6…+4.6 bp at conviction —
+the runaways are catchable gross), but under standard **7 bp taker RT** and one split, taker NET did not
+exceed +3.00 this session (net −3…−8 bp pooled BTC+LINK). Predicting the move makes the grid pick a
+HIGH-TP/SL c* (BTC RR2.9→RR6.8) vs hold for a binary target, but the val-chosen high-TP/SL c* did not
+transfer to test here (same val→test gap as the maker-R:R argmax). Raw-60s-dir-acc rises with B-confidence
+(BTC 0.511→0.542) but stayed ~0.54; the strongly-predictable §15 conviction signal (0.66–0.77) is the
+maker-better-SIDE (fill microstructure), distinct from raw direction. **Framing (CLAUDE.md, no verdict):**
+this session did not achieve taker-positive economics beating +3.00 *on these conditions* — NOT a general
+impossibility. Untested levers: walk-forward c*; RR/SL-floor-constrained configs; sequence/longer-context
+direction (GRU §14 got dir-acc 0.612 but those economics carried test=val inflation + mid-entry optimism);
+lower fee tiers; maker-placement (offset/queue/patience); other horizons. Infra added: `grid_sim
+--absolute-timeout` (exit at t0+60 vs fill+60 → ≈identical, corr 0.999; fills are fast). Scripts
+`scripts/subs60_{xgb_b_universe,xgb_abstain,xgb_fill,xgb_abc,build_taker_labels,xgb_b_taker}.py`; husdc
+Rust source (maker-entry + flag) captured to `research_runs/husdc_src/`. See `HANDOFF_taker_hd3.md`.
