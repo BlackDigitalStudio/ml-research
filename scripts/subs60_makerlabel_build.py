@@ -143,6 +143,10 @@ def grid_maker(tmp, od, qms):
 def process_symbol(sym, bt, bm, a):
     symk = sym.split("-")[0]
     blobs = sorted(b.name for b in bk.client.list_blobs(bk, prefix=f"{FEATS}/{sym}/") if b.name.endswith(".npz"))
+    if a.start:
+        blobs = [b for b in blobs if b.split("/")[-1][:-4] >= a.start]
+    if a.end:
+        blobs = [b for b in blobs if b.split("/")[-1][:-4] <= a.end]
     if a.max_days and len(blobs) > a.max_days:
         blobs = blobs[:a.max_days] if a.probe else blobs[::max(1, len(blobs)//a.max_days)][:a.max_days]
     log(f"=== {sym}: {len(blobs)} days, target_samp={a.target_samples} feat_stride={a.feat_stride} qms={a.queue_mults} ===")
@@ -239,6 +243,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols", nargs="+", required=True)
     ap.add_argument("--max-days", type=int, default=0)
+    ap.add_argument("--start", default=None)   # YYYY-MM-DD inclusive day filter on feats_sub60 blobs
+    ap.add_argument("--end", default=None)
     ap.add_argument("--target-samples", type=int, default=40000)  # adaptive tick-stride -> ~this many build samples/day
     ap.add_argument("--feat-stride", type=int, default=8)   # feats decision-point stride (matches xgb_optuna)
     ap.add_argument("--max-samples", type=int, default=2000000)  # high -> our adaptive step wins (no auto-override)
