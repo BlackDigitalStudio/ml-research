@@ -923,3 +923,60 @@ lower fee tiers; maker-placement (offset/queue/patience); other horizons. Infra 
 --absolute-timeout` (exit at t0+60 vs fill+60 → ≈identical, corr 0.999; fills are fast). Scripts
 `scripts/subs60_{xgb_b_universe,xgb_abstain,xgb_fill,xgb_abc,build_taker_labels,xgb_b_taker}.py`; husdc
 Rust source (maker-entry + flag) captured to `research_runs/husdc_src/`. See `HANDOFF_taker_hd3.md`.
+
+
+## 16. 2026-06-03 — DOGE actualization + OOS walk-forward of the maker apred cascade (regime-adaptive vol-gate)
+
+**Context**: take the tier's best single-split result (maker apred cascade, DOGE **+5.73** /
+pooled +3.00 net maker EV/trade) toward paper trading by (a) reproducing it, (b) actualizing the
+data to the freshest edge, (c) the honest OOS test the handoff named #1. DOGE-only (paper trading +
+validation are DOGE-only per user). Ledger `xgb-20260603_doge_actualize_walkforward` (HD3 rev2,
+exploratory). VM `hd2-feats-003`.
+
+**Reproduction (sanity)**: `subs60_xgb_b2.py --gate apred` reproduces DOGE **+5.73 bp** exactly (109
+trades) on the original split — pipeline deterministic & intact.
+
+**Data actualized to 2026-06-02**: cryptolake is the only history (the live recorder started
+2026-06-01, ~1 day — not a backfill source). Backfilled cryptolake raw 2026-05-09→06-02 to GCS
+(`backfill_cryptolake_to_gcs.py`; cryptolake S3 parquet schema is a verified DIRECT MIRROR of GCS
+`raw/` → ingestion = plain copy), 2.27 GB: DOGE book/trades 23/25 d, BTC book 16 d, ETH trades 15 d
+(vendor coverage is intermittent in recent weeks; BTC/ETH worst). Rebuilt `feats_sub60/DOGE` 21
+fresh days (`subs60_orch.py` — the feats builder, **recovered from the VM and committed; it was not
+in the repo**) + minimal `feats_sub60/BTC` mid 16 d (`subs60_btcmid_backfill.py`, for the btc_ret
+lead) + `maker_labels_rr_freshtail/DOGE` N=124180.
+
+**Feature-dependency correction**: the DOGE feat71 base-64 (`feats_sub60`, Rust feature_builder) DOES
+include 3 ETH cols (eth_logret lags 14/16/54) + liq(56-58) + OI(59-60) + OBI(61-63); btc_ret(64-66) is
+added at maker-build. External-stream importance for DOGE ≈ **8 % (A) / 17 % (B)**. DOGE trains
+independently of BTC/ETH *models* (A per-symbol; B per-symbol, HP-shared) → not blocked by their gaps,
+but its *feats* need ETH + BTC mid, dead on vendor-gap days.
+
+**Fresh-tail held-out validation** (train on clean ≤05-08, test 2026-05-09→06-01 never trained;
+PESSIMISTIC — eth dead 48 % of rows / btc 35 % on gap days, the live feed will carry them): the exact
++5.73 model → **+10.08 ± 8.4 bp** (median +6.10, 11/20 pos). At n≈20 the per-trade mean SE spans +5.73
+and 0 → sign/median confirmed, magnitude too thin to pin. Regime shift visible: DOGE p95|rH60| = 22.94
+(May–Nov) / 20.54 (all-train) / **13.01 (fresh tail)** — vol ~halved.
+
+**Full-year WALK-FORWARD — the tight estimate** (`subs60_xgb_walkforward_adaptive.py`, rolling
+W=200/T=30, 6 folds, ~150 OOS trades, maker 4 bp, 1/day, hold-60s). **SURFACE** = OOS net maker EV vs
+(fold/regime × vol-gate threshold-adaptivity); **ARGMAX = regime-ADAPTIVE threshold**:
+
+| branch | pooled OOS net | median | win | folds + |
+|---|---|---|---|---|
+| **adaptive** (p95 per fold) | **+13.58 ± 3.8 bp** | +7.09 | 97/155 (63 %) | **6/6** |
+| fixed (frozen 22.95 bp) | +6.38 ± 4.4 | +3.99 | 90/151 | 5/6 |
+
+Adaptive > fixed by **+7 bp pooled**; the gap concentrates in low-vol late folds where the frozen
+high-vol threshold mis-calibrates A — `thr_ad` tracks **22.9→18.8 bp** as DOGE vol declines, and fold 5
+swings **adaptive +13.25 vs fixed −13.92**. Fold 3 is a counterexample (fixed +12.76 vs adaptive +0.96),
+so adaptive is not fold-wise monotone, but pooled it is clearly higher and positive every fold. The
+single-split +5.73 is **not single-split luck on these conditions**; the lever surfaced here (user
+insight) = the "5 % most-volatile deviation" hardcoded into Model A is **period-dependent**, so the
+threshold should be regime-adaptive (rolling p95) in walk-forward folds and live.
+
+**Caveats / next**: fills are maker-SIM (touch/queue/MISS), NOT live execution — **paper trading DOGE**
+validates execution next; one symbol, one year; A/B HP reused (no per-fold re-tune). The §5 deploy-gate
+(clears the 4 bp maker floor robustly OOS) is a secondary annotation, not a deploy verdict. Artifacts
+`research_runs/maker_labels_rr/{WALKFORWARD_ADAPTIVE.json, freshtail→maker_labels_rr_freshtail/DOGE.npz}`;
+scripts `subs60_{orch,btcmid_backfill,makerlabel_build,xgb_freshtail_eval,xgb_walkforward_adaptive}.py`,
+`backfill_cryptolake_to_gcs.py`. Ledger `xgb-20260603_doge_actualize_walkforward`.
