@@ -69,5 +69,13 @@ The pull has identifiable sources, and naming them is the defense:
 - Pre-register a frozen spec for a tier *before* running it; for tiers with
   a real cost gate (e.g. egress-rebuild), scope the cost and get sign-off
   before building/running.
+- **Never stop a RUNNING, HEALTHY compute process / experiment without the
+  user's explicit consent to stop** — *or* under a standing grant of fully
+  autonomous operation. A run producing valid output is the asset; killing it
+  to restart with a tweak (different metric, extra config, caching, a "better"
+  version) destroys progress the user did not authorize losing. If a run needs
+  changing: let it finish, or ASK first. Only kill without asking when the run
+  is genuinely broken (erroring/hung/duplicate). This is the hard form of the
+  capture-everything / never-kill-in-flight discipline.
 - The model identifier from the system prompt stays out of commits, PRs,
   code comments, and any pushed artifact — chat replies only.
