@@ -980,3 +980,54 @@ validates execution next; one symbol, one year; A/B HP reused (no per-fold re-tu
 `research_runs/maker_labels_rr/{WALKFORWARD_ADAPTIVE.json, freshtail→maker_labels_rr_freshtail/DOGE.npz}`;
 scripts `subs60_{orch,btcmid_backfill,makerlabel_build,xgb_freshtail_eval,xgb_walkforward_adaptive}.py`,
 `backfill_cryptolake_to_gcs.py`. Ledger `xgb-20260603_doge_actualize_walkforward`.
+
+
+## 17. 2026-06-04 — ZERO-fee sub-minute directional-maker pivot + the f2 covariate-shift fix (DOGE)
+
+**Context**: user pivot — trade **USDC** (maker fee **0**; net = gross) and **sub-minute holds**
+("from now compute without maker fee"). DOGE-only. Ledger `xgb-20260604_doge_zerofee_volnorm_baseline`
+(HD3 rev3, exploratory). VM `hd2-feats-003`.
+
+**Data**: multi-hold maker labels (`subs60_makerlabel_build --holds-sec 15 30 60` →
+`maker_labels_h/DOGE.npz`, N=2.15M; holds 15/30/60s × touch/queue + rH15/30/60). Per-fold prediction
+caches (`wf_cache/DOGE_h{15,30,60}s_preds.npz`) → deploy/metric sweeps now instant.
+
+**Horizon (15/30/60s, zero fee, causal rolling)** — Sharpe is the lens (bp/trade structurally favours
+longer horizons = bigger moves). **30s is the risk-adjusted argmax**; **15s collapses CAUSALLY**
+(Sharpe ≈ 0 — its post-hoc edge was look-ahead); 60s lower Sharpe. Model-A vol-AUC ~0.84–0.85 flat
+across horizons (shorter ≠ stronger A-signal).
+
+**Vol-gate A — needed?** At matched CAUSAL frequency **noA (B-full direction, no gate) ≥ AxB** and is
+the deploy argmax (the gate's rolling threshold drift hurts the rank-product). Post-hoc AxB > noA, but
+post-hoc is look-ahead.
+
+**Causal ≠ post-hoc.** Post-hoc top-N (within-day ranking) is look-ahead, inflates ~3–4×; the
+deployable rolling/frozen threshold is what counts. A learned trade-EV **selectivity model
+underperformed** the pA×pB heuristic (per-trade EV too noisy to regress; the A(vol)×B(dir)
+decomposition is better-conditioned).
+
+**The f2 puzzle — a VOLATILITY COVARIATE SHIFT** (`subs60_xgb_fold_traindata`). The per-fold edge
+concentrated in fold-2 (test 2026-01-26→02-25) because **f2 is the only fold whose TEST vol matches
+its TRAIN**: DOGE vol declined monotonically over the year, so the trailing-200d train is always more
+volatile than the recent test — except f2's Jan-Feb spike. test/train p95|rH30|: f0 0.67 · f1 0.73 ·
+**f2 1.01** · f3 0.91 · f4 0.64 · f5 0.85. Microstructure features (OFI/returns/liq) **scale with
+volatility** → compress in calm regimes → the model (**A AND B**) under-captures — a covariate shift
+on the **shared features** (so noA, with no A, concentrated in f2 too). Drift ≈ 0, no trend, no
+leakage (2-day embargo) — purely vol-scale.
+
+**Fix = vol-NORMALIZE the features** (`subs60_xgb_volnorm`): causal trailing per-feature z-score
+(K=20 prior days). **Works**: f2 collapses **+23.2 → +1.9**, calm folds lift (f0 −0.3 → +3.1),
+per-fold becomes **broad** [3.1, 4.5, 1.9, −1.1, 4.0, −1.0].
+
+**BASELINE (recorded)** — vol-norm noA 30s, causal rolling, target 5/day (actual 1.7/day), **zero
+fee**: **annualized Sharpe +2.42**, EV **+4.26 bp/trade**, hit 51.1 %, **+7.14 bp/day**, broad
+per-fold. The non-normalized annS **+5.39** was **f2-spike-inflated** (regime-dependent, unreliable);
+the broad **+2.42** is the **honest regime-robust** baseline. *AUC/dir-acc is size-blind* — hit ~51 %
+yet +EV because wins are bigger (momentum on big moves; size-weighted EV is the right metric).
+
+**Caveats / next**: maker-SIM fills, NOT live; one symbol/year; **HP frozen** (Optuna-tuned on the
+60s/non-normalized features → suboptimal here; per-fold Optuna on normalized feats queued); blanket
+71-feat normalization (targeted norm untested); zero-fee assumes USDC maker 0 % (venue-confirm; Binance
+testnet keys verified, DOGEUSDT TRADING, 5000 USDT demo). Iterate from this baseline. Scripts
+`subs60_{makerlabel_build,xgb_horizon_wf,xgb_noA_test,xgb_causal_deploy,xgb_fold_traindata,xgb_volnorm,
+xgb_baseline_v2}.py`. Ledger `xgb-20260604_doge_zerofee_volnorm_baseline`.
