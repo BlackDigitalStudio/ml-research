@@ -45,6 +45,14 @@ _TPS = [0.10, 0.13, 0.16, 0.20, 0.26, 0.34, 0.45, 0.60]
 CFGS = ([{"tp": 50.0, "sl": 50.0, "to": TO_TICKS, "par": False, "tr": False}] +          # hold-60s
         [{"tp": tp, "sl": sl, "to": TO_TICKS, "par": False, "tr": False}
          for sl in _SLS for tp in _TPS if 0.9 <= tp / sl <= 13.0])                        # R:R grid (32 cfgs)
+TICK_PER_S = TO_TICKS / 60.0   # ~9.38 ticks/s
+
+
+def hold_cfgs(holds_sec):
+    """Pure-timeout (hold) configs at the given horizons in seconds -> for short-window labels."""
+    return [{"tp": 50.0, "sl": 50.0, "to": int(round(h * TICK_PER_S)), "par": False, "tr": False} for h in holds_sec]
+
+
 bk = storage.Client(project=PROJ).bucket(BUCKET)
 
 NAMES = ([f"x{c}" for c in range(64)] +
@@ -153,6 +161,7 @@ def process_symbol(sym, bt, bm, a):
     scratch = "/dev/shm" if os.path.isdir("/dev/shm") else "/tmp"   # RAM-backed scratch -> no disk-IO thrash under parallelism
     tmp = tempfile.mkdtemp(prefix="ml_", dir=scratch)
     accF, accR, accDay, accTs = [], [], [], []
+    accR15, accR30 = [], []
     accPL, accPS, accFL, accFS = [], [], [], []
     nmatch_tot = 0; nfeat_tot = 0; nday = 0; t_dl = t_bs = t_gs = 0.0
     try:
@@ -168,7 +177,8 @@ def process_symbol(sym, bt, bm, a):
             sel = sel[v]
             if len(sel) < 20:
                 continue
-            ftd = td[sel]; X = d["X"].astype(np.float32)[sel]; rH = d["rH_60"].astype(np.float32)[sel]
+            ftd = td[sel]; X = d["X"].astype(np.float32)[sel]
+            rH15 = d["rH_15"].astype(np.float32)[sel]; rH30 = d["rH_30"].astype(np.float32)[sel]; rH = d["rH_60"].astype(np.float32)[sel]
             F = feat71(ftd, X, bt, bm)
             nfeat_tot += len(sel)
             # build_samples
@@ -196,7 +206,8 @@ def process_symbol(sym, bt, bm, a):
             if not sel_feat:
                 log(f"  {day}: 0 matched (build n={len(sts)})"); continue
             sf = np.array(sel_feat); sbs = np.array(sel_bs)
-            accF.append(F[sf]); accR.append(rH[sf]); accDay.append(np.full(len(sf), di, np.int32)); accTs.append(ftd[sf])
+            accF.append(F[sf]); accR.append(rH[sf]); accR15.append(rH15[sf]); accR30.append(rH30[sf])
+            accDay.append(np.full(len(sf), di, np.int32)); accTs.append(ftd[sf])
             accPL.append(PL[:, :, sbs]); accPS.append(PS[:, :, sbs])
             accFL.append(FL[:, sbs]); accFS.append(FS[:, sbs])
             nmatch_tot += len(sf); nday += 1
@@ -217,6 +228,7 @@ def process_symbol(sym, bt, bm, a):
         if nmatch_tot < 20:
             log(f"  {sym}: too few matched ({nmatch_tot}); skip save"); return None
         F = np.concatenate(accF); rH = np.concatenate(accR); day = np.concatenate(accDay); ts = np.concatenate(accTs)
+        rH15 = np.concatenate(accR15); rH30 = np.concatenate(accR30)
         PL = np.concatenate(accPL, 2); PS = np.concatenate(accPS, 2)
         FL = np.concatenate(accFL, 1); FS = np.concatenate(accFS, 1)
         meta = {"symbol": sym, "n": int(len(F)), "n_days": int(nday), "feat_stride": a.feat_stride,
@@ -229,7 +241,7 @@ def process_symbol(sym, bt, bm, a):
             f"PL{PL.shape} | t_bs={t_bs:.0f}s t_gs={t_gs:.0f}s")
         if not a.probe:
             buf = io.BytesIO()
-            np.savez_compressed(buf, F=F, rH60=rH, day=day, ts=ts, pnl_long=PL, pnl_short=PS,
+            np.savez_compressed(buf, F=F, rH60=rH, rH15=rH15, rH30=rH30, day=day, ts=ts, pnl_long=PL, pnl_short=PS,
                                 fill_long=FL, fill_short=FS, feat_names=np.array(NAMES),
                                 meta=np.array(json.dumps(meta)))
             bk.blob(f"{OUT}/{symk}.npz").upload_from_string(buf.getvalue())
@@ -245,6 +257,7 @@ def main():
     ap.add_argument("--max-days", type=int, default=0)
     ap.add_argument("--start", default=None)   # YYYY-MM-DD inclusive day filter on feats_sub60 blobs
     ap.add_argument("--end", default=None)
+    ap.add_argument("--holds-sec", type=int, nargs="+", default=None)  # if set: CFGS = pure-hold horizons (s), e.g. 15 30 60
     ap.add_argument("--target-samples", type=int, default=40000)  # adaptive tick-stride -> ~this many build samples/day
     ap.add_argument("--feat-stride", type=int, default=8)   # feats decision-point stride (matches xgb_optuna)
     ap.add_argument("--max-samples", type=int, default=2000000)  # high -> our adaptive step wins (no auto-override)
@@ -253,7 +266,10 @@ def main():
     ap.add_argument("--out-sub", default="maker_labels")    # output subdir (use a distinct one to not clobber)
     ap.add_argument("--probe", action="store_true")         # don't upload; verbose per-day
     a = ap.parse_args()
-    global OUT; OUT = f"research_runs/{a.out_sub}"
+    global OUT, CFGS; OUT = f"research_runs/{a.out_sub}"
+    if a.holds_sec:
+        CFGS = hold_cfgs(a.holds_sec)
+        log(f"[multi-hold mode] CFGS = holds {a.holds_sec}s -> to_ticks {[c['to'] for c in CFGS]}")
     t0 = time.time()
     log(f"[out={OUT}] [cfgs={len(CFGS)}] [queue_mults={a.queue_mults}]")
     log(f"[load BTC mid for btc-lead]"); bt, bm = load_btc_mid(8, a.max_days if a.probe else None)
