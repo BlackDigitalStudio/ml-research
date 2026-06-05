@@ -1031,3 +1031,44 @@ yet +EV because wins are bigger (momentum on big moves; size-weighted EV is the 
 testnet keys verified, DOGEUSDT TRADING, 5000 USDT demo). Iterate from this baseline. Scripts
 `subs60_{makerlabel_build,xgb_horizon_wf,xgb_noA_test,xgb_causal_deploy,xgb_fold_traindata,xgb_volnorm,
 xgb_baseline_v2}.py`. Ledger `xgb-20260604_doge_zerofee_volnorm_baseline`.
+
+## 18. 2026-06-06 — size-aware (IC) per-fold B-tuning of the zero-fee directional-maker (DOGE)
+
+**Question:** is XGBoost-B's hyperparameter / tuning-**metric** a lever for the thin direction
+signal, or is the §17 frozen-HP baseline (annS +2.42) already at the ceiling?
+
+**Surface — the B size-aware signal is real and stable.** Score B by **IC = corr(pB−0.5, netl−nets)**
+on the last-30d sub-val (size-weighted, unlike AUC). Per-fold IC(val) =
+**[+0.014, +0.021, +0.018, +0.011, +0.027, +0.024]** — positive on **all 6 folds**, mean **~+0.019**,
+no sign flip. So B genuinely predicts the better maker **side of large moves** above chance every
+fold; the AUC≈0.52 was **size-blind** and hid it (which is why tuning on AUC failed last run, +0.30).
+
+**Argmax (policy × budget).** Per-fold Optuna (25 trials; A on sub-val AUC, B on sub-val IC),
+blanket vol-norm, causal-rolling deploy, zero fee:
+
+| pol | tgt | trd/d | EV/trd (bp) | annS | hit% | per-fold (%) |
+|-----|-----|-------|-------------|------|------|--------------|
+| **noA** | **10** | 9.8 | **+1.40** | **+2.45** | 53.0 | [12.1, 9.8, −3.1, 1.9, 7.4, −5.9] |
+| noA | 5 | 4.7 | +1.76 | +2.18 | 55.7 | [6.7, 5.6, −0.9, 2.4, 4.7, −5.2] |
+| AxB | 5 | 4.6 | +0.19 | +0.15 | 52.2 | [6.4, 14.1, −8.4, −0.9, −0.5, −9.3] |
+| AxB | 10 | 10.6 | −1.56 | −2.11 | 48.5 | [6.9, 13.0, −16.5, 0.9, −16.2, −14.5] |
+
+**noA dominates AxB** at both budgets — in zero-fee market-making the vol-gate A only sheds alpha.
+EV/trade is **higher at t5** (+1.76 vs +1.40); annS is higher at t10 only because it scales with
+√(trd/day) — frequency, not signal quality.
+
+**The lever was the tuning metric, not HP/norm.** Three independent ways of turning the B knob around
+the **same single signal** converge to annS ~+2.4: frozen HP **+2.42**, Optuna-on-AUC **+0.30**
+(size-blind metric → val-overfit on a ~0.52 coin-flip → broke the deploy), Optuna-on-IC **+2.45**
+(restores frozen parity). A size-aware objective is the correct knob — but it does **not lift the
+ceiling**, which is set by the **thickness** of the single direction signal (IC≈0.019). HP / objective /
+normalization cannot thicken it.
+
+**Baseline (declared, working):** **noA t10 IC-tuned, annS +2.45**, EV +1.40 bp/trade, hit 53.0 %,
++13.83 bp/day, per-fold [12.1, 9.8, −3.1, 1.9, 7.4, −5.9] (supersedes §17 frozen-HP +2.42).
+
+**Secondary (deploy annotation):** maker-SIM fills, not live; one symbol/year; zero-fee assumes USDC
+maker 0 % (venue-confirm; Binance testnet ready, DOGEUSDT, 5000 USDT demo). **Next:** raise the
+ceiling via **more symbols** (portfolio Sharpe on the same 30s zero-fee noA), then a **new uncorrelated
+signal**. Scripts `subs60_xgb_optuna_ic.py` (+ `subs60_xgb_optuna_volnorm.py` AUC variant). Ledger
+`xgb-20260606_doge_zerofee_ic_tuned_baseline`.
