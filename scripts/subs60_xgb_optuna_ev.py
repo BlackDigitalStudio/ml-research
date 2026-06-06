@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
-"""Per-fold Optuna on blanket vol-norm feats, but tune B (direction) by a SIZE-AWARE metric:
-IC = corr(pB-0.5, netl-nets) on the sub-val filled windows (not AUC, which is size-blind and
-collapsed to ~0.52). IC is magnitude-weighted AND computed on ~170k windows (stable -> less
-val-overfit than AUC/EV). A tuned on AUC (vol well-predicted). DOGE 30s, ZERO fee, causal rolling
-deploy noA & AxB at 5/10. Compare to frozen-HP (noA annS +2.42) and AUC-Optuna (noA +0.30).
+"""Per-fold Optuna on blanket vol-norm feats, B tuned DIRECTLY on deploy economics:
+EV/trade = mean net maker P&L of the top-|pB-0.5| sub-val windows selected at the target rate
+(~10/day = the baseline cell), mirroring the noA causal deploy. This is the most aligned objective
+but the NOISIEST (only ~top-0.2% of sub-val ~ a few hundred windows) -> the same val-overfit regime
+that broke the AUC run; the 4th knob to compare vs frozen +2.42 / Optuna-AUC +0.30 / Optuna-IC +2.45.
+A tuned on AUC. DOGE 30s ZERO fee, causal rolling deploy noA & AxB at 5/10.
 Reads research_runs/maker_labels_h/DOGE.npz.
 """
-import io, json, sys
+import io, json
 import numpy as np
 from google.cloud import storage
 import xgboost as xgb
 import optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-SYM = sys.argv[1] if len(sys.argv) > 1 else "DOGE"
-LABELSUB = sys.argv[2] if len(sys.argv) > 2 else "maker_labels_h"
-QMIDX = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-NTHREAD = int(sys.argv[4]) if len(sys.argv) > 4 else 8
 PROJ = "project-0998ac51-36ba-445c-bc7"; BUCKET = "market-data-0998ac51"
 W, T, EMB = 200, 30, 2; NF_RATE = 0.05; GATE_PCT = 5.0; KDAYS = 30; KNORM = 20
-SUBVAL_D = 30; N_TRIALS = 25; TUNE_SUB = 200000
+SUBVAL_D = 30; N_TRIALS = 25; TUNE_SUB = 200000; TUNE_TGT = 10
 CFGIDX, RHKEY = 1, "rH30"; BUDGETS = [5, 10]
 bk = storage.Client(project=PROJ).bucket(BUCKET)
 
@@ -44,7 +41,7 @@ def subsample(X, y, w=None):
 def tune_A(Xst, yst, Xv, yv, spw):
     Xst, yst, _ = subsample(Xst, yst)
     dst = xgb.DMatrix(Xst, label=yst); dv = xgb.DMatrix(Xv, label=yv)
-    base = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": 0, "eval_metric": "auc", "scale_pos_weight": spw}
+    base = {"objective": "binary:logistic", "tree_method": "hist", "nthread": 8, "seed": 0, "eval_metric": "auc", "scale_pos_weight": spw}
 
     def obj(t):
         b = xgb.train(dict(base, **_space(t)), dst, num_boost_round=400, evals=[(dv, "v")], early_stopping_rounds=30, verbose_eval=False)
@@ -53,25 +50,31 @@ def tune_A(Xst, yst, Xv, yv, spw):
     return st.best_params, int(st.best_trial.user_attrs["bi"]), float(st.best_value)
 
 
-def tune_B_ic(Xst, yst, wst, Xv, pdiff_v):
+def tune_B_ev(Xst, yst, wst, Xv, nlv, nsv, flv, fsv, wpd, target):
+    """Maximize EV/trade of the top-|pB-0.5| sub-val windows at the target rate (mirrors noA deploy)."""
     Xst, yst, wst = subsample(Xst, yst, wst)
     dst = xgb.DMatrix(Xst, label=yst, weight=wst); dv = xgb.DMatrix(Xv)
-    base = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": 0}
+    base = {"objective": "binary:logistic", "tree_method": "hist", "nthread": 8, "seed": 0}
+    frac = min(max(target / max(wpd, 1.0), 1e-4), 0.5)
 
     def obj(t):
         hp = _space(t); nr = t.suggest_int("num_boost_round", 50, 400)
         b = xgb.train(dict(base, **hp), dst, num_boost_round=nr)
-        pv = b.predict(dv) - 0.5
-        if pv.std() < 1e-9:
-            return -1.0
-        ic = float(np.corrcoef(pv, pdiff_v)[0, 1])
-        return ic if np.isfinite(ic) else -1.0
+        p = b.predict(dv); conf = np.abs(p - 0.5)
+        k = max(int(len(conf) * frac), 20)
+        thr = np.partition(conf, -k)[-k]; sel = conf >= thr
+        side = p[sel] >= 0.5
+        net = np.where(side, nlv[sel], nsv[sel]); fc = np.where(side, flv[sel], fsv[sel])
+        ex = fc & np.isfinite(net)
+        if ex.sum() < 10:
+            return -10.0
+        return float(net[ex].mean())
     st = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=0)); st.optimize(obj, n_trials=N_TRIALS)
     bp = dict(st.best_params); nr = bp.pop("num_boost_round"); return bp, int(nr), float(st.best_value)
 
 
 def fith(hp, niter, X, y, w=None, spw=None):
-    p = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": 0}
+    p = {"objective": "binary:logistic", "tree_method": "hist", "nthread": 8, "seed": 0}
     if spw is not None:
         p["scale_pos_weight"] = spw
     return xgb.train(dict(p, **hp), xgb.DMatrix(X, label=y, weight=w), num_boost_round=max(1, niter + 1))
@@ -108,11 +111,11 @@ def causal_rolling(sc_tr, sc_te, day_tr, day_te, target_tpd, sideB, fl, fs, nl, 
     ex = fc & np.isfinite(net); return net[ex]
 
 
-d = np.load(io.BytesIO(bk.blob(f"research_runs/{LABELSUB}/{SYM}.npz").download_as_bytes()), allow_pickle=True)
+d = np.load(io.BytesIO(bk.blob("research_runs/maker_labels_h/DOGE.npz").download_as_bytes()), allow_pickle=True)
 m = json.loads(str(d["meta"])); ndays = int(m["n_days"])
 F = d["F"].astype(np.float64); day = d["day"].astype(int); rH = d[RHKEY].astype(np.float64)
-netl = d["pnl_long"][CFGIDX, QMIDX, :].astype(np.float64) * 100.0; nets = d["pnl_short"][CFGIDX, QMIDX, :].astype(np.float64) * 100.0
-fl = d["fill_long"].astype(bool)[QMIDX]; fs = d["fill_short"].astype(bool)[QMIDX]; nfeat = F.shape[1]
+netl = d["pnl_long"][CFGIDX, 0, :].astype(np.float64) * 100.0; nets = d["pnl_short"][CFGIDX, 0, :].astype(np.float64) * 100.0
+fl = d["fill_long"].astype(bool)[0]; fs = d["fill_short"].astype(bool)[0]; nfeat = F.shape[1]
 day_mean = np.zeros((ndays, nfeat)); day_var = np.zeros((ndays, nfeat))
 for dd in range(ndays):
     mk = day == dd
@@ -124,7 +127,7 @@ for dd in range(ndays):
     mu_ref[dd] = day_mean[sl].mean(0); sd_ref[dd] = np.sqrt(np.maximum(day_var[sl].mean(0), 0))
 sd_ref = np.maximum(sd_ref, 0.2 * gstd[None, :] + 1e-9)
 Fn = ((F - mu_ref[day]) / sd_ref[day]).astype(np.float32)
-print(f"[{SYM} {LABELSUB} qm{QMIDX} | Optuna A-AUC + B-IC, AxB&noA | trials={N_TRIALS}] Fn={Fn.shape}", flush=True)
+print(f"[Optuna EV/tr-objective (tune@{TUNE_TGT}/day) on blanket vol-norm | trials={N_TRIALS}] Fn={Fn.shape}", flush=True)
 
 FOLDS = []; ts = W + EMB
 while ts < ndays:
@@ -155,11 +158,12 @@ for fi, (trn, tst) in enumerate(FOLDS):
     A = fith(hpA, biA, Fn[trn], yA[trn], spw=spwAf)
     oof = oof_pA(Fn, yA, trn, day, hpA, biA); valid = trn & np.isfinite(oof)
     gate = valid & (oof >= np.nanquantile(oof[valid], 1 - GATE_PCT / 100.0))
-    yB = (np.where(fl, netl, -np.inf) > np.where(fs, nets, -np.inf)).astype(int); both = fl & fs
-    wq = np.where(both, np.abs(netl - nets), np.where(fl, np.abs(netl), np.where(fs, np.abs(nets), 0.0)))
+    yB = (np.where(fl, netl, -np.inf) > np.where(fs, nets, -np.inf)).astype(int)
+    wq = np.where(fl & fs, np.abs(netl - nets), np.where(fl, np.abs(netl), np.where(fs, np.abs(nets), 0.0)))
     wcl = lambda mk: np.clip(wq[mk], 0, np.quantile(wq[mk][wq[mk] > 0], 0.99) if (wq[mk] > 0).any() else 1.0)
-    sb = sub & (fl | fs); vb = val & both   # IC target on both-filled sub-val
-    hpB, biB, icB = tune_B_ic(Fn[sb], yB[sb], wcl(sb), Fn[vb], (netl[vb] - nets[vb]))
+    sb = sub & (fl | fs)
+    nd_val = len(set(day[val].tolist())); wpd_val = val.sum() / max(nd_val, 1)
+    hpB, biB, evB = tune_B_ev(Fn[sb], yB[sb], wcl(sb), Fn[val], netl[val], nets[val], fl[val], fs[val], wpd_val, TUNE_TGT)
     gfull = trn & (fl | fs); ggate = gate & (fl | fs)
     Bf = fith(hpB, biB, Fn[gfull], yB[gfull], w=wcl(gfull)); Bg = fith(hpB, biB, Fn[ggate], yB[ggate], w=wcl(ggate))
     tri = np.where(trn)[0]; tei = np.where(tst)[0]
@@ -171,7 +175,7 @@ for fi, (trn, tst) in enumerate(FOLDS):
     axb_te = cdf_map(pA_te, sA) * cdf_map(np.abs(pBg_te - 0.5), sBg)
     noa_tr = np.searchsorted(sBf, np.abs(pBf_tr - 0.5), "right") / len(sBf); noa_te = cdf_map(np.abs(pBf_te - 0.5), sBf)
     perfold.append((axb_tr, axb_te, noa_tr, noa_te, day[tri], day[tei], pBg_te >= 0.5, pBf_te >= 0.5, fl[tei], fs[tei], netl[tei], nets[tei]))
-    print(f"  fold{fi}: A AUC={aucA:.3f} | B IC(val)={icB:+.4f} (d{hpB['max_depth']},nr{biB})", flush=True)
+    print(f"  fold{fi}: A AUC={aucA:.3f} | B EV(val,@{TUNE_TGT}/d)={evB:+.3f}bp (d{hpB['max_depth']},nr{biB})", flush=True)
 
 print(f"\n  {'pol':>4} {'tgt':>4} {'trd/d':>6} {'EV/trd':>8} {'annS':>6} {'hit%':>6} {'tot/d':>7}  per-fold", flush=True)
 RES = {}
@@ -184,5 +188,5 @@ for tgt in BUDGETS:
         x = metrics(pf)
         print(f"  {pol:>4} {tgt:>4} {x['tpd']:>6.1f} {x['ev']:>+7.2f} {x['ann']:>+6.2f} {100*x['hit']:>5.1f} {x['tot']:>+7.2f}  {x['perfold']}", flush=True)
         RES[f"{pol}_t{tgt}"] = x
-bk.blob(f"research_runs/{LABELSUB}/OPTUNA_IC_{SYM}_qm{QMIDX}.json").upload_from_string(json.dumps(RES, default=float))
-print(f"\n[saved] {LABELSUB}/OPTUNA_IC_{SYM}_qm{QMIDX}.json (AxB & noA at 5/10)", flush=True)
+bk.blob("research_runs/maker_labels_h/OPTUNA_EV_RESULT.json").upload_from_string(json.dumps(RES, default=float))
+print("\n[saved] OPTUNA_EV_RESULT.json | frozen noA_t5 +2.42 ; AUC +0.30 ; IC noA_t5 +2.18 / t10 +2.45", flush=True)

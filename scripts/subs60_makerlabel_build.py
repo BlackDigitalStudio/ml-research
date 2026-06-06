@@ -32,6 +32,7 @@ FEATS = "feats_sub60"; OUT = "research_runs/maker_labels"
 RAWB = "raw/book/exchange=BINANCE_FUTURES"; RAWT = "raw/trades/exchange=BINANCE_FUTURES"
 BS = "/tmp/husdc/rust_ingest/target/release/build_samples"
 GRID = "/tmp/husdc/rust_ingest/target/release/grid_sim"
+EXIT_QM = None   # if set: pegged maker-exit (always-last queue) via grid_sim_exitdbg --exit-queue-mult
 NS = 1_000_000_000
 H_TICKS = 700          # forward ticks built (~74s at ~106ms/tick) -> room past 60s
 TO_TICKS = 563         # 60s timeout at ~106ms/tick
@@ -134,6 +135,8 @@ def grid_maker(tmp, od, qms):
                "--entry-q", f"{od}/entry_q.npy", "--configs", f"{tmp}/cfg.json", "--out-prefix", g,
                "--queue-mult", str(qm), "--entry-window-ticks", str(ENTRY_WIN), "--maker-offset-frac", "0",
                "--commission-win-pct", "0", "--commission-loss-pct", "0"]
+        if EXIT_QM is not None:
+            cmd += ["--exit-queue-mult", str(EXIT_QM)]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             return None, f"GRID-fail qm{qm}:{r.stderr[-200:]}"
@@ -264,9 +267,14 @@ def main():
     ap.add_argument("--queue-mults", type=float, nargs="+", default=[0.0, 1.0])
     ap.add_argument("--match-tol-ms", type=float, default=2500.0)
     ap.add_argument("--out-sub", default="maker_labels")    # output subdir (use a distinct one to not clobber)
+    ap.add_argument("--grid-bin", default=None)             # override GRID binary (e.g. pegged-exit grid_sim_exitdbg)
+    ap.add_argument("--exit-queue-mult", type=float, default=None)  # if set: pegged maker exit, always-last queue depth
     ap.add_argument("--probe", action="store_true")         # don't upload; verbose per-day
     a = ap.parse_args()
-    global OUT, CFGS; OUT = f"research_runs/{a.out_sub}"
+    global OUT, CFGS, GRID, EXIT_QM; OUT = f"research_runs/{a.out_sub}"
+    if a.grid_bin:
+        GRID = a.grid_bin
+    EXIT_QM = a.exit_queue_mult
     if a.holds_sec:
         CFGS = hold_cfgs(a.holds_sec)
         log(f"[multi-hold mode] CFGS = holds {a.holds_sec}s -> to_ticks {[c['to'] for c in CFGS]}")
