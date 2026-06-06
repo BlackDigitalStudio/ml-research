@@ -1072,3 +1072,58 @@ maker 0 % (venue-confirm; Binance testnet ready, DOGEUSDT, 5000 USDT demo). **Ne
 ceiling via **more symbols** (portfolio Sharpe on the same 30s zero-fee noA), then a **new uncorrelated
 signal**. Scripts `subs60_xgb_optuna_ic.py` (+ `subs60_xgb_optuna_volnorm.py` AUC variant). Ledger
 `xgb-20260606_doge_zerofee_ic_tuned_baseline`.
+
+## 19. 2026-06-06 — realistic maker EXIT (pegged, always-last) + symmetric-fill conditioning (DOGE/ETH/BTC)
+
+**Scope of validity (read before citing any number here):** all results below are for **DOGE/ETH/BTC
+USDT-perps, Binance Futures, 2025-05-09…2026-05-08, 30s hold, walk-forward W=200/T=30 (6 folds),
+ZERO maker fee + NO taker**, under a **specific execution model** (below). This is a measured
+**response surface**, not a universal property — a different market / model / window / execution must
+be re-measured before any claim here is reused.
+
+**Two-leg realism upgrade.** Prior maker labels had a realistic ENTRY but an optimistic EXIT. A probe
+of the OLD exit (hold-to-timeout → 2 s maker-at-mid → else taker-cross, commissions hardcoded 0)
+found **59–83 % of BTC/ETH exits were TAKER** (TimeoutMarket), charged 0 fee; at the user-confirmed
+**5 bp** taker fee that exit cost alone ≈ 10× the per-trade EV. So we built a **pegged maker-only
+exit** (`simulate_pegged_exit` in `grid_sim_exitdbg.rs`): rest a close-limit pegged to the touch,
+**always last in queue**, re-quote on adverse move (queue resets to back), held until opposing taker
+flow fills it, mark at last touch on ran-out — **no taker anywhere**. Then set the ENTRY symmetric
+**always-last** (`queue_mult=1`) to match.
+
+**Conditional surface (per-trade annS / EV bp/trade; ENTRY+EXIT BOTH always-last):**
+
+| sym | AxB t5 | AxB t10 | noA t5 | noA t10 |
+|-----|--------|---------|--------|---------|
+| **DOGE** | **+3.40 / +4.17** (hit 56, 5/6+) | +1.65 / +1.31 | −5.81 / −1.72 | −7.81 / −1.52 |
+| **ETH** | **+3.24 / +3.50** (hit 57) | +2.54 / +1.59 (6/6+) | −21.5 / −0.96 | −28.8 / −1.05 |
+| BTC | −0.23 / −0.14 (~flat) | −4.84 / −1.76 | −28.8 / −1.16 | −35.4 / −1.14 |
+
+**Argmax under these conditions = AxB t5 for DOGE (annS +3.40, EV +4.17 bp) and ETH (+3.24 / +3.50)**,
+both broad (5–6/6 folds positive). BTC ≈ flat — its entry fills only **52–57 %** when always-last
+(deep book → large queue → most entries missed), vs DOGE 84–89 %, ETH 75–81 %.
+
+**The conditional actually measured (do NOT generalize past it):** whether the **vol-gate A is
+needed** depends on the **entry-fill assumption**, measured directly on this data —
+- **front-of-queue entry (`queue_mult=0`, optimistic):** noA is **positive and ≥ AxB** (e.g. DOGE
+  noA-t10 pegged-exit EV +2.26 / daily-annS +3.62);
+- **always-last entry (`queue_mult=1`, this rev):** noA goes **negative**, **AxB dominates**;
+- entry effect isolated (DOGE, OLD exit, B-only noA): qm0 EV **+1.40** → qm1 EV **−1.18**; entry fill
+  rate **0.978 → 0.82**.
+
+So for **this** symbol-set / year / horizon / execution, "is the vol-gate needed?" answers **no under
+front-of-queue, yes under always-last** — a surface, not a verdict on noA vs AxB in general.
+
+**Conditioning of earlier results:** every prior maker number in this log (the +5.73 apred cascade,
+§16–18 baselines, the portfolio) was computed under **`queue_mult=0` front-of-queue entry** → their
+absolute levels are conditioned on that optimistic-entry assumption. The direction signal (IC) is
+stable across the change: DOGE ≈ 0.04, BTC ≈ 0.056, ETH ≈ 0.066.
+
+**Caveats (bound the numbers):** maker-SIM fills (touch/queue/flow), not live; `entry_q` (entry-time
+touch depth) used as the exit-queue-depth proxy — true per-re-quote depth needs a `build_samples`
+L1-qty output; no re-quote latency; the pegged exit keeps queue priority on favorable up-ticks (mild
+winner-optimism); per-trade annS overstates daily by ~1.3–1.5× (DOGE AxB-t5 daily-annS ≈ +2.7); one
+symbol-set, one year. **Reproduce:** per symbol `subs60_makerlabel_build.py … --grid-bin
+/tmp/edbg_target/release/grid_sim_exitdbg --exit-queue-mult 1 --queue-mults 1.0`, then
+`subs60_xgb_optuna_ic.py {sym} maker_labels_pegexit_qm1 0`. Exit source `scripts/grid_sim_exitdbg.rs`
+(`simulate_pegged_exit`), built on VM `/tmp/husdc` against `live_sim` (has `simulate_maker_entry`).
+Ledger `xgb-20260606_pegexit_alwayslast_axb_noA_doge_eth_btc`.
