@@ -983,9 +983,13 @@ pub fn fill_deriv_features(
 /// where r[k] = log(mid[k+1]) - log(mid[k]). Features emit 0 until their
 /// window is saturated (same convention as [10]/[12]).
 pub fn fill_horizon_features(feat: &mut Array2<f32>, depth: &DepthData, indices: &[i64]) {
-    const W30: i64 = 300;
-    const W60: i64 = 600;
-    const W120: i64 = 1200;
+    // SAMPLING-ROBUST: realised-vol / bipower / momentum are computed on a fixed 1-SECOND time
+    // grid (returns over equal wall-clock intervals), NOT per-snapshot ticks. Tick windows made
+    // these depend on book sampling density (Cryptolake ~1.3/s vs live recorder ~9/s); a fixed-time
+    // grid makes them density-invariant so a Cryptolake-trained model transfers to the dense live feed.
+    const W30_MS: i64 = 30_000;
+    const W60_MS: i64 = 60_000;
+    const W120_MS: i64 = 120_000;
     let bv_scale: f64 = std::f64::consts::FRAC_PI_2;
 
     let mid = depth.mid_prices();
@@ -993,83 +997,97 @@ pub fn fill_horizon_features(feat: &mut Array2<f32>, depth: &DepthData, indices:
     if n < 2 {
         return;
     }
+    let ts = depth.timestamps.as_slice().unwrap(); // exchange ms, sorted ascending
 
-    // Per-tick log-returns: r[k] = log(mid[k+1]) - log(mid[k]) for k in [0, n-2].
-    // Zero when either side is non-positive, matching the Python gate.
-    let mut r = Array1::<f64>::zeros(n - 1);
-    let mut abs_r = Array1::<f64>::zeros(n - 1);
-    for k in 0..(n - 1) {
-        let a = mid[k];
-        let b = mid[k + 1];
-        if a > 0.0 && b > 0.0 {
-            let v = b.ln() - a.ln();
-            r[k] = v;
-            abs_r[k] = v.abs();
+    // 1-second grid aligned to absolute seconds [g0..gn]; grid_mid[j] = mid as of the end of second g0+j.
+    let g0 = ts[0] / 1000;
+    let gn = ts[n - 1] / 1000;
+    let n_grid = (gn - g0 + 1).max(1) as usize;
+    let mut grid_mid = vec![0.0f64; n_grid];
+    {
+        let mut p: usize = 0;
+        for j in 0..n_grid {
+            let gsec = g0 + j as i64;
+            while p + 1 < n && ts[p + 1] / 1000 <= gsec {
+                p += 1;
+            }
+            grid_mid[j] = mid[p];
         }
     }
-
-    // cum_sq[i] = Σ_{k=0}^{i-1} r[k]². Length n (so cum_sq[T] - cum_sq[T-W]
-    // is the sum over [T-W, T-1], i.e. last W returns ending at tick T).
-    let mut cum_sq = Array1::<f64>::zeros(n);
-    let mut s = 0.0;
-    for k in 0..(n - 1) {
-        s += r[k] * r[k];
-        cum_sq[k + 1] = s;
+    // Cumulative Σ of 1s squared log-returns (RV) over the grid.
+    let mut cum_gsq = vec![0.0f64; n_grid];
+    for j in 1..n_grid {
+        let a = grid_mid[j - 1];
+        let b = grid_mid[j];
+        let gr = if a > 0.0 && b > 0.0 { b.ln() - a.ln() } else { 0.0 };
+        cum_gsq[j] = cum_gsq[j - 1] + gr * gr;
     }
-
-    // pair[j] = |r[j+1]| · |r[j]|  for j in [0, n-3], with right-return-index (j+1).
-    // cum_pair[k] with cum_pair[0] = cum_pair[1] = 0 and, for k >= 2,
-    //   cum_pair[k] = Σ_{j=0}^{k-2} pair[j]
-    // so BV sum on window W at tick T = cum_pair[T] - cum_pair[T - W + 1].
-    let mut cum_pair = Array1::<f64>::zeros(n);
+    // Bipower [39] stays TICK-based: the 1s-grid forward-fill over sparse gaps degrades the
+    // consecutive-return product (it transferred WORSE than tick on the 06-05 overlap test).
+    let mut cum_pair = vec![0.0f64; n];
     if n >= 3 {
         let mut sp = 0.0;
         for k in 2..n {
-            // pair[k-2] = |r[k-1]| * |r[k-2]|
-            sp += abs_r[k - 1] * abs_r[k - 2];
+            let r1 = if mid[k - 1] > 0.0 && mid[k] > 0.0 { (mid[k].ln() - mid[k - 1].ln()).abs() } else { 0.0 };
+            let r0 = if mid[k - 2] > 0.0 && mid[k - 1] > 0.0 { (mid[k - 1].ln() - mid[k - 2].ln()).abs() } else { 0.0 };
+            sp += r1 * r0;
             cum_pair[k] = sp;
         }
     }
+    // grid index for a wall-clock ms (clamped to the grid range).
+    let gidx = |t_ms: i64| -> usize {
+        let s = t_ms / 1000;
+        if s <= g0 {
+            0
+        } else if s >= gn {
+            n_grid - 1
+        } else {
+            (s - g0) as usize
+        }
+    };
+    // mid at the last snapshot with ts <= t_ms (for momentum endpoints); 0.0 if none.
+    let mid_at = |t_ms: i64| -> f64 {
+        let p = ts.partition_point(|&x| x <= t_ms);
+        if p == 0 { 0.0 } else { mid[p - 1] }
+    };
 
     for (s_idx, &raw_idx) in indices.iter().enumerate() {
-        let t = raw_idx;
-        let ti = t as usize;
+        let ti = raw_idx as usize;
         let cur = mid[ti];
+        let now = ts[ti];
+        let gh = gidx(now);
 
-        // [34] momentum_30s
-        if t >= W30 {
-            let past = mid[(t - W30) as usize];
+        // [34/35/36] momentum (time-based endpoints), only once the full window has history.
+        if now - W30_MS >= ts[0] {
+            let past = mid_at(now - W30_MS);
             if past > 0.0 && cur > 0.0 {
                 feat[[s_idx, 34]] = ((cur - past) / past) as f32;
             }
         }
-        // [35] momentum_60s
-        if t >= W60 {
-            let past = mid[(t - W60) as usize];
+        if now - W60_MS >= ts[0] {
+            let past = mid_at(now - W60_MS);
             if past > 0.0 && cur > 0.0 {
                 feat[[s_idx, 35]] = ((cur - past) / past) as f32;
             }
         }
-        // [36] momentum_120s
-        if t >= W120 {
-            let past = mid[(t - W120) as usize];
+        if now - W120_MS >= ts[0] {
+            let past = mid_at(now - W120_MS);
             if past > 0.0 && cur > 0.0 {
                 feat[[s_idx, 36]] = ((cur - past) / past) as f32;
             }
         }
-        // [37] realized_vol_60s
-        if t >= W60 {
-            let rv = cum_sq[ti] - cum_sq[(t - W60) as usize];
+        // [37] realized_vol_60s, [38] realized_vol_120s — 1s-grid Σ r².
+        if now - W60_MS >= ts[0] {
+            let rv = cum_gsq[gh] - cum_gsq[gidx(now - W60_MS)];
             feat[[s_idx, 37]] = rv.max(0.0).sqrt() as f32;
         }
-        // [38] realized_vol_120s
-        if t >= W120 {
-            let rv = cum_sq[ti] - cum_sq[(t - W120) as usize];
+        if now - W120_MS >= ts[0] {
+            let rv = cum_gsq[gh] - cum_gsq[gidx(now - W120_MS)];
             feat[[s_idx, 38]] = rv.max(0.0).sqrt() as f32;
         }
-        // [39] bipower_var_120s
-        if t >= W120 {
-            let bv = cum_pair[ti] - cum_pair[(t - W120 + 1) as usize];
+        // [39] bipower_var_120s — TICK-based (1200 ticks), as the original.
+        if raw_idx >= 1200 {
+            let bv = cum_pair[ti] - cum_pair[(raw_idx - 1200 + 1) as usize];
             feat[[s_idx, 39]] = (bv_scale * bv) as f32;
         }
     }

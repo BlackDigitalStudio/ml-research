@@ -6,7 +6,7 @@ val-overfit than AUC/EV). A tuned on AUC (vol well-predicted). DOGE 30s, ZERO fe
 deploy noA & AxB at 5/10. Compare to frozen-HP (noA annS +2.42) and AUC-Optuna (noA +0.30).
 Reads research_runs/maker_labels_h/DOGE.npz.
 """
-import io, json, sys
+import io, json, sys, os
 import numpy as np
 from google.cloud import storage
 import xgboost as xgb
@@ -19,7 +19,7 @@ QMIDX = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 NTHREAD = int(sys.argv[4]) if len(sys.argv) > 4 else 8
 PROJ = "project-0998ac51-36ba-445c-bc7"; BUCKET = "market-data-0998ac51"
 W, T, EMB = 200, 30, 2; NF_RATE = 0.05; GATE_PCT = 5.0; KDAYS = 30; KNORM = 20
-SUBVAL_D = 30; N_TRIALS = 25; TUNE_SUB = 200000
+SUBVAL_D = 30; N_TRIALS = int(os.environ.get("N_TRIALS", "25")); TUNE_SUB = 200000; SEED = int(os.environ.get("SEED", "0"))
 CFGIDX, RHKEY = 1, "rH30"; BUDGETS = [5, 10]
 bk = storage.Client(project=PROJ).bucket(BUCKET)
 
@@ -36,7 +36,7 @@ def _space(t):
 
 def subsample(X, y, w=None):
     if len(X) > TUNE_SUB:
-        ix = np.random.RandomState(0).choice(len(X), TUNE_SUB, replace=False)
+        ix = np.random.RandomState(SEED).choice(len(X), TUNE_SUB, replace=False)
         return X[ix], y[ix], (w[ix] if w is not None else None)
     return X, y, w
 
@@ -44,19 +44,19 @@ def subsample(X, y, w=None):
 def tune_A(Xst, yst, Xv, yv, spw):
     Xst, yst, _ = subsample(Xst, yst)
     dst = xgb.DMatrix(Xst, label=yst); dv = xgb.DMatrix(Xv, label=yv)
-    base = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": 0, "eval_metric": "auc", "scale_pos_weight": spw}
+    base = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": SEED, "eval_metric": "auc", "scale_pos_weight": spw}
 
     def obj(t):
         b = xgb.train(dict(base, **_space(t)), dst, num_boost_round=400, evals=[(dv, "v")], early_stopping_rounds=30, verbose_eval=False)
         t.set_user_attr("bi", int(b.best_iteration)); return float(b.best_score)
-    st = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=0)); st.optimize(obj, n_trials=N_TRIALS)
+    st = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=SEED)); st.optimize(obj, n_trials=N_TRIALS)
     return st.best_params, int(st.best_trial.user_attrs["bi"]), float(st.best_value)
 
 
 def tune_B_ic(Xst, yst, wst, Xv, pdiff_v):
     Xst, yst, wst = subsample(Xst, yst, wst)
     dst = xgb.DMatrix(Xst, label=yst, weight=wst); dv = xgb.DMatrix(Xv)
-    base = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": 0}
+    base = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": SEED}
 
     def obj(t):
         hp = _space(t); nr = t.suggest_int("num_boost_round", 50, 400)
@@ -66,12 +66,12 @@ def tune_B_ic(Xst, yst, wst, Xv, pdiff_v):
             return -1.0
         ic = float(np.corrcoef(pv, pdiff_v)[0, 1])
         return ic if np.isfinite(ic) else -1.0
-    st = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=0)); st.optimize(obj, n_trials=N_TRIALS)
+    st = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=SEED)); st.optimize(obj, n_trials=N_TRIALS)
     bp = dict(st.best_params); nr = bp.pop("num_boost_round"); return bp, int(nr), float(st.best_value)
 
 
 def fith(hp, niter, X, y, w=None, spw=None):
-    p = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": 0}
+    p = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": SEED}
     if spw is not None:
         p["scale_pos_weight"] = spw
     return xgb.train(dict(p, **hp), xgb.DMatrix(X, label=y, weight=w), num_boost_round=max(1, niter + 1))
@@ -111,6 +111,11 @@ def causal_rolling(sc_tr, sc_te, day_tr, day_te, target_tpd, sideB, fl, fs, nl, 
 d = np.load(io.BytesIO(bk.blob(f"research_runs/{LABELSUB}/{SYM}.npz").download_as_bytes()), allow_pickle=True)
 m = json.loads(str(d["meta"])); ndays = int(m["n_days"])
 F = d["F"].astype(np.float64); day = d["day"].astype(int); rH = d[RHKEY].astype(np.float64)
+_drop = os.environ.get("DROP_COLS", "")
+if _drop:
+    dc = sorted(int(x) for x in _drop.split(","))
+    keep = [i for i in range(F.shape[1]) if i not in dc]
+    F = F[:, keep]; print(f"*** DROPPED cols {dc} -> F now {F.shape[1]} cols ***", flush=True)
 netl = d["pnl_long"][CFGIDX, QMIDX, :].astype(np.float64) * 100.0; nets = d["pnl_short"][CFGIDX, QMIDX, :].astype(np.float64) * 100.0
 fl = d["fill_long"].astype(bool)[QMIDX]; fs = d["fill_short"].astype(bool)[QMIDX]; nfeat = F.shape[1]
 day_mean = np.zeros((ndays, nfeat)); day_var = np.zeros((ndays, nfeat))

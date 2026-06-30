@@ -15,7 +15,7 @@ from google.cloud import storage
 
 DAY = sys.argv[1] if len(sys.argv) > 1 else "2026-06-05"
 PROJ = "project-0998ac51-36ba-445c-bc7"; BUCKET = "market-data-0998ac51"
-FB = "/tmp/feature_builder"; NS = 1_000_000_000; GRID_S = 1.0; LV = 20
+FB = os.environ.get("FB_BIN", "/tmp/feature_builder"); NS = 1_000_000_000; GRID_S = 1.0; LV = 20
 SYMF = "DOGE-USDT-PERP"
 WARMUP_NS = int(os.environ.get("WARMUP", "3600")) * NS  # chronos history pad before cl window (lookback warmup)
 bk = storage.Client(project=PROJ).bucket(BUCKET)
@@ -135,6 +135,7 @@ print(f"  per-feature |ΔX|/std  : median={np.median(reld):.4f}  mean={reld.mean
 print(f"  features with median |ΔX|/std < 0.02 : {int((np.median(reld,0)<0.02).sum())}/{X_cl.shape[1]}", flush=True)
 worst = np.argsort(-np.median(reld, 0))[:8]
 print(f"  worst-8 features (col: median |ΔX|/std): {[(int(c), round(float(np.median(reld[:,c])),3)) for c in worst]}", flush=True)
+print(f"  CHANGED vol/momentum cols [34-39] median |ΔX|/std: {[(c, round(float(np.median(reld[:,c])),3)) for c in range(34,40)]}", flush=True)
 ex = (absd < 1e-4).mean(0)
 print(f"  features ~exact (|ΔX|<1e-4) on >95% pts: {int((ex>0.95).sum())}/{X_cl.shape[1]}", flush=True)
 good = float((np.median(reld, 0) < 0.05).mean())
