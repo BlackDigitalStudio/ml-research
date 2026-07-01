@@ -7,7 +7,7 @@ cdf-rank deploy score), and the causal-rolling threshold seed. HP tuned on a rec
 FINAL models fit on ALL history. Saves to research_runs/deploy/{SYM}/.
 Usage: python3 subs60_train_deploy.py SYM [nthread]   (reads maker_labels_pegexit_qm1/{SYM}.npz)
 """
-import io, json, sys
+import io, json, sys, os
 import numpy as np
 from google.cloud import storage
 import xgboost as xgb
@@ -16,7 +16,7 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 SYM = sys.argv[1] if len(sys.argv) > 1 else "DOGE"
 NTHREAD = int(sys.argv[2]) if len(sys.argv) > 2 else 8
-LABELSUB = "maker_labels_pegexit_qm1"
+LABELSUB = os.environ.get("LABELSUB", "maker_labels_pegexit_qm1")
 PROJ = "project-0998ac51-36ba-445c-bc7"; BUCKET = "market-data-0998ac51"
 NF_RATE = 0.05; GATE_PCT = 5.0; KNORM = 20; KDAYS = 30; SUBVAL_D = 30
 N_TRIALS = 20; TUNE_SUB = 200000; CFGIDX, QMIDX, RHKEY = 1, 0, "rH30"
@@ -132,7 +132,7 @@ axb_sc = (cdf(pA, sA) * cdf(np.abs(pBg - 0.5), sBg)).astype(np.float32)
 noa_sc = cdf(np.abs(pBf - 0.5), sBf).astype(np.float32)
 seedm = np.isin(day, tdays[-KDAYS:])
 
-OUT = f"research_runs/deploy/{SYM}"
+OUT = "research_runs/" + os.environ.get('DEPLOY_DIR', 'deploy') + f"/{SYM}"
 for nm, mdl in [("A", A), ("Bg", Bg), ("Bf", Bf)]:
     p = f"/tmp/_{SYM}_{nm}.json"; mdl.save_model(p)
     bk.blob(f"{OUT}/{nm}.json").upload_from_filename(p)

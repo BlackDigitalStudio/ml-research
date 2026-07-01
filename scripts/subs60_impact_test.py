@@ -11,7 +11,7 @@ import numpy as np, pyarrow as pa, pyarrow.parquet as pq
 from google.cloud import storage
 import xgboost as xgb
 PROJ = "project-0998ac51-36ba-445c-bc7"; BUCKET = "market-data-0998ac51"
-FB = "/tmp/feature_builder"; NS = 1_000_000_000; GRID_S = 1.0; LV = 20; DAY = "2026-06-05"
+FB = os.environ.get("FB_BIN", "/tmp/feature_builder"); BUNDLE = os.environ.get("BUNDLE_DIR", "research_runs/deploy/DOGE"); NS = 1_000_000_000; GRID_S = 1.0; LV = 20; DAY = "2026-06-05"
 SYMF = "DOGE-USDT-PERP"; BTC = "BTC-USDT-PERP"; FEATS = "feats_sub60"
 bk = storage.Client(project=PROJ).bucket(BUCKET); TD = tempfile.mkdtemp(dir="/dev/shm" if os.path.isdir("/dev/shm") else "/tmp")
 
@@ -47,11 +47,11 @@ def feat71(dtd, X, bt, bm):
 
 
 # bundle
-refs = np.load(io.BytesIO(bk.blob("research_runs/deploy/DOGE/refs.npz").download_as_bytes()))
-meta = json.loads(bk.blob("research_runs/deploy/DOGE/meta.json").download_as_bytes()); KNORM = meta["KNORM"]
+refs = np.load(io.BytesIO(bk.blob(f"{BUNDLE}/refs.npz").download_as_bytes()))
+meta = json.loads(bk.blob(f"{BUNDLE}/meta.json").download_as_bytes()); KNORM = meta["KNORM"]
 A = xgb.Booster(); Bg = xgb.Booster()
 for nm, mdl in [("A", A), ("Bg", Bg)]:
-    p = f"{TD}/{nm}.json"; bk.blob(f"research_runs/deploy/DOGE/{nm}.json").download_to_filename(p); mdl.load_model(p)
+    p = f"{TD}/{nm}.json"; bk.blob(f"{BUNDLE}/{nm}.json").download_to_filename(p); mdl.load_model(p)
 gstd = refs["gstd"].astype(np.float64); sA = refs["sA"]; sBg = refs["sBg"]
 day_mean = refs["day_mean"].astype(np.float64); day_var = refs["day_var"].astype(np.float64)
 mu = day_mean[-KNORM:].mean(0); sd = np.maximum(np.sqrt(np.maximum(day_var[-KNORM:].mean(0), 0)), 0.2 * gstd + 1e-9)
@@ -104,6 +104,31 @@ if os.environ.get("SAMPLECL", "0") == "1":  # sample chronos at cryptolake's sna
     keep = np.unique(np.where(np.abs(cht[jj - 1] - cl_ts) < np.abs(cht[jj] - cl_ts), jj - 1, jj))
     ar = {c: ar[c][keep] for c in cols}
     print(f"  SAMPLECL: chronos book sampled to cryptolake cadence -> {len(keep)} snapshots", flush=True)
+if os.environ.get("DEDUP", "0") == "1":  # LIVE-REALISTIC rule: keep snapshot only when L0 (top-of-book price/size) changes
+    bp = ar["bid_0_price"]; bs = ar["bid_0_size"]; ap = ar["ask_0_price"]; az = ar["ask_0_size"]
+    chg = np.ones(len(bp), bool); chg[1:] = (bp[1:] != bp[:-1]) | (bs[1:] != bs[:-1]) | (ap[1:] != ap[:-1]) | (az[1:] != az[:-1])
+    keep = np.where(chg)[0]; ar = {c: ar[c][keep] for c in cols}
+    print(f"  DEDUP(L0-change): chronos book -> {len(keep)} snapshots ({len(keep)/4.5/3600:.2f}/s) [no cl timestamps used]", flush=True)
+MININT = int(os.environ.get("MININT", "0"))
+if MININT > 0:  # LIVE-REALISTIC: keep a snapshot only if >= MININT ms since last kept (-> matches cl DENSITY, not exact times)
+    mi = MININT * 1_000_000; ts = ar["timestamp"]; keep = [0]; last = ts[0]
+    for i in range(1, len(ts)):
+        if ts[i] - last >= mi:
+            keep.append(i); last = ts[i]
+    keep = np.array(keep); ar = {c: ar[c][keep] for c in cols}
+    print(f"  MININT={MININT}ms: chronos book -> {len(keep)} snapshots ({len(keep)/4.5/3600:.2f}/s) [no cl timestamps used]", flush=True)
+if os.environ.get("TRADESAMPLE", "0") == "1":  # LIVE-REALISTIC: snapshot the book at each TRADE event (hypothesis: cl's rule)
+    tts = []
+    for b in bk.client.list_blobs(bk, prefix="tmp_chronos_parity/DOGEUSDT/trade/"):
+        if not b.name.endswith(".parquet"): continue
+        bk.blob(b.name).download_to_filename(f"{TD}/tt.parquet")
+        e = pq.read_table(f"{TD}/tt.parquet", columns=["exchange_event_ts_us"]).to_pandas(); e = e[e["exchange_event_ts_us"].notna()]
+        tts.append((e["exchange_event_ts_us"].astype("int64") * 1000).to_numpy())
+    tts = np.sort(np.concatenate(tts)); cht = ar["timestamp"]
+    jj = np.clip(np.searchsorted(cht, tts), 1, len(cht) - 1)
+    keep = np.unique(np.where(np.abs(cht[jj - 1] - tts) < np.abs(cht[jj] - tts), jj - 1, jj))
+    ar = {c: ar[c][keep] for c in cols}
+    print(f"  TRADESAMPLE: book sampled at trade events -> {len(keep)} ({len(keep)/4.5/3600:.2f}/s) [replicable live]", flush=True)
 ar["sequence_number"] = np.arange(len(ar["timestamp"]), dtype=np.int64)
 pq.write_table(pa.table({c: ar[c] for c in cols}), f"{TD}/book_ch.parquet")
 tc = ["side", "amount", "price", "id", "timestamp", "receipt_timestamp"]; ta = {c: [] for c in tc}

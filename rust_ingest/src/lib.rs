@@ -257,11 +257,15 @@ pub fn read_trades_parquet(path: &Path) -> Result<TradesData> {
         (schema.index_of("amount").context("trades missing amount")?,
          schema.index_of("side").context("trades missing side")?)
     };
+    // Cryptolake FLAT trades carry the aggTrade `id` (used to dedup 3x triplication); the
+    // recorder's nested schema has no `id` -> no dedup there (already unique).
+    let id_idx = schema.index_of("id").ok();
 
     let mut ts = Array1::<i64>::zeros(total);
     let mut price = Array1::<f64>::zeros(total);
     let mut qty = Array1::<f64>::zeros(total);
     let mut is_sell = vec![false; total];
+    let mut ids: Vec<i64> = if id_idx.is_some() { vec![0i64; total] } else { Vec::new() };
 
     let mut off = 0usize;
     for b in &batches {
@@ -297,7 +301,28 @@ pub fn read_trades_parquet(path: &Path) -> Result<TradesData> {
         }
         price.as_slice_mut().unwrap()[off..off + n].copy_from_slice(&price_col.values()[..n]);
         qty.as_slice_mut().unwrap()[off..off + n].copy_from_slice(&qty_col.values()[..n]);
+        if let Some(ii) = id_idx {
+            if let Some(idc) = b.column(ii).as_any().downcast_ref::<Int64Array>() {
+                ids[off..off + n].copy_from_slice(&idc.values()[..n]);
+            }
+        }
         off += n;
+    }
+
+    // Dedup Cryptolake's 3x trade triplication: rows repeat 3x with identical id/ts/price/qty/side,
+    // only receipt_timestamp differs. Keep the first of each consecutive-same-id run so trade
+    // count/volume/rate features match the live recorder's unique aggTrades. No-op when no `id`.
+    if !ids.is_empty() {
+        let mut seen = std::collections::HashSet::with_capacity(total);
+        let keep: Vec<usize> = (0..total).filter(|&i| seen.insert(ids[i])).collect();
+        if keep.len() < total {
+            return Ok(TradesData {
+                timestamps: Array1::from_vec(keep.iter().map(|&i| ts[i]).collect()),
+                prices: Array1::from_vec(keep.iter().map(|&i| price[i]).collect()),
+                quantities: Array1::from_vec(keep.iter().map(|&i| qty[i]).collect()),
+                is_sell: keep.iter().map(|&i| is_sell[i]).collect(),
+            });
+        }
     }
 
     Ok(TradesData {
