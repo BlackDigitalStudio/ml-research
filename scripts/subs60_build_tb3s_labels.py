@@ -45,6 +45,13 @@ ENTRY_MS = int(os.environ.get("ENTRY_MS", "12800"))
 CHASE_MS = int(os.environ.get("CHASE_MS", "300000"))
 HOLDS_S = [float(x) for x in os.environ.get("HOLDS_S", "15,30,60").split(",")]
 QM = 1.0; EXIT_QM = 1.0
+# LEGACY=1: pipeline-validation cell — reproduce the OLD tick-window semantics through this
+# exact build path (tick-strided ~TICK_TPD/day grid, entry 120 ticks, holds in TICKS
+# [141,282,563], chase to path end, H=700). Target: reproduce the recorded ~+3.4..+4.3
+# year EV; validates the new pipeline end-to-end, attributing the tb3s delta to semantics.
+LEGACY = os.environ.get("LEGACY", "") == "1"
+TICK_TPD = int(os.environ.get("TICK_TPD", "5950"))
+OUT = os.environ.get("OUTSUB", OUT)
 PARITY = int(os.environ.get("PARITY", "0")); NSHARD = int(os.environ.get("NSHARD", "1"))
 COMBINE = os.environ.get("COMBINE", "") == "1"
 TD = os.environ.get("WORKDIR", "/home/delmi/tb3s"); os.makedirs(TD, exist_ok=True)  # DISK, not /dev/shm (logind RemoveIPC wipes shm)
@@ -124,10 +131,15 @@ def process_day(day, bt, bm):
     n = len(ts_ns)
     if n < W + H_TICKS + 100:
         return f"thin-book n={n}"
-    # time-uniform 3s decision grid -> last tick <= grid point (live wall-clock cadence)
-    grid = np.arange(ts_ns[0], ts_ns[-1], int(STEP_S * NS))
-    ends = np.unique(np.clip(np.searchsorted(ts_ns, grid, "right") - 1, 0, n - 1))
-    ends = ends[(ends >= W - 1) & (ends < n - H_TICKS - 1)].astype(np.int64)
+    if LEGACY:
+        # tick-strided grid like the old feats/build pipeline (~TICK_TPD decisions/day)
+        stp = max(1, (n - W - H_TICKS) // TICK_TPD)
+        ends = np.arange(W - 1, n - H_TICKS - 1, stp, dtype=np.int64)
+    else:
+        # time-uniform 3s decision grid -> last tick <= grid point (live wall-clock cadence)
+        grid = np.arange(ts_ns[0], ts_ns[-1], int(STEP_S * NS))
+        ends = np.unique(np.clip(np.searchsorted(ts_ns, grid, "right") - 1, 0, n - 1))
+        ends = ends[(ends >= W - 1) & (ends < n - H_TICKS - 1)].astype(np.int64)
     if len(ends) < 100:
         return f"few-ends {len(ends)}"
     np.save(f"{TD}/ends.npy", ends)
@@ -142,19 +154,23 @@ def process_day(day, bt, bm):
     t_bs = time.time() - t0
     # sample_ends after build_samples' own validity filter (starts sorted+deduped => order preserved)
     se = np.load(f"{od}/end_indices.npy").astype(np.int64)
-    cfgs = [{"tp": 50.0, "sl": 50.0, "to": 282, "to_ms": hs * 1000.0, "par": False, "tr": False} for hs in HOLDS_S]
+    if LEGACY:
+        cfgs = [{"tp": 50.0, "sl": 50.0, "to": t, "par": False, "tr": False} for t in (141, 282, 563)]
+    else:
+        cfgs = [{"tp": 50.0, "sl": 50.0, "to": 282, "to_ms": hs * 1000.0, "par": False, "tr": False} for hs in HOLDS_S]
     json.dump(cfgs, open(f"{TD}/cfg.json", "w"))
     g = f"{TD}/g"; t1 = time.time()
-    rr = subprocess.run([GRID, "--entry-long", f"{od}/entry_long.npy", "--entry-short", f"{od}/entry_short.npy",
-                         "--mid-paths", f"{od}/mid_paths.npy", "--book-paths", f"{od}/book_paths.npy",
-                         "--entry-book", f"{od}/entry_book.npy", "--flow-paths", f"{od}/flow_paths.npy",
-                         "--entry-q", f"{od}/entry_q.npy", "--configs", f"{TD}/cfg.json", "--out-prefix", g,
-                         "--queue-mult", str(QM), "--exit-queue-mult", str(EXIT_QM),
-                         "--ts-paths", f"{od}/ts_paths.npy", "--sample-ts", f"{od}/sample_ts.npy",
-                         "--entry-window-ms", str(ENTRY_MS), "--chase-ms", str(CHASE_MS),
-                         "--entry-window-ticks", "120", "--maker-offset-frac", "0",
-                         "--commission-win-pct", "0", "--commission-loss-pct", "0"],
-                        capture_output=True, text=True)
+    cmd = [GRID, "--entry-long", f"{od}/entry_long.npy", "--entry-short", f"{od}/entry_short.npy",
+           "--mid-paths", f"{od}/mid_paths.npy", "--book-paths", f"{od}/book_paths.npy",
+           "--entry-book", f"{od}/entry_book.npy", "--flow-paths", f"{od}/flow_paths.npy",
+           "--entry-q", f"{od}/entry_q.npy", "--configs", f"{TD}/cfg.json", "--out-prefix", g,
+           "--queue-mult", str(QM), "--exit-queue-mult", str(EXIT_QM),
+           "--entry-window-ticks", "120", "--maker-offset-frac", "0",
+           "--commission-win-pct", "0", "--commission-loss-pct", "0"]
+    if not LEGACY:
+        cmd += ["--ts-paths", f"{od}/ts_paths.npy", "--sample-ts", f"{od}/sample_ts.npy",
+                "--entry-window-ms", str(ENTRY_MS), "--chase-ms", str(CHASE_MS)]
+    rr = subprocess.run(cmd, capture_output=True, text=True)
     if rr.returncode != 0:
         return f"GRID-fail:{rr.stderr[-250:]}"
     t_gs = time.time() - t1
@@ -206,7 +222,7 @@ def combine():
             "step_s": STEP_S, "entry_ms": ENTRY_MS, "chase_ms": CHASE_MS, "holds_s": HOLDS_S,
             "queue_mults": [QM], "exit_qm": EXIT_QM, "H_ticks": H_TICKS, "window": W,
             "cfgs": [{"tp": 50.0, "sl": 50.0, "to_ms": h * 1000.0} for h in HOLDS_S],
-            "maker_rt_fee_pct": 0.0, "time_based": True,
+            "maker_rt_fee_pct": 0.0, "time_based": not LEGACY, "legacy_ticks": LEGACY,
             "note": "honest time-based windows: entry 12.8s from decision, hold from FILL, chase 300s"}
     buf = io.BytesIO()
     np.savez_compressed(buf, F=F, rH30=np.concatenate(a30), rH15=np.concatenate(a15), rH60=np.concatenate(a60),
