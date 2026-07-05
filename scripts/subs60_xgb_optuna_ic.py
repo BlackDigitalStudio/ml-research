@@ -181,6 +181,16 @@ for fi, (trn, tst) in enumerate(FOLDS):
     perfold.append((axb_tr, axb_te, noa_tr, noa_te, day[tri], day[tei], pBg_te >= 0.5, pBf_te >= 0.5, fl[tei], fs[tei], netl[tei], nets[tei]))
     print(f"  fold{fi}: A AUC={aucA:.3f} | B IC(val)={icB:+.4f} (d{hpB['max_depth']},nr{biB})", flush=True)
 
+if os.environ.get("SAVE_PF", "") == "1":   # capture-everything: per-fold test scores for offline selectivity work
+    tag = os.environ.get("PFTAG", "")
+    for fi, (axb_tr, axb_te, noa_tr, noa_te, dt, de, sBg, sBf, flt, fst, nlt, nst) in enumerate(perfold):
+        pbuf = io.BytesIO()
+        np.savez_compressed(pbuf, axb_tr=axb_tr.astype(np.float32), axb_te=axb_te.astype(np.float32),
+                            noa_te=noa_te.astype(np.float32), day_tr=dt.astype(np.int32), day_te=de.astype(np.int32),
+                            side=sBg, side_f=sBf, fl=flt, fs=fst, netl=nlt.astype(np.float32), nets=nst.astype(np.float32))
+        bk.blob(f"research_runs/{LABELSUB}/PERFOLD{tag}_{SYM}_qm{QMIDX}_f{fi}.npz").upload_from_string(pbuf.getvalue())
+    print(f"[saved perfold artifacts x{len(perfold)} tag={tag}]", flush=True)
+
 print(f"\n  {'pol':>4} {'tgt':>4} {'trd/d':>6} {'EV/trd':>8} {'annS':>6} {'hit%':>6} {'tot/d':>7}  per-fold", flush=True)
 RES = {}
 for tgt in BUDGETS:
