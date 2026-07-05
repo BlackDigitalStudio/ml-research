@@ -508,9 +508,10 @@ class Executor:
         if filled == 0:
             self._tlog({"ev": "entry_miss", "oid": oid})
             return
+        fill_ts = time.time()   # sim holds `to` ticks FROM FILL (grid_sim: es = k + c.to)
         self._tlog({"ev": "entry_fill", "oid": oid, "filled": filled, "avg_px": entry_px})
-        # ---- hold to decision_ts + HOLD_S ----
-        time.sleep(max(0.0, decision_ts + HOLD_S - time.time()))
+        # ---- hold to fill + HOLD_S ----
+        time.sleep(max(0.0, fill_ts + HOLD_S - time.time()))
         # ---- pegged maker exit (reduce-only GTX at touch, re-quote on adverse move) ----
         t_exit0 = time.time()
         exit_oid = 0
