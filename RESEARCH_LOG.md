@@ -1127,3 +1127,48 @@ symbol-set, one year. **Reproduce:** per symbol `subs60_makerlabel_build.py … 
 `subs60_xgb_optuna_ic.py {sym} maker_labels_pegexit_qm1 0`. Exit source `scripts/grid_sim_exitdbg.rs`
 (`simulate_pegged_exit`), built on VM `/tmp/husdc` against `live_sim` (has `simulate_maker_entry`).
 Ledger `xgb-20260606_pegexit_alwayslast_axb_noA_doge_eth_btc`.
+
+## 20. 2026-07-05 — HONEST time-based windows + the label-matching lookahead (HD3 rev6)
+
+**Scope:** DOGE-USDT-PERP CL year 2025-05-09…2026-06-02, same walk-forward protocol as §18-19
+(`subs60_xgb_optuna_ic`, W=200/T=30/EMB=2, per-fold Optuna A-AUC+B-IC, causal-rolling, zero fee).
+
+**Motivation (audit):** CL books are event-driven (1.45-2.32 snaps/s), so §19's tick windows were NOT
+wall-clock: "282t hold" = 2-3 min, "120t entry" = 51-83 s. Live executes 12.8 s entry / 30 s hold.
+Rebuilt the year with TIME-BASED windows (grid_sim time-mode, verified vs python replication:
+1000 samples, 0 mismatches; hold median 30.76 s) at a 3 s time-uniform decision grid (live cadence).
+
+**Honest surface (live-parity inputs btc=0; gross, 0 fee):** AxB EV/tr **t5 −3.77 / t10 −3.20 /
+t20 −3.30 / t40 −3.16**; all 7 folds ≤ +0.1 at t5. Real-btc variant +0.3-0.6 bp better, sign unchanged.
+B IC(val) +0.049…+0.090 on every fold — the direction signal is alive; selection does not convert it
+at 30 s (top-tail = A's vol bursts, where the 30 s maker cycle is most adverse; selected −3.77 vs
+unconditional filled −2.8).
+
+**Root cause of the historical positive year (cell isolation):** `makerlabel_build` matched each
+decision point to the NEAREST build sample within **±2.5 s** → in ~half the rows the maker entry was
+priced/queued at a book tick up to 2.5 s in the PAST relative to feature time = **label-matching
+lookahead**. Rebuilding labels at the EXACT feature tick (robust2 F + grid + SAME 2-3-min tick
+windows, only matching removed): **+3.77 → −1.74** (t5; per-fold −7.5, +14.9, −7.2, −3.5, +0.1, −11.0),
++1.95 → −0.72 (t10). **≈5.5 bp/tr of the recorded edge was the artifact.** §19's qm1 baseline
+(+4.17/annS +3.40) used the same matching and carries the same inflation.
+
+**Cell matrix (EV/tr t5):** qm1 matched +4.17 | robust2 matched +3.77 | robust2 EXACT-labels **−1.74** |
+my-grid exact (legacy repro, 388 d) +0.91 | honest 30 s 3 s-grid **−3.77** | **live-config**
+(2-3-min-trained B → honest 30 s execution, ts-join) **−2.35** (per-fold −2.0, −4.6, −9.3, −2.6,
+**+1.2, +2.7**, −0.0 — the two most recent folds positive, consistent with the matching-clean 7-day
+recorder-EV +10.3 = regime wobble, not persistent edge).
+
+**Pipeline validation:** recomputing FB-full features at robust2's exact ticks + robust2's own labels
+reproduced the recorded +3.77 **bit-exactly** → the new build path is exonerated, and robust2's F ≡
+FB-full (so qm1 vs robust2 differ ONLY in vol cols 34-39 — which alone reshuffled the fold structure
+[9.6, 11.3, 4.9, 2.5, 4.0, −0.6] → [−1.1, 23.2, 16.0, −1.9, −3.4, −3.9]).
+
+**Selectivity mechanics (tested on saved per-fold scores, no retrain):** take-clustering at the 3 s
+grid is real (47-50 % of takes < 60 s apart) but bounded: 12 s/24 s subsampling → −3.67/−2.40;
+cooldown 30/60/120 s → best −1.11; equal-quantile control clean. ≤ 1-2.5 bp, does not flip the sign.
+
+**Standing conclusion (this data/model/execution):** under exact label alignment the AxB maker family
+shows ~0 (±1.5 fold-noise) EV at the old 2-3-min semantics and −2.4…−3.8 bp/tr at honest 30 s live
+semantics, all budgets. Only regime-conditional positives remain (recent folds, 7-d recorder-EV).
+**Rule going forward: labels must be built at the exact decision tick — never nearest-matched.**
+Artifacts: `research_runs/maker_labels_tb3s*`, `maker_labels_robust2_{fbfull,exactlab}`; ledger rev6.
