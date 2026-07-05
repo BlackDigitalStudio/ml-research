@@ -83,8 +83,11 @@ SIZE_FRAC = float(os.environ.get("SIZE_FRAC", "1.0"))        # fraction of avail
 LEVERAGE = 2                    # margin headroom only; notional stays SIZE_FRAC * balance
 ENTRY_WIN_S = 12.8              # == 120 ticks @ ~9.4/s (sim entry window)
 HOLD_S = 30.05                  # == 282 ticks from DECISION ts (sim hold-to-timeout)
-EXIT_MAX_S = 300.0              # pegged-exit chase cap, then taker backstop (sim has no taker;
-HARD_LOSS_BP = 50.0             #  backstop is pure account protection, logged when used)
+# Policy (user 2026-07-05): maker-only exit, NEVER taker — chase until filled. The backstop
+# below is a CATASTROPHIC-only guard (flash-crash account protection), not an exit path:
+# 5-min chase fills 98.6-98.8% (measured 20260704), so these should fire ~never.
+EXIT_MAX_S = float(os.environ.get("EXIT_MAX_S", "86400"))
+HARD_LOSS_BP = float(os.environ.get("HARD_LOSS_BP", "300"))
 DAY_LOSS_HALT = 0.05            # halt trading for the UTC day at -5% of day-start balance
 DAY_TRADES_HALT = 40            # anomaly brake (t10 selectivity targets ~10/day)
 REST_BASE = "https://fapi.binance.com"
