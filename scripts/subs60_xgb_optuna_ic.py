@@ -20,7 +20,8 @@ NTHREAD = int(sys.argv[4]) if len(sys.argv) > 4 else 8
 PROJ = "project-0998ac51-36ba-445c-bc7"; BUCKET = "market-data-0998ac51"
 W, T, EMB = 200, 30, 2; NF_RATE = 0.05; GATE_PCT = 5.0; KDAYS = 30; KNORM = 20
 SUBVAL_D = 30; N_TRIALS = int(os.environ.get("N_TRIALS", "25")); TUNE_SUB = 200000; SEED = int(os.environ.get("SEED", "0"))
-CFGIDX, RHKEY = 1, "rH30"; BUDGETS = [5, 10]
+CFGIDX, RHKEY = int(os.environ.get("CFGIDX", "1")), "rH30"
+BUDGETS = [int(x) for x in os.environ.get("BUDGETS", "5,10").split(",")]
 bk = storage.Client(project=PROJ).bucket(BUCKET)
 
 
@@ -116,6 +117,8 @@ if _drop:
     dc = sorted(int(x) for x in _drop.split(","))
     keep = [i for i in range(F.shape[1]) if i not in dc]
     F = F[:, keep]; print(f"*** DROPPED cols {dc} -> F now {F.shape[1]} cols ***", flush=True)
+if os.environ.get("ZERO_BTC", "") == "1":   # live feeds btc_lead=0 -> train with exact live inputs
+    F[:, 64:67] = 0.0; print("*** ZERO_BTC: cols 64-66 (btc_ret5/30/60) zeroed ***", flush=True)
 netl = d["pnl_long"][CFGIDX, QMIDX, :].astype(np.float64) * 100.0; nets = d["pnl_short"][CFGIDX, QMIDX, :].astype(np.float64) * 100.0
 fl = d["fill_long"].astype(bool)[QMIDX]; fs = d["fill_short"].astype(bool)[QMIDX]; nfeat = F.shape[1]
 day_mean = np.zeros((ndays, nfeat)); day_var = np.zeros((ndays, nfeat))
