@@ -1172,3 +1172,25 @@ shows ~0 (±1.5 fold-noise) EV at the old 2-3-min semantics and −2.4…−3.8 
 semantics, all budgets. Only regime-conditional positives remain (recent folds, 7-d recorder-EV).
 **Rule going forward: labels must be built at the exact decision tick — never nearest-matched.**
 Artifacts: `research_runs/maker_labels_tb3s*`, `maker_labels_robust2_{fbfull,exactlab}`; ledger rev6.
+
+### §20a. 2026-07-05 — CORRECTION: the "label-matching lookahead" attribution is WITHDRAWN
+
+A model-free test refuted the mechanism claimed in §20: the build grid is dense (40k/day →
+matched offset |dt| median ~0.3 s, overlap move p90 = 0.91 bp) and the matched labels do NOT pay
+the overlap move (corr(r_ov, netl): matched −0.031 vs exact −0.042; follow-overlap-side tail EV
+negative on both). Row-level matched-vs-exact across the year: **corr 0.99, mean diff −0.001 bp,
+fill agreement 97.4 %, yB target agreement 95.0 %** — no leak, no systematic label change.
+
+**Revised interpretation of +3.77 → −1.74:** a ~5 % zero-mean perturbation of B's training targets
+swings the year walk-forward total by ~5.5 bp ⇒ the protocol's year-EV estimate has a **structural
+variance of several bp** (top-5/day tail selection × deep trees × per-fold Optuna). The
+old-semantics measurements (+4.17, +3.77, +0.91, −1.74) are draws from one wide distribution
+(mean ≈ +1 ± 3): **the year never statistically identified an edge at the old semantics** — which
+retroactively explains the fold reshuffle from the 6-column feature swap and DOGE-only positivity.
+The honest-30 s cells are consistently negative across all draws (−3.8…−2.4, every budget, both
+training horizons) — that conclusion is stable.
+
+**Process rule:** any year-EV from this protocol family requires a **perturbation gate** — retrain
+on label-jittered / target-flipped copies; the spread across copies is the error bar. §20's window
+semantics facts, pipeline validation, and selectivity bounds stand; only the lookahead attribution
+is withdrawn.
