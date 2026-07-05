@@ -94,6 +94,24 @@ struct Args {
     #[arg(long, default_value_t = 1.0)]
     exit_queue_mult: f64,
 
+    // ─── TIME-BASED windows (opt-in). Event-driven books (Cryptolake) have variable
+    //     tick density, so tick-count windows are NOT wall-clock. With --ts-paths +
+    //     --sample-ts the maker windows are measured in ms: entry window from the
+    //     DECISION ts, hold (cfg.to_ms) from the FILL ts, chase from hold end.
+    //     Flags absent => legacy tick behavior, bit-identical.
+    /// Optional (n_samples, horizon) i64 .npy — wall-clock ms of each forward path tick.
+    #[arg(long)]
+    ts_paths: Option<PathBuf>,
+    /// Optional (n_samples,) i64 .npy — decision ts (ms) per sample (build_samples sample_ts).
+    #[arg(long)]
+    sample_ts: Option<PathBuf>,
+    /// Maker entry window in ms from decision ts (requires --ts-paths & --sample-ts). 0 = use --entry-window-ticks.
+    #[arg(long, default_value_t = 0)]
+    entry_window_ms: i64,
+    /// Pegged-exit chase horizon in ms after hold end (requires --ts-paths + cfg.to_ms). 0 = chase to path end.
+    #[arg(long, default_value_t = 0)]
+    chase_ms: i64,
+
     /// Maker exit at ABSOLUTE tick `to` from t0 (timeout = to - fill_tick), not `to` from the fill tick.
     /// Aligns the trade horizon + label to a fixed t0+to, independent of fill delay.
     #[arg(long)]
@@ -187,6 +205,10 @@ struct OuterCfg {
     tp: f64,
     sl: f64,
     to: i64,
+    /// Optional wall-clock hold in ms FROM THE FILL tick (time mode; needs --ts-paths).
+    /// When set, overrides `to` (ticks) for the maker pegged-exit hold end.
+    #[serde(default)]
+    to_ms: Option<f64>,
     #[serde(default)]
     par: bool,
     #[serde(default)]
@@ -471,6 +493,31 @@ fn main() -> Result<()> {
         !maker || a.book_paths.is_some(),
         "maker-entry (--flow-paths) requires --book-paths"
     );
+    // TIME mode inputs (opt-in).
+    let ts_paths_arr: Option<Array2<i64>> = match &a.ts_paths {
+        Some(p) => Some(read_npy(p).context("ts_paths")?),
+        None => None,
+    };
+    let sample_ts_arr: Option<Array1<i64>> = match &a.sample_ts {
+        Some(p) => Some(read_npy(p).context("sample_ts")?),
+        None => None,
+    };
+    let time_mode = ts_paths_arr.is_some();
+    if time_mode {
+        let tp = ts_paths_arr.as_ref().unwrap();
+        anyhow::ensure!(tp.nrows() == ns, "ts_paths nrows {} != ns {}", tp.nrows(), ns);
+        anyhow::ensure!(
+            a.entry_window_ms == 0 || sample_ts_arr.is_some(),
+            "--entry-window-ms requires --sample-ts"
+        );
+        if let Some(st) = sample_ts_arr.as_ref() {
+            anyhow::ensure!(st.len() == ns, "sample_ts len {} != ns {}", st.len(), ns);
+        }
+        eprintln!(
+            "grid_sim: TIME mode (entry_window_ms={} chase_ms={})",
+            a.entry_window_ms, a.chase_ms
+        );
+    }
 
     let configs_raw = fs::read_to_string(&a.configs).context("read configs json")?;
     let configs: Vec<OuterCfg> =
@@ -549,7 +596,15 @@ fn main() -> Result<()> {
                     let q_s = entry_q_arr.as_ref().map(|q| q[[i, 1]]).unwrap_or(0.0) * a.queue_mult;
                     let lvl_l = eb.bid - eb.bid * a.maker_offset_frac;
                     let lvl_s = eb.ask + eb.ask * a.maker_offset_frac;
-                    let win = a.entry_window_ticks.max(0) as usize;
+                    // Entry window: wall-clock (ms from decision ts) in time mode, else ticks.
+                    let win = if time_mode && a.entry_window_ms > 0 {
+                        let tsrow = ts_paths_arr.as_ref().unwrap().row(i);
+                        let ts = tsrow.as_slice().expect("ts_paths row contig");
+                        let deadline = sample_ts_arr.as_ref().unwrap()[i] + a.entry_window_ms;
+                        ts.partition_point(|&x| x <= deadline)
+                    } else {
+                        a.entry_window_ticks.max(0) as usize
+                    };
                     let fl_e = simulate_maker_entry(SimDirection::Long, lvl_l, q_l, &path, &flowv, win);
                     let fs_e = simulate_maker_entry(SimDirection::Short, lvl_s, q_s, &path, &flowv, win);
                     // pegged exit, ALWAYS LAST: queue = full close-touch depth × exit_queue_mult.
@@ -564,6 +619,27 @@ fn main() -> Result<()> {
                     filled_l = fill_l.is_some() as u8;
                     filled_s = fill_s.is_some() as u8;
                 }
+                // Hold-end (es) + chase-end (ce) for the pegged exit of a fill at tick k.
+                // TIME mode (cfg.to_ms): hold = wall-clock ms from the FILL ts, chase =
+                // --chase-ms after hold end. Legacy: hold = `to` ticks, chase to path end.
+                let hold_bounds = |k: usize, c: &OuterCfg| -> (usize, usize) {
+                    if time_mode && c.to_ms.is_some() {
+                        let tsrow = ts_paths_arr.as_ref().unwrap().row(i);
+                        let ts = tsrow.as_slice().expect("ts_paths row contig");
+                        let hold_end = ts[k] + c.to_ms.unwrap() as i64;
+                        let es = ts.partition_point(|&x| x < hold_end).min(h.saturating_sub(1));
+                        let ce = if a.chase_ms > 0 {
+                            ts.partition_point(|&x| x < hold_end + a.chase_ms)
+                                .max(es + 1)
+                                .min(h)
+                        } else {
+                            h
+                        };
+                        (es, ce)
+                    } else {
+                        ((k + c.to as usize).min(h.saturating_sub(1)), h)
+                    }
+                };
                 for c in configs.iter() {
                     let cfg = LiveSimConfig {
                         tp_pct: c.tp,
@@ -586,8 +662,8 @@ fn main() -> Result<()> {
                         let _ = (&cfg, lat);
                         let lp = match fill_l {
                             Some((k, fpx)) => {
-                                let es = (k + c.to as usize).min(h.saturating_sub(1));
-                                let (net, fk) = simulate_pegged_exit(SimDirection::Long, fpx, qex_l, &path[es..], &flowv[es..]);
+                                let (es, ce) = hold_bounds(k, c);
+                                let (net, fk) = simulate_pegged_exit(SimDirection::Long, fpx, qex_l, &path[es..ce], &flowv[es..ce]);
                                 EXL[if fk == 1 { 7 } else { 8 }].fetch_add(1, Ordering::Relaxed);
                                 net
                             }
@@ -595,8 +671,8 @@ fn main() -> Result<()> {
                         };
                         let sp = match fill_s {
                             Some((k, fpx)) => {
-                                let es = (k + c.to as usize).min(h.saturating_sub(1));
-                                let (net, fk) = simulate_pegged_exit(SimDirection::Short, fpx, qex_s, &path[es..], &flowv[es..]);
+                                let (es, ce) = hold_bounds(k, c);
+                                let (net, fk) = simulate_pegged_exit(SimDirection::Short, fpx, qex_s, &path[es..ce], &flowv[es..ce]);
                                 EXS[if fk == 1 { 7 } else { 8 }].fetch_add(1, Ordering::Relaxed);
                                 net
                             }
