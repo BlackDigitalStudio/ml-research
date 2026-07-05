@@ -1194,3 +1194,13 @@ training horizons) — that conclusion is stable.
 on label-jittered / target-flipped copies; the spread across copies is the error bar. §20's window
 semantics facts, pipeline validation, and selectivity bounds stand; only the lookahead attribution
 is withdrawn.
+
+### §20b. 2026-07-06 — seed-variance proof (closes the "high Sharpe = significant" challenge)
+
+Byte-identical robust2 data, same code, ONLY the RNG seed varied: AxB t5 year EV = **+3.77 (seed 0,
+recorded) / −1.87 / +2.81 / +2.07** (seeds 1-3); t10 +1.95/−0.42/+0.39/+1.76. **5.6 bp peak-to-peak
+from RNG alone** — the per-trade Sharpe CI is conditional on one training realization. Combined
+equivalent-realization ensemble at the old tick semantics: {+4.17, +3.77, +2.81, +2.07, +0.91, −1.74,
+−1.87} = **+1.4 ± 2.4 bp/tr**. The regime PATTERN reproduces across seeds (winter folds usually
+positive, last fold consistently negative) but fold amplitudes swing tens of bp. The deployed live
+weights are literally the seed-0 member (train_deploy SEED=0). Seed/perturbation gate mandatory.
