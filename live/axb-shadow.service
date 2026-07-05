@@ -1,0 +1,22 @@
+[Unit]
+Description=AxB live shadow engine (deploy_robust2 DOGE, no orders)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=delmi
+Group=delmi
+Environment=HOME=/home/delmi
+WorkingDirectory=/home/delmi/axb
+ExecStart=/home/delmi/axb/venv/bin/python3 /home/delmi/axb/axb_live.py
+Restart=always
+RestartSec=5
+# feature windows need WARMUP_S of stream after every restart; keep restarts rare
+StartLimitIntervalSec=600
+StartLimitBurst=10
+Nice=10
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+[Unit]
+Description=AxB live trading engine (deploy_robust2 DOGE -> DOGEUSDC maker, budget t10)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=delmi
+Group=delmi
+Environment=HOME=/home/delmi
+Environment=MODE=live
+Environment=TRADE_BUDGET=10
+Environment=SIZE_FRAC=1.0
+WorkingDirectory=/home/delmi/axb
+ExecStart=/home/delmi/axb/venv/bin/python3 /home/delmi/axb/axb_live.py
+Restart=always
+RestartSec=5
+Nice=10
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
