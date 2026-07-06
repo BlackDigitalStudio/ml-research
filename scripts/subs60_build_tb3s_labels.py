@@ -31,8 +31,13 @@ from concurrent.futures import ThreadPoolExecutor
 from google.cloud import storage
 
 PROJ = "project-0998ac51-36ba-445c-bc7"; BUCKET = "market-data-0998ac51"
-RAWB = "raw/book/exchange=BINANCE_FUTURES/symbol=DOGE-USDT-PERP"
-RAWT = "raw/trades/exchange=BINANCE_FUTURES/symbol=DOGE-USDT-PERP"
+SYMF = os.environ.get("SYMF", "DOGE-USDT-PERP"); SYMK = SYMF.split("-")[0]
+RAWB = f"raw/book/exchange=BINANCE_FUTURES/symbol={SYMF}"
+RAWT = f"raw/trades/exchange=BINANCE_FUTURES/symbol={SYMF}"
+# FULLFEAT=1: feed FB the full input set (funding/liquidations/open-interest/ETH-trades) —
+# without it cols 13,14-16/55,56-60 are silently zero (the robust-rebuild omission).
+FULLFEAT = os.environ.get("FULLFEAT", "") == "1"
+ETHF = "ETH-USDT-PERP"
 FB = os.environ.get("FB_BIN", "/tmp/fb_target/release/feature_builder")          # robust feats
 BS = os.environ.get("BS_BIN", "/tmp/husdc_target/release/build_samples")         # husdc + time-mode
 GRID = os.environ.get("GRID_BIN", "/tmp/husdc_target/release/grid_sim_exitdbg")  # pegged exit + time-mode
@@ -179,8 +184,14 @@ def process_day(day, bt, bm):
     # features at the same decision ticks
     t2 = time.time()
     np.save(f"{TD}/idx.npy", se)
-    fr = subprocess.run([FB, "--depth", bp, "--indices", f"{TD}/idx.npy", "--out", f"{TD}/f.npy",
-                         "--trades", tp], capture_output=True, text=True)
+    fcmd = [FB, "--depth", bp, "--indices", f"{TD}/idx.npy", "--out", f"{TD}/f.npy", "--trades", tp]
+    if FULLFEAT:
+        for stream, symq, flag in (("funding", SYMF, "--funding"), ("liquidations", SYMF, "--liquidations"),
+                                   ("open_interest", SYMF, "--open-interest"), ("trades", ETHF, "--eth")):
+            fpth = f"{TD}/{flag.strip('-')}.parquet"
+            if dl_raw(f"raw/{stream}/exchange=BINANCE_FUTURES/symbol={symq}/dt={day}/", fpth):
+                fcmd += [flag, fpth]
+    fr = subprocess.run(fcmd, capture_output=True, text=True)
     if fr.returncode != 0:
         return f"FB-fail:{fr.stderr[-200:]}"
     t_fb = time.time() - t2
@@ -194,7 +205,7 @@ def process_day(day, bt, bm):
     np.savez_compressed(buf, F=F, rH15=r15, rH30=r30, rH60=r60, ts=dtd,
                         pnl_long=PL.astype(np.float32), pnl_short=PS.astype(np.float32),
                         FL=FL.astype(np.uint8), FS=FS.astype(np.uint8))
-    bk.blob(f"{OUT}/daily/DOGE_{day}.npz").upload_from_string(buf.getvalue())
+    bk.blob(f"{OUT}/daily/{SYMK}_{day}.npz").upload_from_string(buf.getvalue())
     fl = FL.astype(bool); fill_r = float(fl.mean())
     i30 = min(range(len(HOLDS_S)), key=lambda i: abs(HOLDS_S[i] - 30.0))
     nl30 = PL[i30] * 100.0
@@ -204,7 +215,7 @@ def process_day(day, bt, bm):
 
 
 def combine():
-    blobs = sorted(b.name for b in cl.list_blobs(bk, prefix=f"{OUT}/daily/DOGE_") if b.name.endswith(".npz"))
+    blobs = sorted(b.name for b in cl.list_blobs(bk, prefix=f"{OUT}/daily/{SYMK}_") if b.name.endswith(".npz"))
     log(f"[combine] {len(blobs)} day files")
     aF, a15, a30, a60, aTs, aPL, aPS, aFL, aFS, aDay = [], [], [], [], [], [], [], [], [], []
     for di, nm in enumerate(blobs):
@@ -218,7 +229,7 @@ def combine():
     F = np.concatenate(aF); day = np.concatenate(aDay); ts = np.concatenate(aTs)
     PL = np.concatenate(aPL, 1)[:, None, :]; PS = np.concatenate(aPS, 1)[:, None, :]   # (NC,1,N)
     FL = np.concatenate(aFL)[None, :]; FS = np.concatenate(aFS)[None, :]               # (1,N)
-    meta = {"symbol": "DOGE-USDT-PERP", "n": int(len(F)), "n_days": len(blobs),
+    meta = {"symbol": SYMF, "n": int(len(F)), "n_days": len(blobs),
             "step_s": STEP_S, "entry_ms": ENTRY_MS, "chase_ms": CHASE_MS, "holds_s": HOLDS_S,
             "queue_mults": [QM], "exit_qm": EXIT_QM, "H_ticks": H_TICKS, "window": W,
             "cfgs": [{"tp": 50.0, "sl": 50.0, "to_ms": h * 1000.0} for h in HOLDS_S],
@@ -228,8 +239,8 @@ def combine():
     np.savez_compressed(buf, F=F, rH30=np.concatenate(a30), rH15=np.concatenate(a15), rH60=np.concatenate(a60),
                         day=day, ts=ts, pnl_long=PL, pnl_short=PS, fill_long=FL, fill_short=FS,
                         feat_names=np.array(NAMES), meta=np.array(json.dumps(meta)))
-    bk.blob(f"{OUT}/DOGE.npz").upload_from_string(buf.getvalue())
-    log(f"[saved] gs://{BUCKET}/{OUT}/DOGE.npz N={len(F)} days={len(blobs)} ({buf.tell()/1e6:.0f}MB)")
+    bk.blob(f"{OUT}/{SYMK}.npz").upload_from_string(buf.getvalue())
+    log(f"[saved] gs://{BUCKET}/{OUT}/{SYMK}.npz N={len(F)} days={len(blobs)} ({buf.tell()/1e6:.0f}MB)")
 
 
 def main():
@@ -237,7 +248,7 @@ def main():
         combine(); return
     days = day_list()
     days = [d for i, d in enumerate(sorted(days)) if i % NSHARD == PARITY]
-    done = {b.name.split("_")[-1][:-4] for b in cl.list_blobs(bk, prefix=f"{OUT}/daily/DOGE_") if b.name.endswith(".npz")}
+    done = {b.name.split("_")[-1][:-4] for b in cl.list_blobs(bk, prefix=f"{OUT}/daily/{SYMK}_") if b.name.endswith(".npz")}
     todo = [d for d in days if d not in done]
     log(f"[tb3s] shard {PARITY}/{NSHARD}: {len(days)} days, {len(todo)} to do | step {STEP_S}s "
         f"entry {ENTRY_MS}ms holds {HOLDS_S}s chase {CHASE_MS}ms H {H_TICKS}")
