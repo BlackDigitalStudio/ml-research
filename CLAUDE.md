@@ -60,6 +60,25 @@ The pull has identifiable sources, and naming them is the defense:
 5. Each tier characterizes *that model's own* alpha conditions. "Beats
    XGBoost / the snapshot baseline" is not the tier question.
 
+## Interpreting records, notes and memory (binding)
+
+Before ACTING on any conclusion recalled from a note, ledger record, memory
+file or prior-session summary:
+1. **Read the note's BODY, not just its index line / description** —
+   compressed one-liners strip the conditions that made the claim true.
+2. **Re-verify the claim against the current context by code and data**, not
+   by the note's wording: check that the referenced files/columns/flags/
+   datasets still exist and actually contain what the note implies. Two
+   measured failures of this rule in this repo: (a) "funding/OI/liq were
+   never in the features" — wrong: the columns exist (13, 14-16/55, 56-60)
+   and the qm1 dataset trained on REAL values; they were silently zeroed in
+   later rebuilds because feature_builder was invoked without those inputs;
+   (b) agents repeatedly citing noA-derived conclusions as constraints on
+   the deployed AxB policy, which does not use noA.
+3. **Every quantitative claim is a measured cell** (symbol × period ×
+   execution × features × protocol), not a law. State the cell before
+   reusing the number; outside its cell it is a hypothesis to re-measure.
+
 ## Mechanics (unchanged, still binding)
 
 - Develop on the assigned feature branch; commit + push; never push
