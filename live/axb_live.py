@@ -57,32 +57,44 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 PROJ = "project-0998ac51-36ba-445c-bc7"
 MKT = "market-data-0998ac51"
-BUNDLE = os.environ.get("BUNDLE_DIR", "research_runs/deploy_robust2/DOGE")
-RECEV_TMP = "research_runs/_recev_tmp"          # validated recorder-EV day scores (threshold seed)
-SHADOW_GCS = "research_runs/axb_shadow/DOGE"    # decision-log uploads
+# Symbol parameterization (one codebase, one systemd unit per symbol).
+SYMK = os.environ.get("SYMK", "DOGE")           # DOGE / BTC
+SYM = os.environ.get("SIGNAL_SYM", "dogeusdt")  # signal streams (USDT perp)
+EXEC_SYM = os.environ.get("EXEC_SYM", "DOGEUSDC")  # maker fee 0% venue
+ETH_SYM = "ethusdt"                             # ETH-lead trades (features 14-16, 55)
+BTC_SYM = "btcusdt"                             # BTC-lead book mid (features 64-66)
+# h150 deploy bundle = 4-seed ENSEMBLE; recorder ensemble scores seed the threshold.
+BUNDLE = os.environ.get("BUNDLE_DIR", f"research_runs/deploy_h150/{SYMK}")
+ENSEMBLE_SEEDS = [0, 1, 2, 3]
+RECEV_TMP = os.environ.get("RECEV_DIR", f"research_runs/_recev_h150_{SYMK}")  # recorder score seed
+SHADOW_GCS = f"research_runs/axb_shadow_h150/{SYMK}"
 FB = os.environ.get("FB_BIN", "/home/delmi/axb/feature_builder")
 WORK = os.environ.get("WORKDIR", "/home/delmi/axb")
-SYM = "dogeusdt"
 WS_BASE = "wss://fstream.binance.com"
 
 NS = 1_000_000_000
 LV = 20
-DECIDE_S = 10.8                 # == offline 8000 decisions/day
-WPD = round(86400 / DECIDE_S)   # 8000
+DECIDE_S = float(os.environ.get("DECIDE_S", "3.0"))   # h150 live cadence (offline 3s grid)
+WPD = round(86400 / DECIDE_S)                          # 28800
 BUDGETS = [5.0, 10.0, 20.0, 40.0]
 KDAYS = 30
-BUFFER_S = 900                  # ring buffers (max feature window 300s / 1200 ticks ~ 133s)
+BUFFER_S = 1200                 # ring buffers (h150: entry 60s + hold 150s + feature window 300s)
 WARMUP_S = 400                  # no decisions until this much book history
 STALE_S = 10                    # no decisions if the freshest book tick is older than this
+OI_POLL_S = 4.0                 # open-interest REST poll cadence (recorder derivatives_poll ~4s)
 
 # ---- execution (MODE=live) ----
 MODE = os.environ.get("MODE", "shadow")
-EXEC_SYM = "DOGEUSDC"           # maker fee 0% (venue-confirmed 2026-07-05); signal stays DOGEUSDT
-TRADE_BUDGET = float(os.environ.get("TRADE_BUDGET", "10"))   # which take-flag fires a trade
+TRADE_BUDGET = float(os.environ.get("TRADE_BUDGET", "5"))   # which take-flag fires a trade
 SIZE_FRAC = float(os.environ.get("SIZE_FRAC", "1.0"))        # fraction of available USDC as notional
 LEVERAGE = 2                    # margin headroom only; notional stays SIZE_FRAC * balance
-ENTRY_WIN_S = 12.8              # == 120 ticks @ ~9.4/s (sim entry window)
-HOLD_S = 30.05                  # == 282 ticks from DECISION ts (sim hold-to-timeout)
+ENTRY_WIN_S = float(os.environ.get("ENTRY_WIN_S", "60.0"))  # h150 maker entry window from decision
+HOLD_S = float(os.environ.get("HOLD_S", "150.0"))           # h150 hold FROM FILL before chasing exit
+# Per-symbol price/qty formatting (Binance USDⓈ-M exchangeInfo). DOGEUSDC tick 1e-5, qty step 1;
+# BTCUSDC tick 0.1, qty step 1e-3. Verified before enabling a symbol's live mode.
+PX_DEC = {"DOGEUSDC": 5, "BTCUSDC": 1}.get(EXEC_SYM, 5)
+QTY_DEC = {"DOGEUSDC": 0, "BTCUSDC": 3}.get(EXEC_SYM, 0)
+PX_TICK = {"DOGEUSDC": 0.00001, "BTCUSDC": 0.1}.get(EXEC_SYM, 0.00001)
 # Policy (user 2026-07-05): maker-only exit, NEVER taker — chase until filled. The backstop
 # below is a CATASTROPHIC-only guard (flash-crash account protection), not an exit path:
 # 5-min chase fills 98.6-98.8% (measured 20260704), so these should fire ~never.
@@ -95,33 +107,44 @@ REST_BASE = "https://fapi.binance.com"
 
 # ---------------------------------------------------------------- bundle
 class Bundle:
+    """4-seed ENSEMBLE. Each seed has its own vol-norm (mu/sd) + CDF refs (sA/sBg); the ensemble
+    score = mean over seeds of cdf(pA_s)*cdf(|pBg_s-.5|); side = mean pBg >= 0.5. Byte-mirror of
+    recorder_ev_h150.py so live scores match the validated offline recorder-EV."""
+
     def __init__(self) -> None:
         cl = storage.Client(project=PROJ)
         self.mkt = cl.bucket(MKT)
-        refs = np.load(io.BytesIO(self.mkt.blob(f"{BUNDLE}/refs.npz").download_as_bytes()))
-        meta = json.loads(self.mkt.blob(f"{BUNDLE}/meta.json").download_as_bytes())
-        knorm = meta["KNORM"]
-        gstd = refs["gstd"].astype(np.float64)
-        self.sA = refs["sA"]
-        self.sBg = refs["sBg"]
-        self.axb_seed = refs["axb_seed"].astype(np.float64)
-        self.mu = refs["day_mean"].astype(np.float64)[-knorm:].mean(0)
-        self.sd = np.maximum(np.sqrt(np.maximum(refs["day_var"].astype(np.float64)[-knorm:].mean(0), 0)),
-                             0.2 * gstd + 1e-9)
-        self.A = xgb.Booster()
-        self.Bg = xgb.Booster()
-        for nm, m in [("A", self.A), ("Bg", self.Bg)]:
-            p = f"{WORK}/{nm}.json"
-            self.mkt.blob(f"{BUNDLE}/{nm}.json").download_to_filename(p)
-            m.load_model(p)
-        log.info("bundle %s loaded (KNORM=%d, seed=%d scores)", BUNDLE, knorm, len(self.axb_seed))
+        self.seeds = []
+        for s in ENSEMBLE_SEEDS:
+            base = f"{BUNDLE}/seed{s}"
+            refs = np.load(io.BytesIO(self.mkt.blob(f"{base}/refs.npz").download_as_bytes()))
+            meta = json.loads(self.mkt.blob(f"{base}/meta.json").download_as_bytes())
+            knorm = meta["KNORM"]
+            gstd = refs["gstd"].astype(np.float64)
+            mu = refs["day_mean"].astype(np.float64)[-knorm:].mean(0)
+            sd = np.maximum(np.sqrt(np.maximum(refs["day_var"].astype(np.float64)[-knorm:].mean(0), 0)),
+                            0.2 * gstd + 1e-9)
+            A = xgb.Booster(); Bg = xgb.Booster()
+            for nm, m in (("A", A), ("Bg", Bg)):
+                p = f"{WORK}/{nm}{s}.json"
+                self.mkt.blob(f"{base}/{nm}.json").download_to_filename(p)
+                m.load_model(p)
+            self.seeds.append({"A": A, "Bg": Bg, "mu": mu, "sd": sd,
+                               "sA": refs["sA"], "sBg": refs["sBg"]})
+        log.info("ensemble bundle %s loaded (%d seeds, KNORM=%d)", BUNDLE, len(self.seeds), knorm)
 
-    def score(self, fn: np.ndarray) -> tuple[float, float, float]:
-        dm = xgb.DMatrix(fn)
-        pa_ = float(self.A.predict(dm)[0])
-        pb = float(self.Bg.predict(dm)[0])
-        cdf = lambda x, ref: float(np.searchsorted(ref, x, "right")) / max(len(ref), 1)
-        return pa_, pb, cdf(pa_, self.sA) * cdf(abs(pb - 0.5), self.sBg)
+    def score(self, x71: np.ndarray) -> tuple[float, float, float]:
+        """x71 = raw feat71 (1,71) f32, UN-normalized (each seed applies its own mu/sd)."""
+        cdf = lambda v, ref: float(np.searchsorted(ref, v, "right")) / max(len(ref), 1)
+        sc = 0.0; pb_sum = 0.0; pa_sum = 0.0
+        for sd in self.seeds:
+            fn = ((x71 - sd["mu"]) / sd["sd"]).astype(np.float32)
+            dm = xgb.DMatrix(fn)
+            pa_ = float(sd["A"].predict(dm)[0]); pb = float(sd["Bg"].predict(dm)[0])
+            sc += cdf(pa_, sd["sA"]) * cdf(abs(pb - 0.5), sd["sBg"])
+            pb_sum += pb; pa_sum += pa_
+        n = len(self.seeds)
+        return pa_sum / n, pb_sum / n, sc / n
 
 
 # ---------------------------------------------------------------- threshold (day-level causal_rolling)
@@ -143,13 +166,15 @@ class Threshold:
             log.info("threshold state restored: buf=%d pending=%d (saved day %s)",
                      len(self.buf), len(self.pending), saved_day)
         else:
-            self.buf = list(bundle.axb_seed)
-            for bl in sorted(b.name for b in bundle.mkt.client.list_blobs(bundle.mkt, prefix=f"{RECEV_TMP}/DOGE_")
+            # Seed tau from the RECORDER ensemble score distribution (matches the live venue; the CL
+            # seed ran hot and under-traded — 2026-07-07 diagnosis). Causal roll from here.
+            self.buf = []
+            for bl in sorted(b.name for b in bundle.mkt.client.list_blobs(bundle.mkt, prefix=f"{RECEV_TMP}/D_")
                              if b.name.endswith(".npz")):
                 z = np.load(io.BytesIO(bundle.mkt.blob(bl).download_as_bytes()))
                 self.buf.extend(z["score"].astype(np.float64).tolist())
             self.buf = self.buf[-self.cap:]
-            log.info("threshold seeded: axb_seed + recorder-EV days -> buf=%d", len(self.buf))
+            log.info("threshold seeded from recorder scores %s -> buf=%d", RECEV_TMP, len(self.buf))
         self.tau = self._taus()
 
     @staticmethod
@@ -186,11 +211,15 @@ class Buffers:
         self.book: deque = deque()     # (ts_us, bids[(p,q)*20], asks[(p,q)*20])
         self.trades: deque = deque()   # (ts_us, id, price, qty, is_buyer_maker)
         self.liq: deque = deque()      # (ts_us, side_lower, qty, price)
+        self.eth: deque = deque()      # (ts_us, id, price, qty, is_buyer_maker) — ETH-lead
+        self.btc: deque = deque()      # (ts_us, mid) — BTC-lead book mid
+        self.funding: deque = deque()  # (ts_us, funding_rate, mark_price)
+        self.oi: deque = deque()       # (ts_us, open_interest) — REST poll
         self.last_book_wall = 0.0
 
     def prune(self) -> None:
         cut = (time.time() - BUFFER_S) * 1e6
-        for dq in (self.book, self.trades, self.liq):
+        for dq in (self.book, self.trades, self.liq, self.eth, self.btc, self.funding, self.oi):
             while dq and dq[0][0] < cut:
                 dq.popleft()
 
@@ -223,14 +252,22 @@ async def ws_consumer(path: str, streams: list[str]) -> None:
                             BUF.book.append((ts, bids, asks))
                             BUF.last_book_wall = time.time()
                     elif e == "aggTrade":
-                        BUF.trades.append((int(d["T"]) * 1000, int(d["a"]), float(d["p"]),
-                                           float(d["q"]), bool(d["m"])))
+                        rec = (int(d["T"]) * 1000, int(d["a"]), float(d["p"]),
+                               float(d["q"]), bool(d["m"]))
+                        (BUF.eth if str(d.get("s", "")).lower() == ETH_SYM else BUF.trades).append(rec)
                     elif e == "forceOrder":
                         o = d["o"]
                         BUF.liq.append((int(o["T"]) * 1000, str(o["S"]).lower(),
                                         float(o["q"]), float(o["p"])))
-                    elif e == "bookTicker" and EXEC is not None:
-                        EXEC.on_book_ticker(d)
+                    elif e == "markPriceUpdate":
+                        BUF.funding.append((int(d["E"]) * 1000, float(d.get("r", 0) or 0), float(d["p"])))
+                    elif e == "bookTicker":
+                        s = str(d.get("s", "")).lower()
+                        if s == BTC_SYM:
+                            BUF.btc.append((int(d.get("T", d.get("E", 0))) * 1000,
+                                            0.5 * (float(d["b"]) + float(d["a"]))))
+                        elif EXEC is not None:
+                            EXEC.on_book_ticker(d)
         except asyncio.CancelledError:
             raise
         except Exception as ex:
@@ -239,8 +276,29 @@ async def ws_consumer(path: str, streams: list[str]) -> None:
 
 
 # ---------------------------------------------------------------- feature computation
-def write_window_parquet(book: list, trades: list, liq: list) -> tuple[int, int, int, int]:
-    """Frozen buffers -> CL-format parquet in WORK. Returns (n_book, n_trades, n_liq, last_ts_us)."""
+def _write_cl_trades(rows: list, path: str) -> int:
+    """CL-format trades parquet from (ts_us, id, price, qty, is_buyer_maker) rows; dedup by id."""
+    n = len(rows)
+    if not n:
+        return 0
+    tid = np.fromiter((t[1] for t in rows), np.int64, n)
+    _, uidx = np.unique(tid, return_index=True)
+    uidx.sort()
+    tts = np.fromiter((rows[i][0] for i in uidx), np.int64, len(uidx))
+    pq.write_table(pa.table({
+        "side": np.array(["sell" if rows[i][4] else "buy" for i in uidx]),
+        "amount": np.fromiter((rows[i][3] for i in uidx), np.float64, len(uidx)),
+        "price": np.fromiter((rows[i][2] for i in uidx), np.float64, len(uidx)),
+        "id": tid[uidx],
+        "timestamp": tts * 1000,
+        "receipt_timestamp": tts * 1000,
+    }).sort_by("timestamp"), path)
+    return len(uidx)
+
+
+def write_window_parquet(book: list, trades: list, liq: list,
+                         eth: list, funding: list, oi: list) -> tuple:
+    """Frozen buffers -> CL-format parquet in WORK. Returns (n_book, n_trades, n_liq, n_eth, n_fd, n_oi, last_ts_us)."""
     nb = len(book)
     cols: dict[str, np.ndarray] = {}
     ts = np.fromiter((b[0] for b in book), np.int64, nb)
@@ -254,22 +312,8 @@ def write_window_parquet(book: list, trades: list, liq: list) -> tuple[int, int,
         cols[f"ask_{i}_size"] = np.fromiter((b[2][i][1] for b in book), np.float64, nb)
     pq.write_table(pa.table(cols), f"{WORK}/book.parquet")
 
-    nt = len(trades)
-    if nt:
-        # dedupe by agg id (reconnect overlap), keep CL schema
-        tid = np.fromiter((t[1] for t in trades), np.int64, nt)
-        _, uidx = np.unique(tid, return_index=True)
-        uidx.sort()
-        tts = np.fromiter((trades[i][0] for i in uidx), np.int64, len(uidx))
-        pq.write_table(pa.table({
-            "side": np.array(["sell" if trades[i][4] else "buy" for i in uidx]),
-            "amount": np.fromiter((trades[i][3] for i in uidx), np.float64, len(uidx)),
-            "price": np.fromiter((trades[i][2] for i in uidx), np.float64, len(uidx)),
-            "id": tid[uidx],
-            "timestamp": tts * 1000,
-            "receipt_timestamp": tts * 1000,
-        }).sort_by("timestamp"), f"{WORK}/trades.parquet")
-        nt = len(uidx)
+    nt = _write_cl_trades(trades, f"{WORK}/trades.parquet")
+    ne = _write_cl_trades(eth, f"{WORK}/eth.parquet")
 
     nl = len(liq)
     if nl:
@@ -283,10 +327,27 @@ def write_window_parquet(book: list, trades: list, liq: list) -> tuple[int, int,
             "timestamp": lts * 1000,
             "receipt_timestamp": lts * 1000,
         }).sort_by("timestamp"), f"{WORK}/liq.parquet")
-    return nb, nt, nl, int(ts[-1])
+
+    nfd = len(funding)
+    if nfd:
+        fts = np.fromiter((x[0] for x in funding), np.int64, nfd)
+        pq.write_table(pa.table({
+            "funding_rate": np.fromiter((x[1] for x in funding), np.float64, nfd),
+            "mark_price": np.fromiter((x[2] for x in funding), np.float64, nfd),
+            "timestamp": fts * 1000,
+        }).sort_by("timestamp"), f"{WORK}/fund.parquet")
+
+    noi = len(oi)
+    if noi:
+        ots = np.fromiter((x[0] for x in oi), np.int64, noi)
+        pq.write_table(pa.table({
+            "open_interest": np.fromiter((x[1] for x in oi), np.float64, noi),
+            "timestamp": ots * 1000,
+        }).sort_by("timestamp"), f"{WORK}/oi.parquet")
+    return nb, nt, nl, ne, nfd, noi, int(ts[-1])
 
 
-def compute_features(nb: int, nt: int, nl: int) -> np.ndarray | None:
+def compute_features(nb: int, nt: int, nl: int, ne: int, nfd: int, noi: int) -> np.ndarray | None:
     np.save(f"{WORK}/idx.npy", np.array([nb - 1], dtype=np.int64))
     cmd = [FB, "--depth", f"{WORK}/book.parquet", "--indices", f"{WORK}/idx.npy",
            "--out", f"{WORK}/f.npy"]
@@ -294,6 +355,12 @@ def compute_features(nb: int, nt: int, nl: int) -> np.ndarray | None:
         cmd += ["--trades", f"{WORK}/trades.parquet"]
     if nl:
         cmd += ["--liquidations", f"{WORK}/liq.parquet"]
+    if nfd:
+        cmd += ["--funding", f"{WORK}/fund.parquet"]
+    if noi:
+        cmd += ["--open-interest", f"{WORK}/oi.parquet"]
+    if ne:
+        cmd += ["--eth", f"{WORK}/eth.parquet"]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         log.error("FB failed: %s", r.stderr[-300:])
@@ -301,13 +368,23 @@ def compute_features(nb: int, nt: int, nl: int) -> np.ndarray | None:
     return np.load(f"{WORK}/f.npy").astype(np.float64)
 
 
-def feat71(ts_ns: int, x64: np.ndarray) -> np.ndarray:
+def feat71(ts_ns: int, x64: np.ndarray, btc: list) -> np.ndarray:
+    # btc_lead cols 64-66: log(mid_now / mid_{5,30,60s ago}) * 1e4 from the BTC book buffer.
+    bl = [0.0, 0.0, 0.0]
+    if btc:
+        bts = np.fromiter((b[0] for b in btc), np.int64, len(btc))
+        bmid = np.fromiter((b[1] for b in btc), np.float64, len(btc))
+        now = bmid[-1]
+        for k, Wd in enumerate((5, 30, 60)):
+            j = int(np.searchsorted(bts, ts_ns - int(Wd * NS), "right") - 1)
+            if 0 <= j < len(bmid) and bmid[j] > 0 and now > 0:
+                bl[k] = float(np.log(now / bmid[j]) * 1e4)
     h = ((ts_ns / NS) % 86400.0) / 3600.0
     hf = h % 8.0
     tod = [np.sin(2 * np.pi * h / 24), np.cos(2 * np.pi * h / 24),
            np.sin(2 * np.pi * hf / 8), np.cos(2 * np.pi * hf / 8)]
     # f32 round before normalization == offline feat71 (parity)
-    return np.concatenate([x64.ravel(), np.zeros(3), np.asarray(tod)])[None, :].astype(np.float32)
+    return np.concatenate([x64.ravel(), np.asarray(bl), np.asarray(tod)])[None, :].astype(np.float32)
 
 
 # ---------------------------------------------------------------- execution (MODE=live)
@@ -429,14 +506,14 @@ class Executor:
 
     def _place_gtx(self, side: str, qty: float, price: float, reduce_only: bool) -> dict:
         p = {"symbol": EXEC_SYM, "side": side, "type": "LIMIT", "timeInForce": "GTX",
-             "quantity": f"{qty:.0f}", "price": f"{price:.5f}"}
+             "quantity": f"{qty:.{QTY_DEC}f}", "price": f"{price:.{PX_DEC}f}"}
         if reduce_only:
             p["reduceOnly"] = "true"
         return self._order(**p)
 
     def _market_close(self, side: str, qty: float) -> dict:
         return self._order(symbol=EXEC_SYM, side=side, type="MARKET",
-                           quantity=f"{qty:.0f}", reduceOnly="true")
+                           quantity=f"{qty:.{QTY_DEC}f}", reduceOnly="true")
 
     def startup_recover(self) -> None:
         """Close any orphan position / cancel stray orders left by a crash."""
@@ -473,7 +550,9 @@ class Executor:
         if self.day_bal0 <= 0:
             self.day_bal0 = max(avail, 1e-9)
         px = self.usdc_bid if side_long else self.usdc_ask
-        qty = int(avail * SIZE_FRAC / px * (1 - 1e-3))
+        raw = avail * SIZE_FRAC / px * (1 - 1e-3)
+        step = 10 ** QTY_DEC
+        qty = float(np.floor(raw * step)) / step
         if qty * px < 5.0:
             self._tlog({"ev": "skip_small", "avail": avail, "qty": qty})
             return
@@ -629,19 +708,22 @@ async def decide_loop(bundle: Bundle, thr: Threshold, dlog: DecisionLog) -> None
             BUF.prune()
             if BUF.warm():
                 t0 = time.time()
-                frozen = (list(BUF.book), list(BUF.trades), list(BUF.liq))
+                frozen = (list(BUF.book), list(BUF.trades), list(BUF.liq),
+                          list(BUF.eth), list(BUF.funding), list(BUF.oi), list(BUF.btc))
 
                 def _work() -> tuple | None:
-                    nb, nt, nl, last_us = write_window_parquet(*frozen)
-                    x = compute_features(nb, nt, nl)
-                    return None if x is None else (nb, nt, nl, last_us, x)
+                    book, trades, liq, eth, funding, oi, btc = frozen
+                    nb, nt, nl, ne, nfd, noi, last_us = write_window_parquet(
+                        book, trades, liq, eth, funding, oi)
+                    x = compute_features(nb, nt, nl, ne, nfd, noi)
+                    return None if x is None else (nb, nt, nl, ne, nfd, noi, last_us, x, btc)
 
                 res = await asyncio.to_thread(_work)
                 if res is not None:
-                    nb, nt, nl, last_us, x = res
+                    nb, nt, nl, ne, nfd, noi, last_us, x, btc = res
                     ts_ns = last_us * 1000
-                    fn = ((feat71(ts_ns, x) - bundle.mu) / bundle.sd).astype(np.float32)
-                    pa_, pb, sc = bundle.score(fn)
+                    x71 = feat71(ts_ns, x, btc)
+                    pa_, pb, sc = bundle.score(x71)
                     taus = thr.observe(sc)
                     takes = {f"take{int(t)}": bool(sc >= taus[t]) for t in BUDGETS}
                     executed = False
@@ -655,7 +737,7 @@ async def decide_loop(bundle: Bundle, thr: Threshold, dlog: DecisionLog) -> None
                            "tau": {str(int(t)): round(taus[t], 6) for t in BUDGETS},
                            **takes, "executed": executed,
                            "lat_ms": round((time.time() - t0) * 1000, 1),
-                           "nb": nb, "nt": nt, "nl": nl}
+                           "nb": nb, "nt": nt, "nl": nl, "ne": ne, "nfd": nfd, "noi": noi}
                     dlog.append(rec)
                     n += 1
                     if any(takes.values()) or n % 100 == 0:
@@ -672,23 +754,43 @@ async def decide_loop(bundle: Bundle, thr: Threshold, dlog: DecisionLog) -> None
         await asyncio.sleep(max(0.0, t_next - time.time()))
 
 
+async def oi_poller() -> None:
+    """Unsigned open-interest REST poll -> BUF.oi (feature parity with recorder derivatives_poll)."""
+    import urllib.request
+    url = f"{REST_BASE}/fapi/v1/openInterest?symbol={SYM.upper()}"
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=8) as r:
+                d = json.loads(r.read())
+            BUF.oi.append((int(d["time"]) * 1000, float(d["openInterest"])))
+        except Exception as ex:
+            log.warning("OI poll failed: %s", ex)
+        await asyncio.sleep(OI_POLL_S)
+
+
 async def main() -> None:
     global EXEC
     os.makedirs(WORK, exist_ok=True)
     bundle = Bundle()
     thr = Threshold(bundle)
     dlog = DecisionLog(bundle.mkt)
-    pub_streams = [f"{SYM}@depth20@100ms"]
+    # public: signal depth + BTC-lead bookTicker (+ exec bookTicker in live)
+    pub_streams = [f"{SYM}@depth20@100ms", f"{BTC_SYM}@bookTicker"]
+    # market: signal trades/liq/funding + ETH-lead trades
+    mkt_streams = [f"{SYM}@aggTrade", f"{SYM}@forceOrder", f"{SYM}@markPrice@1s",
+                   f"{ETH_SYM}@aggTrade"]
     if MODE == "live":
         EXEC = Executor(Rest())
         await asyncio.to_thread(EXEC.startup_recover)
         pub_streams.append(f"{EXEC_SYM.lower()}@bookTicker")
-        log.info("MODE=live: exec %s budget=t%d size_frac=%.2f", EXEC_SYM, int(TRADE_BUDGET), SIZE_FRAC)
+        log.info("MODE=live: exec %s budget=t%d size_frac=%.2f entry=%.0fs hold=%.0fs",
+                 EXEC_SYM, int(TRADE_BUDGET), SIZE_FRAC, ENTRY_WIN_S, HOLD_S)
     else:
         log.info("MODE=shadow: no orders")
     tasks = [
         asyncio.create_task(ws_consumer("public", pub_streams)),
-        asyncio.create_task(ws_consumer("market", [f"{SYM}@aggTrade", f"{SYM}@forceOrder"])),
+        asyncio.create_task(ws_consumer("market", mkt_streams)),
+        asyncio.create_task(oi_poller()),
         asyncio.create_task(decide_loop(bundle, thr, dlog)),
     ]
     try:
