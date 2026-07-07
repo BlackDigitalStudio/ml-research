@@ -1,0 +1,27 @@
+[Unit]
+Description=AxB h150 live (DOGEUSDC maker, 4-seed ensemble, entry 60s / hold 150s, budget t5)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=delmi
+Group=delmi
+Environment=HOME=/home/delmi
+Environment=MODE=live
+Environment=SYMK=DOGE
+Environment=SIGNAL_SYM=dogeusdt
+Environment=EXEC_SYM=DOGEUSDC
+Environment=TRADE_BUDGET=5
+Environment=SIZE_FRAC=1.0
+Environment=WORKDIR=/home/delmi/axb_h150
+Environment=FB_BIN=/home/delmi/axb/feature_builder
+WorkingDirectory=/home/delmi/axb_h150
+ExecStart=/home/delmi/axb/venv/bin/python3 /home/delmi/axb_h150.py
+Restart=always
+RestartSec=5
+Nice=5
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target
