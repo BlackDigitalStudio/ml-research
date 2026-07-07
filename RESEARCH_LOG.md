@@ -1204,3 +1204,29 @@ equivalent-realization ensemble at the old tick semantics: {+4.17, +3.77, +2.81,
 −1.87} = **+1.4 ± 2.4 bp/tr**. The regime PATTERN reproduces across seeds (winter folds usually
 positive, last fold consistently negative) but fold amplitudes swing tens of bp. The deployed live
 weights are literally the seed-0 member (train_deploy SEED=0). Seed/perturbation gate mandatory.
+
+## 21. 2026-07-07 — H150 honest cell: cross-symbol seed ensembles (HD3 rev6 close-out)
+
+**Cell:** honest time-based maker cycle — entry 60 s from decision, hold **150 s FROM FILL**
+(cfgs 90/150/240 s), pegged never-taker chase 300 s, always-last both legs, 0 fee, 3 s grid,
+**FULL features** (funding/liq/OI/ETH/btc real), exact labels, CL-year ~371 d, **4 seeds/symbol**.
+
+| sym | t5 EV (seeds) | t5 min | annS mean/min | t10 EV / min | gate |
+|-----|---------------|--------|---------------|--------------|------|
+| DOGE | **+6.27 ± 0.90** [7.2 5.0 5.9 7.0] | +4.97 | +3.71 / +2.54 | +3.53 / +2.49 | **PASS** |
+| ETH | +4.29 ± 4.24 [11.5 0.4 2.9 2.4] | +0.42 | +2.19 / +0.30 | +3.23 / **−1.52** | FAIL (sd ≈ mean) |
+| BTC | **+9.69 ± 1.82** [8.3 11.8 11.1 7.5] | +7.48 | **+6.95 / +5.65** | +4.63 / +3.43 | **PASS** (winter-heavy folds, avg worst −9.8) |
+
+**Robustness argmax:** DOGE **t10** (folds>0 79 %, avg worst fold **+0.4** — no losing month on
+average; annS min +2.59 ≥ t5's). **Hold sweep** (DOGE seed-0 scores, no retrain): 90 s +3.20 /
+**150 s +7.19** / 240 s +0.57 → interior max: the reversion pays in ~2-2.5 min and decays by 4 min.
+**Surprising conditional:** BTC — flat at the old 30 s tick semantics (§19 −0.14) — is the
+STRONGEST at 150 s honest with full features despite always-last fill ~0.5: deep-book symbols need
+the longer horizon + funding/OI/liq information. First cells in the program where edge > estimator
+noise under honest semantics (contrast §20a/b).
+
+**Deploy package (pending user):** DOGE t10 (+ optional BTC), 4-seed ENSEMBLE scoring (mean
+pA/pBg — harvests the measured seed noise), USDC pairs. Prereqs: recorder-EV cross-check of this
+config on live recorder days; live engine wiring (btc bookTicker, funding, OI, ETH aggTrade;
+DECIDE_S 3 s, ENTRY_WIN_S 60, HOLD_S 150). Ops note: systemd-run expands `${VAR}` in payloads →
+use bare `$VAR`/script files; 5 seed aggregates were overwritten and deterministically rerun.
