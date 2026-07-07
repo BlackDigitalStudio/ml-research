@@ -19,7 +19,8 @@ NTHREAD = int(sys.argv[2]) if len(sys.argv) > 2 else 8
 LABELSUB = os.environ.get("LABELSUB", "maker_labels_pegexit_qm1")
 PROJ = "project-0998ac51-36ba-445c-bc7"; BUCKET = "market-data-0998ac51"
 NF_RATE = 0.05; GATE_PCT = 5.0; KNORM = 20; KDAYS = 30; SUBVAL_D = 30
-N_TRIALS = 20; TUNE_SUB = 200000; CFGIDX, QMIDX, RHKEY = 1, 0, "rH30"
+N_TRIALS = 20; TUNE_SUB = 200000; CFGIDX = int(os.environ.get("CFGIDX","1")); QMIDX, RHKEY = 0, "rH30"
+SEED = int(os.environ.get("SEED","0")); HORIZON_S = int(os.environ.get("HORIZON_S","30"))
 bk = storage.Client(project=PROJ).bucket(BUCKET)
 
 
@@ -32,24 +33,24 @@ def _space(t):
 
 def sub(X, y, w=None):
     if len(X) > TUNE_SUB:
-        ix = np.random.RandomState(0).choice(len(X), TUNE_SUB, replace=False); return X[ix], y[ix], (w[ix] if w is not None else None)
+        ix = np.random.RandomState(SEED).choice(len(X), TUNE_SUB, replace=False); return X[ix], y[ix], (w[ix] if w is not None else None)
     return X, y, w
 
 
 def tuneA(Xs, ys, Xv, yv, spw):
     Xs, ys, _ = sub(Xs, ys); dst = xgb.DMatrix(Xs, label=ys); dv = xgb.DMatrix(Xv, label=yv)
-    base = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": 0, "eval_metric": "auc", "scale_pos_weight": spw}
+    base = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": SEED, "eval_metric": "auc", "scale_pos_weight": spw}
 
     def obj(t):
         b = xgb.train(dict(base, **_space(t)), dst, num_boost_round=400, evals=[(dv, "v")], early_stopping_rounds=30, verbose_eval=False)
         t.set_user_attr("bi", int(b.best_iteration)); return float(b.best_score)
-    st = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=0)); st.optimize(obj, n_trials=N_TRIALS)
+    st = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=SEED)); st.optimize(obj, n_trials=N_TRIALS)
     return st.best_params, int(st.best_trial.user_attrs["bi"]), float(st.best_value)
 
 
 def tuneB(Xs, ys, ws, Xv, pdiff):
     Xs, ys, ws = sub(Xs, ys, ws); dst = xgb.DMatrix(Xs, label=ys, weight=ws); dv = xgb.DMatrix(Xv)
-    base = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": 0}
+    base = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": SEED}
 
     def obj(t):
         hp = _space(t); nr = t.suggest_int("num_boost_round", 50, 400)
@@ -57,17 +58,17 @@ def tuneB(Xs, ys, ws, Xv, pdiff):
         if pv.std() < 1e-9:
             return -1.0
         ic = float(np.corrcoef(pv, pdiff)[0, 1]); return ic if np.isfinite(ic) else -1.0
-    st = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=0)); st.optimize(obj, n_trials=N_TRIALS)
+    st = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=SEED)); st.optimize(obj, n_trials=N_TRIALS)
     bp = dict(st.best_params); nr = bp.pop("num_boost_round"); return bp, int(nr), float(st.best_value)
 
 
 def fitA(hp, ni, X, y, spw):
-    p = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": 0, "scale_pos_weight": spw}
+    p = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": SEED, "scale_pos_weight": spw}
     return xgb.train(dict(p, **hp), xgb.DMatrix(X, label=y), num_boost_round=max(1, ni + 1))
 
 
 def fitB(hp, ni, X, y, w):
-    p = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": 0}
+    p = {"objective": "binary:logistic", "tree_method": "hist", "nthread": NTHREAD, "seed": SEED}
     return xgb.train(dict(p, **hp), xgb.DMatrix(X, label=y, weight=w), num_boost_round=max(1, ni + 1))
 
 
@@ -132,7 +133,7 @@ axb_sc = (cdf(pA, sA) * cdf(np.abs(pBg - 0.5), sBg)).astype(np.float32)
 noa_sc = cdf(np.abs(pBf - 0.5), sBf).astype(np.float32)
 seedm = np.isin(day, tdays[-KDAYS:])
 
-OUT = "research_runs/" + os.environ.get('DEPLOY_DIR', 'deploy') + f"/{SYM}"
+OUT = "research_runs/" + os.environ.get('DEPLOY_DIR', 'deploy') + f"/{SYM}" + (f"/seed{SEED}" if os.environ.get('ENSEMBLE')=='1' else '')
 for nm, mdl in [("A", A), ("Bg", Bg), ("Bf", Bf)]:
     p = f"/tmp/_{SYM}_{nm}.json"; mdl.save_model(p)
     bk.blob(f"{OUT}/{nm}.json").upload_from_filename(p)
@@ -140,7 +141,7 @@ nb = io.BytesIO(); np.savez_compressed(nb, day_mean=day_mean.astype(np.float32),
                                        gstd=gstd.astype(np.float32), sA=sA, sBg=sBg, sBf=sBf,
                                        axb_seed=axb_sc[seedm], noa_seed=noa_sc[seedm])
 bk.blob(f"{OUT}/refs.npz").upload_from_string(nb.getvalue())
-meta = {"symbol": SYM, "labels": LABELSUB, "cfgidx": CFGIDX, "qmidx": QMIDX, "horizon_s": 30, "config": "AxB (t5 argmax)",
+meta = {"symbol": SYM, "labels": LABELSUB, "cfgidx": CFGIDX, "qmidx": QMIDX, "horizon_s": HORIZON_S, "config": "AxB (t5 argmax)",
         "KNORM": KNORM, "KDAYS": KDAYS, "NF_RATE": NF_RATE, "GATE_PCT": GATE_PCT, "vol_thr_p95_rH30": thr,
         "hpA": hpA, "biA": biA, "valAUC_A": aucA, "hpB": hpB, "biB": biB, "valIC_B": icB,
         "feat_names": feat_names, "ndays": ndays, "n_train": int(len(F)),
