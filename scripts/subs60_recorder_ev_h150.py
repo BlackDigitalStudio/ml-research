@@ -118,8 +118,11 @@ def funding_cl(sym, day, out):
     if d is None or not len(d["exchange_event_ts_us"]):
         return 0
     m = ~np.isnan(d["exchange_event_ts_us"].astype(float))
+    # ts in MILLISECONDS: FB's funding_rate+mark_price reader takes timestamps as-is (ms
+    # convention). The previous ns write pinned col13 to the day's first row and zeroed
+    # col44 for the whole validation (2026-07-08 parity audit) — ms = training semantics.
     t = pa.table({"funding_rate": np.nan_to_num(d["funding_rate"][m].astype(np.float64)), "mark_price": d["mark_price"][m].astype(np.float64),
-                  "timestamp": (d["exchange_event_ts_us"][m].astype(np.int64) * 1000)}).sort_by("timestamp")
+                  "timestamp": (d["exchange_event_ts_us"][m].astype(np.int64) // 1000)}).sort_by("timestamp")
     pq.write_table(t, out); return t.num_rows
 
 
@@ -169,11 +172,16 @@ def feat71(dtd, X, bts, bm):
 
 
 def rec_days():
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
     ds = sorted(set(b.name.split("/")[-1][:8] for b in rec.client.list_blobs(rec, prefix=f"{RB}/{SYMR}/liquidation/") if b.name.endswith(".parquet")))
+    ds = [d for d in ds if d < today]        # exclude the in-progress UTC day
     return ds[-NDAYS:]
 
 
-TMP = f"research_runs/_recev_h150_{SYM}"
+# RECEV_PREFIX: override for reruns (e.g. the 2026-07-08 funding-ms fix) so historical
+# prefixes that seed the LIVE tau are never clobbered.
+TMP = os.environ.get("RECEV_PREFIX", f"research_runs/_recev_h150_{SYM}")
 cfg = [{"tp": 50.0, "sl": 50.0, "to": 282, "to_ms": float(HOLD_MS), "par": False, "tr": False}]
 json.dump(cfg, open(f"{TD}/cfg.json", "w"))
 done = {b.name.split("/")[-1][:-4].split("_")[-1] for b in mkt.client.list_blobs(mkt, prefix=f"{TMP}/D_") if b.name.endswith(".npz")}
@@ -262,9 +270,10 @@ allsc = np.concatenate(allsc)
 print(f"\n=== RECORDER-EV h150 {SYM} ({len(blobs)} days, {len(score)} decisions) ===", flush=True)
 print(f"    recorder score dist for tau-seed: p90={np.quantile(allsc,.9):.4f} p99={np.quantile(allsc,.99):.4f} "
       f"p99.9={np.quantile(allsc,.999):.4f} max={allsc.max():.4f}", flush=True)
-# save the recorder score distribution for deploy tau-seed
+# save the recorder score distribution for deploy tau-seed (inside TMP so reruns
+# under RECEV_PREFIX never clobber the deployed bundle's copy)
 sb = io.BytesIO(); np.savez(sb, scores=allsc.astype(np.float32))
-mkt.blob(f"research_runs/{DEPLOY}/{SYM}/recorder_scores.npz").upload_from_string(sb.getvalue())
+mkt.blob(f"{TMP}/recorder_scores.npz").upload_from_string(sb.getvalue())
 
 
 def causal(sc, day_a, side, nl, ns, fl, fs, tgt):

@@ -331,10 +331,14 @@ def write_window_parquet(book: list, trades: list, liq: list,
     nfd = len(funding)
     if nfd:
         fts = np.fromiter((x[0] for x in funding), np.int64, nfd)
+        # MILLISECONDS: FB's funding reader (funding_rate+mark_price schema) takes timestamps
+        # as-is and compares against depth ts in ms. Writing ns here pinned col13 to the
+        # buffer's FIRST row (rate ~20min stale) and zeroed col44 (basis) — found 2026-07-08
+        # sim-live parity audit. ms restores training semantics: latest rate/basis at tick.
         pq.write_table(pa.table({
             "funding_rate": np.fromiter((x[1] for x in funding), np.float64, nfd),
             "mark_price": np.fromiter((x[2] for x in funding), np.float64, nfd),
-            "timestamp": fts * 1000,
+            "timestamp": fts // 1000,
         }).sort_by("timestamp"), f"{WORK}/fund.parquet")
 
     noi = len(oi)
