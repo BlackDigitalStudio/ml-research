@@ -14,19 +14,28 @@ Modes (env MODE):
 SHADOW path (also active in live mode — the decision log is identical):
 Economics of shadow decisions are evaluated offline by the frozen simulator (grid_sim_exitdbg)
 on the recorder's captured stream — see live/axb_shadow_eval.py. Parity with the validated
-offline pipeline (scripts/subs60_recorder_ev.py) by construction:
-  - book = @depth20@100ms (/public routed path) == recorder depth_snapshot view (top-20, 100ms);
+offline pipeline (scripts/subs60_recorder_ev_h150.py) is BYTE-LEVEL by construction
+(2026-07-08 perfect-parity rework — the old @depth20@100ms partial-stream book shared only
+~18% of tick timestamps with the recorder's diff-synthesized view):
+  - book = MirrorBook: full-book reconstruction from @depth@100ms DIFFS mirroring the
+    recorder's OrderBookV2 exactly (REST seed limit=100, cap 100 levels, skip u<=last, NO
+    pu-chain enforcement, top-20 zero-padded emission per accepted diff frame at its E-ts,
+    REST reconcile every 900s with reseed at >=2 top-20 findings, reseed on reconnect);
+  - btc_lead = L1 mid of a second MirrorBook on BTCUSDT (== recorder depth_snapshot L1);
   - trades = @aggTrade, liq = @forceOrder (/market routed path — legacy /ws drops these SILENTLY);
   - features: the SAME rust feature_builder binary on a rolling window (all feature windows are
     <= 300s / 1200 ticks, so a slice >= WARMUP_S of history is identical to full-day compute);
-  - feat71 = X64 + btc_lead zeros + ToD (the validated recorder-EV config; btc/funding/OI zeros
-    are the conservative frozen config — do NOT add live values without re-validating);
+  - funding = DAY-ANCHOR semantics (fund.parquet is a SINGLE row: first mark_price rate of the
+    UTC day, mark 0, ts=1ms) — col13 frozen per day, col44=0. This is the cell the deploy gate
+    measured (+6.59bp t5, LOO-positive, jitter-robust 2026-07-08) — an intentional variance
+    reduction on the hypersensitive funding input, NOT the training-time true-rate semantics;
+  - OI = REST poll every 15s recorded at LOCAL receive time (== recorder derivatives_poll);
   - normalization mu/sd frozen from the bundle (KNORM last train days);
   - score = cdf(pA,sA)*cdf(|pBg-0.5|,sBg); side = pBg>=0.5;
   - threshold: causal_rolling DAY-level parity — tau fixed within a UTC day, buffer extended at
-    day roll, seeded from bundle axb_seed + the recorder-EV validated days (_recev_tmp), cap
-    KDAYS*WPD; one tau per budget in BUDGETS.
-Decision cadence DECIDE_S=10.8s == offline TARGET=8000 samples/day.
+    day roll, seeded from the recorder-EV validated days (_recev_tmp), cap KDAYS*WPD;
+  - decisions on the offline 3s grid over EXCHANGE timestamps, anchored at the day's first
+    book tick (np.unique(ends) dedupe semantics), not on a wall-clock timer.
 
 State: /home/delmi/axb/state.npz (threshold buffer), decisions appended to
 /home/delmi/axb/decisions/YYYYMMDD.jsonl and uploaded to GCS hourly.
@@ -67,7 +76,7 @@ BTC_SYM = "btcusdt"                             # BTC-lead book mid (features 64
 BUNDLE = os.environ.get("BUNDLE_DIR", f"research_runs/deploy_h150/{SYMK}")
 ENSEMBLE_SEEDS = [0, 1, 2, 3]
 RECEV_TMP = os.environ.get("RECEV_DIR", f"research_runs/_recev_h150_{SYMK}")  # recorder score seed
-SHADOW_GCS = f"research_runs/axb_shadow_h150/{SYMK}"
+SHADOW_GCS = os.environ.get("SHADOW_GCS", f"research_runs/axb_shadow_h150/{SYMK}")
 FB = os.environ.get("FB_BIN", "/home/delmi/axb/feature_builder")
 WORK = os.environ.get("WORKDIR", "/home/delmi/axb")
 WS_BASE = "wss://fstream.binance.com"
@@ -81,7 +90,7 @@ KDAYS = 30
 BUFFER_S = 1200                 # ring buffers (h150: entry 60s + hold 150s + feature window 300s)
 WARMUP_S = 400                  # no decisions until this much book history
 STALE_S = 10                    # no decisions if the freshest book tick is older than this
-OI_POLL_S = 4.0                 # open-interest REST poll cadence (recorder derivatives_poll ~4s)
+OI_POLL_S = 15.0                # open-interest REST poll cadence (chronos derivatives_poll_interval_sec)
 
 # ---- execution (MODE=live) ----
 MODE = os.environ.get("MODE", "shadow")
@@ -205,6 +214,110 @@ class Threshold:
         np.savez(self.STATE, buf=np.asarray(self.buf), pending=np.asarray(self.pending), day=self.day)
 
 
+# ---------------------------------------------------------------- mirror book
+class MirrorBook:
+    """Byte-parity port of the recorder's OrderBookV2 (chronos/order_book.py):
+    full book from @depth diffs, REST seed/reseed, cap MAX_LEVELS best levels,
+    skip stale u<=last_uid, NO pu-chain enforcement (recorder P3 only logs gaps;
+    reseed happens on reconnect or reconcile drift). top20() zero-pads like
+    snapshot_row(levels=20)."""
+
+    MAX_LEVELS = 100      # chronos_run book_max_levels
+    SEED_LIMIT = 100      # chronos_run seed_limit
+    RECONCILE_S = 900.0   # chronos_run reconcile_interval_sec
+    RESEED_FINDINGS = 2   # max(1, int(20 * 2 * 0.05))
+
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol.upper()
+        self.bids: dict[float, float] = {}
+        self.asks: dict[float, float] = {}
+        self.last_uid: int | None = None
+        self.synced = False
+
+    def _prune(self) -> None:
+        m = self.MAX_LEVELS
+        if len(self.bids) > m:
+            keep = sorted(self.bids, reverse=True)[:m]
+            self.bids = {p: self.bids[p] for p in keep}
+        if len(self.asks) > m:
+            keep = sorted(self.asks)[:m]
+            self.asks = {p: self.asks[p] for p in keep}
+
+    @staticmethod
+    def _fetch_depth(symbol: str) -> dict:
+        """Blocking REST snapshot fetch — run via to_thread; state is only ever
+        mutated on the event loop (apply/load run there), so no cross-thread races."""
+        import urllib.request
+        url = f"{REST_BASE}/fapi/v1/depth?symbol={symbol}&limit={MirrorBook.SEED_LIMIT}"
+        with urllib.request.urlopen(url, timeout=10) as r:
+            return json.loads(r.read())
+
+    def _load_snapshot(self, snap: dict) -> None:
+        self.bids = {float(p): float(q) for p, q in snap.get("bids", []) if float(q) > 0}
+        self.asks = {float(p): float(q) for p, q in snap.get("asks", []) if float(q) > 0}
+        self.last_uid = int(snap["lastUpdateId"])
+        self.synced = True
+        self._prune()
+
+    async def aseed(self) -> None:
+        snap = await asyncio.to_thread(self._fetch_depth, self.symbol)
+        self._load_snapshot(snap)
+        log.info("MirrorBook %s seeded: %d levels, lastUpdateId=%d",
+                 self.symbol, len(self.bids) + len(self.asks), self.last_uid)
+
+    def apply(self, d: dict) -> bool:
+        """Apply one depthUpdate diff; True if accepted (== a recorder snapshot row)."""
+        if not self.synced:
+            return False
+        u = int(d["u"])
+        if self.last_uid is not None and u <= self.last_uid:
+            return False
+        for key, book in (("b", self.bids), ("a", self.asks)):
+            for p, q in d.get(key) or []:
+                p = float(p); q = float(q)
+                if q == 0.0:
+                    book.pop(p, None)
+                else:
+                    book[p] = q
+        self.last_uid = u
+        self._prune()
+        return True
+
+    def top20(self) -> tuple[list, list]:
+        """(bids desc, asks asc) zero-padded to 20 == snapshot_row(levels=20)."""
+        bids = sorted(self.bids.items(), key=lambda kv: -kv[0])[:LV]
+        asks = sorted(self.asks.items(), key=lambda kv: kv[0])[:LV]
+        bids += [(0.0, 0.0)] * (LV - len(bids))
+        asks += [(0.0, 0.0)] * (LV - len(asks))
+        return bids, asks
+
+    def l1_mid(self) -> float:
+        if not self.bids or not self.asks:
+            return 0.0
+        return 0.5 * (max(self.bids) + min(self.asks))
+
+    async def areconcile(self) -> None:
+        """REST fetch off-loop, compare + optional reseed ON the loop (top-20 both
+        sides, tol 0, reseed at >=2 findings — recorder gateway parity)."""
+        snap = await asyncio.to_thread(self._fetch_depth, self.symbol)
+        rb = dict(sorted(((float(p), float(q)) for p, q in snap.get("bids", [])),
+                         key=lambda kv: -kv[0])[:LV])
+        ra = dict(sorted(((float(p), float(q)) for p, q in snap.get("asks", [])),
+                         key=lambda kv: kv[0])[:LV])
+        lb = dict(sorted(self.bids.items(), key=lambda kv: -kv[0])[:LV])
+        la = dict(sorted(self.asks.items(), key=lambda kv: kv[0])[:LV])
+        n = 0
+        for local, rest in ((lb, rb), (la, ra)):
+            for p, q in local.items():
+                qr = rest.get(p)
+                if qr is None or qr != q:
+                    n += 1
+            n += sum(1 for p in rest if p not in local)
+        if n >= self.RESEED_FINDINGS:
+            log.warning("MirrorBook %s reconcile drift findings=%d — reseeding", self.symbol, n)
+            self._load_snapshot(snap)
+
+
 # ---------------------------------------------------------------- market state
 class Buffers:
     def __init__(self) -> None:
@@ -231,6 +344,25 @@ class Buffers:
 
 BUF = Buffers()
 EXEC: "Executor | None" = None
+BOOKS: dict[str, MirrorBook] = {}          # stream-symbol (lower) -> mirror book
+# Funding DAY-ANCHOR (validated cell semantics): rate of the day's first mark_price
+# event; col44 forced 0 via mark_price=0 in the single-row fund.parquet.
+FANCHOR = {"day": "", "rate": None}
+# Decision grid anchored at the day's first accepted book tick (ns) == offline
+# grid = arange(bt[0], ..., 3s) per UTC day.
+GRID = {"day": "", "anchor_ns": None}
+
+
+def _utc_day_of_ns(ts_ns: int) -> str:
+    return datetime.fromtimestamp(ts_ns / NS, tz=timezone.utc).strftime("%Y%m%d")
+
+
+def _on_doge_tick(ts_ns: int) -> None:
+    d = _utc_day_of_ns(ts_ns)
+    if GRID["day"] != d:
+        GRID["day"] = d
+        GRID["anchor_ns"] = ts_ns
+        log.info("grid anchor %s -> %d (day first tick)", d, ts_ns)
 
 
 async def ws_consumer(path: str, streams: list[str]) -> None:
@@ -240,17 +372,30 @@ async def ws_consumer(path: str, streams: list[str]) -> None:
             async with websockets.connect(url, ping_interval=180, ping_timeout=600,
                                           max_size=2 ** 22) as ws:
                 log.info("WS connected: /%s (%s)", path, ",".join(streams))
+                # (re)seed mirror books carried by this connection — a reconnect
+                # means missed diffs (recorder gateway does the same resync).
+                for s in streams:
+                    b = BOOKS.get(s.split("@")[0])
+                    if b is not None:
+                        asyncio.create_task(b.aseed())
                 async for raw in ws:
                     m = json.loads(raw)
                     d = m.get("data", m)
                     e = d.get("e", "")
                     if e == "depthUpdate":
-                        ts = int(d["E"]) * 1000
-                        bids = [(float(p), float(q)) for p, q in d["b"][:LV]]
-                        asks = [(float(p), float(q)) for p, q in d["a"][:LV]]
-                        if len(bids) == LV and len(asks) == LV:
+                        b = BOOKS.get(str(d.get("s", "")).lower())
+                        if b is None or not b.apply(d):
+                            continue
+                        ts = int(d["E"]) * 1000                     # us (E is ms)
+                        if b.symbol == SYM.upper():
+                            bids, asks = b.top20()
                             BUF.book.append((ts, bids, asks))
                             BUF.last_book_wall = time.time()
+                            _on_doge_tick(ts * 1000)
+                        else:                                        # BTC-lead L1 mid
+                            mid = b.l1_mid()
+                            if mid > 0:
+                                BUF.btc.append((ts, mid))
                     elif e == "aggTrade":
                         rec = (int(d["T"]) * 1000, int(d["a"]), float(d["p"]),
                                float(d["q"]), bool(d["m"]))
@@ -260,19 +405,34 @@ async def ws_consumer(path: str, streams: list[str]) -> None:
                         BUF.liq.append((int(o["T"]) * 1000, str(o["S"]).lower(),
                                         float(o["q"]), float(o["p"])))
                     elif e == "markPriceUpdate":
-                        BUF.funding.append((int(d["E"]) * 1000, float(d.get("r", 0) or 0), float(d["p"])))
+                        ets = int(d["E"]) * 1000
+                        rate = float(d.get("r", 0) or 0)
+                        BUF.funding.append((ets, rate, float(d["p"])))
+                        day = _utc_day_of_ns(ets * 1000)
+                        if FANCHOR["day"] != day:
+                            FANCHOR["day"] = day
+                            FANCHOR["rate"] = rate
+                            log.info("funding day-anchor %s = %.6g", day, rate)
                     elif e == "bookTicker":
-                        s = str(d.get("s", "")).lower()
-                        if s == BTC_SYM:
-                            BUF.btc.append((int(d.get("T", d.get("E", 0))) * 1000,
-                                            0.5 * (float(d["b"]) + float(d["a"]))))
-                        elif EXEC is not None:
+                        if EXEC is not None:
                             EXEC.on_book_ticker(d)
         except asyncio.CancelledError:
             raise
         except Exception as ex:
             log.warning("WS /%s dropped: %s — reconnect in 2s", path, ex)
             await asyncio.sleep(2)
+
+
+async def reconcile_loop() -> None:
+    """Recorder-parity REST reconcile every 900s per mirror book."""
+    while True:
+        await asyncio.sleep(MirrorBook.RECONCILE_S)
+        for b in BOOKS.values():
+            if b.synced:
+                try:
+                    await b.areconcile()
+                except Exception as ex:
+                    log.warning("reconcile %s failed: %s", b.symbol, ex)
 
 
 # ---------------------------------------------------------------- feature computation
@@ -297,7 +457,7 @@ def _write_cl_trades(rows: list, path: str) -> int:
 
 
 def write_window_parquet(book: list, trades: list, liq: list,
-                         eth: list, funding: list, oi: list) -> tuple:
+                         eth: list, anchor_rate: float | None, oi: list) -> tuple:
     """Frozen buffers -> CL-format parquet in WORK. Returns (n_book, n_trades, n_liq, n_eth, n_fd, n_oi, last_ts_us)."""
     nb = len(book)
     cols: dict[str, np.ndarray] = {}
@@ -328,18 +488,17 @@ def write_window_parquet(book: list, trades: list, liq: list,
             "receipt_timestamp": lts * 1000,
         }).sort_by("timestamp"), f"{WORK}/liq.parquet")
 
-    nfd = len(funding)
-    if nfd:
-        fts = np.fromiter((x[0] for x in funding), np.int64, nfd)
-        # MILLISECONDS: FB's funding reader (funding_rate+mark_price schema) takes timestamps
-        # as-is and compares against depth ts in ms. Writing ns here pinned col13 to the
-        # buffer's FIRST row (rate ~20min stale) and zeroed col44 (basis) — found 2026-07-08
-        # sim-live parity audit. ms restores training semantics: latest rate/basis at tick.
+    # funding: DAY-ANCHOR single row (the validated +6.59bp cell) — col13 = first
+    # mark_price rate of the UTC day, frozen for the day; mark_price=0 keeps col44=0.
+    # ts in MILLISECONDS (FB's funding_rate schema convention), 1ms precedes any tick.
+    nfd = 0
+    if anchor_rate is not None:
         pq.write_table(pa.table({
-            "funding_rate": np.fromiter((x[1] for x in funding), np.float64, nfd),
-            "mark_price": np.fromiter((x[2] for x in funding), np.float64, nfd),
-            "timestamp": fts // 1000,
-        }).sort_by("timestamp"), f"{WORK}/fund.parquet")
+            "funding_rate": np.array([anchor_rate], np.float64),
+            "mark_price": np.array([0.0], np.float64),
+            "timestamp": np.array([1], np.int64),
+        }), f"{WORK}/fund.parquet")
+        nfd = 1
 
     noi = len(oi)
     if noi:
@@ -704,72 +863,167 @@ class DecisionLog:
 
 
 # ---------------------------------------------------------------- main loop
+GRID_STEP_NS = int(DECIDE_S * NS)
+
+
 async def decide_loop(bundle: Bundle, thr: Threshold, dlog: DecisionLog) -> None:
+    """Offline-grid decisions: one per grid point g_k = day_anchor + k*3s (exchange ts),
+    features from buffers SLICED at ts<=g_k, decision tick = last book tick <= g_k
+    (== ends = searchsorted(bt, grid, 'right')-1 with np.unique dedupe)."""
     n = 0
+    next_g: int | None = None
+    grid_day = ""
+    last_dec_tick_us = -1
+    last_warm_log = 0.0
     while True:
-        t_next = time.time() + DECIDE_S
+        await asyncio.sleep(0.05)
         try:
-            BUF.prune()
-            if BUF.warm():
-                t0 = time.time()
-                frozen = (list(BUF.book), list(BUF.trades), list(BUF.liq),
-                          list(BUF.eth), list(BUF.funding), list(BUF.oi), list(BUF.btc))
-
-                def _work() -> tuple | None:
-                    book, trades, liq, eth, funding, oi, btc = frozen
-                    nb, nt, nl, ne, nfd, noi, last_us = write_window_parquet(
-                        book, trades, liq, eth, funding, oi)
-                    x = compute_features(nb, nt, nl, ne, nfd, noi)
-                    return None if x is None else (nb, nt, nl, ne, nfd, noi, last_us, x, btc)
-
-                res = await asyncio.to_thread(_work)
-                if res is not None:
-                    nb, nt, nl, ne, nfd, noi, last_us, x, btc = res
-                    ts_ns = last_us * 1000
-                    x71 = feat71(ts_ns, x, btc)
-                    pa_, pb, sc = bundle.score(x71)
-                    taus = thr.observe(sc)
-                    takes = {f"take{int(t)}": bool(sc >= taus[t]) for t in BUDGETS}
-                    executed = False
-                    if EXEC is not None and takes.get(f"take{int(TRADE_BUDGET)}", False):
-                        executed = EXEC.maybe_trade(pb >= 0.5, sc)
-                    bb = frozen[0][-1]
-                    rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-                           "book_ts_us": last_us, "bid": bb[1][0][0], "ask": bb[2][0][0],
-                           "pA": round(pa_, 6), "pBg": round(pb, 6), "score": round(sc, 6),
-                           "side": "long" if pb >= 0.5 else "short",
-                           "tau": {str(int(t)): round(taus[t], 6) for t in BUDGETS},
-                           **takes, "executed": executed,
-                           "lat_ms": round((time.time() - t0) * 1000, 1),
-                           "nb": nb, "nt": nt, "nl": nl, "ne": ne, "nfd": nfd, "noi": noi}
-                    dlog.append(rec)
-                    n += 1
-                    if any(takes.values()) or n % 100 == 0:
-                        log.info("#%d score=%.4f side=%s takes=%s lat=%.0fms",
-                                 n, sc, rec["side"],
-                                 [int(t) for t in BUDGETS if takes[f"take{int(t)}"]], rec["lat_ms"])
-                    if n % 50 == 0:
-                        thr.save()
+            if GRID["anchor_ns"] is None or not BUF.book:
+                continue
+            if grid_day != GRID["day"]:
+                grid_day = GRID["day"]
+                next_g = GRID["anchor_ns"]          # k=0 scores the day's first tick
+            latest_ns = BUF.book[-1][0] * 1000
+            if next_g is None or latest_ns < next_g:
+                continue
+            if not BUF.warm():
+                if time.time() - last_warm_log > 10:
+                    last_warm_log = time.time()
+                    log.info("warming up: book=%d span=%.0fs", len(BUF.book),
+                             (BUF.book[-1][0] - BUF.book[0][0]) / 1e6 if BUF.book else 0)
+                # do not advance the grid backlog while cold; jump to the present
+                next_g = GRID["anchor_ns"] + ((latest_ns - GRID["anchor_ns"]) // GRID_STEP_NS + 1) * GRID_STEP_NS
+                continue
+            # catch-up: if compute fell behind, decide only at the most recent passed point
+            k_latest = (latest_ns - GRID["anchor_ns"]) // GRID_STEP_NS
+            g_latest = GRID["anchor_ns"] + k_latest * GRID_STEP_NS
+            if g_latest > next_g:
+                skipped = int((g_latest - next_g) // GRID_STEP_NS)
+                if skipped:
+                    log.warning("grid catch-up: %d point(s) skipped", skipped)
+                g = g_latest
             else:
-                log.info("warming up: book=%d span=%.0fs", len(BUF.book),
-                         (BUF.book[-1][0] - BUF.book[0][0]) / 1e6 if BUF.book else 0)
+                g = next_g
+            next_g = g + GRID_STEP_NS
+            BUF.prune()
+            g_us = g // 1000
+            t0 = time.time()
+            frozen = ([x for x in BUF.book if x[0] <= g_us],
+                      [x for x in BUF.trades if x[0] <= g_us],
+                      [x for x in BUF.liq if x[0] <= g_us],
+                      [x for x in BUF.eth if x[0] <= g_us],
+                      FANCHOR["rate"],
+                      [x for x in BUF.oi if x[0] <= g_us],
+                      [x for x in BUF.btc if x[0] <= g_us])
+            if not frozen[0]:
+                continue
+            if frozen[0][-1][0] == last_dec_tick_us:    # np.unique(ends) dedupe
+                continue
+            last_dec_tick_us = frozen[0][-1][0]
+
+            def _work() -> tuple | None:
+                book, trades, liq, eth, anchor, oi, btc = frozen
+                nb, nt, nl, ne, nfd, noi, last_us = write_window_parquet(
+                    book, trades, liq, eth, anchor, oi)
+                x = compute_features(nb, nt, nl, ne, nfd, noi)
+                return None if x is None else (nb, nt, nl, ne, nfd, noi, last_us, x, btc)
+
+            res = await asyncio.to_thread(_work)
+            if res is not None:
+                nb, nt, nl, ne, nfd, noi, last_us, x, btc = res
+                ts_ns = last_us * 1000
+                x71 = feat71(ts_ns, x, btc)
+                pa_, pb, sc = bundle.score(x71)
+                taus = thr.observe(sc)
+                takes = {f"take{int(t)}": bool(sc >= taus[t]) for t in BUDGETS}
+                executed = False
+                if EXEC is not None and takes.get(f"take{int(TRADE_BUDGET)}", False):
+                    executed = EXEC.maybe_trade(pb >= 0.5, sc)
+                bb = frozen[0][-1]
+                rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                       "book_ts_us": last_us, "grid_ts_us": g_us,
+                       "bid": bb[1][0][0], "ask": bb[2][0][0],
+                       "pA": round(pa_, 6), "pBg": round(pb, 6), "score": round(sc, 6),
+                       "side": "long" if pb >= 0.5 else "short",
+                       "tau": {str(int(t)): round(taus[t], 6) for t in BUDGETS},
+                       **takes, "executed": executed,
+                       "lat_ms": round((time.time() - t0) * 1000, 1),
+                       "nb": nb, "nt": nt, "nl": nl, "ne": ne, "nfd": nfd, "noi": noi}
+                dlog.append(rec)
+                n += 1
+                if any(takes.values()) or n % 100 == 0:
+                    log.info("#%d score=%.4f side=%s takes=%s lat=%.0fms",
+                             n, sc, rec["side"],
+                             [int(t) for t in BUDGETS if takes[f"take{int(t)}"]], rec["lat_ms"])
+                if n % 50 == 0:
+                    thr.save()
         except Exception as ex:
             log.exception("decision failed: %s", ex)
-        await asyncio.sleep(max(0.0, t_next - time.time()))
 
 
 async def oi_poller() -> None:
-    """Unsigned open-interest REST poll -> BUF.oi (feature parity with recorder derivatives_poll)."""
+    """Unsigned open-interest REST poll -> BUF.oi. Recorder derivatives_poll parity:
+    15s cadence, recorded at LOCAL receive time (not the exchange 'time' field)."""
     import urllib.request
     url = f"{REST_BASE}/fapi/v1/openInterest?symbol={SYM.upper()}"
     while True:
         try:
             with urllib.request.urlopen(url, timeout=8) as r:
                 d = json.loads(r.read())
-            BUF.oi.append((int(d["time"]) * 1000, float(d["openInterest"])))
+            BUF.oi.append((int(time.time() * 1e6), float(d["openInterest"])))
         except Exception as ex:
             log.warning("OI poll failed: %s", ex)
         await asyncio.sleep(OI_POLL_S)
+
+
+RECDATA = "/home/scalper/crypto-market-recorder/data/binance_futures"
+
+
+def recover_anchors() -> None:
+    """Mid-day (re)start: recover the day's grid + funding anchors from the recorder's
+    LOCAL hour files (same VM) so semantics match the offline pipeline exactly. The
+    hour-00 file exists only after ~01:00 UTC; fallbacks are logged approximations
+    corrected at the next day roll."""
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
+    for stream, dst in (("depth_snapshot", "anchor_book.parquet"),
+                        ("mark_price", "anchor_mark.parquet")):
+        src = f"{RECDATA}/{SYM.upper()}/{stream}/{day}_00.parquet"
+        r = subprocess.run(["sudo", "-n", "cp", src, f"{WORK}/{dst}"], capture_output=True)
+        if r.returncode == 0:
+            subprocess.run(["sudo", "-n", "chmod", "644", f"{WORK}/{dst}"], capture_output=True)
+    try:
+        t = pq.read_table(f"{WORK}/anchor_book.parquet", columns=["exchange_event_ts_us"])
+        ets = t["exchange_event_ts_us"].to_numpy()
+        ets = ets[~np.isnan(ets.astype(float))]
+        GRID["day"] = day
+        GRID["anchor_ns"] = int(ets.min()) * 1000
+        log.info("grid anchor recovered from recorder: %s -> %d", day, GRID["anchor_ns"])
+    except Exception as ex:
+        log.warning("grid anchor recovery failed (%s) — will anchor at own first tick "
+                    "(phase off <=3s until next day roll)", ex)
+    try:
+        t = pq.read_table(f"{WORK}/anchor_mark.parquet",
+                          columns=["exchange_event_ts_us", "funding_rate"])
+        ets = t["exchange_event_ts_us"].to_numpy().astype(float)
+        fr = t["funding_rate"].to_numpy().astype(float)
+        m = ~np.isnan(ets) & ~np.isnan(fr)
+        i = int(np.argmin(ets[m]))
+        FANCHOR["day"] = day
+        FANCHOR["rate"] = float(fr[m][i])
+        log.info("funding day-anchor recovered from recorder: %s = %.6g", day, FANCHOR["rate"])
+    except Exception:
+        try:
+            import urllib.request
+            with urllib.request.urlopen(
+                    f"{REST_BASE}/fapi/v1/premiumIndex?symbol={SYM.upper()}", timeout=8) as r:
+                d = json.loads(r.read())
+            FANCHOR["day"] = day
+            FANCHOR["rate"] = float(d["lastFundingRate"])
+            log.warning("funding day-anchor APPROXIMATED from current REST rate = %.6g "
+                        "(recorder hour-00 file unavailable)", FANCHOR["rate"])
+        except Exception as ex:
+            log.warning("funding anchor recovery failed entirely: %s — decisions deferred "
+                        "until the first markPrice event of the next day", ex)
 
 
 async def main() -> None:
@@ -778,8 +1032,11 @@ async def main() -> None:
     bundle = Bundle()
     thr = Threshold(bundle)
     dlog = DecisionLog(bundle.mkt)
-    # public: signal depth + BTC-lead bookTicker (+ exec bookTicker in live)
-    pub_streams = [f"{SYM}@depth20@100ms", f"{BTC_SYM}@bookTicker"]
+    BOOKS[SYM] = MirrorBook(SYM)
+    BOOKS[BTC_SYM] = MirrorBook(BTC_SYM)
+    recover_anchors()
+    # public: signal + BTC-lead depth DIFFS (mirror books) (+ exec bookTicker in live)
+    pub_streams = [f"{SYM}@depth@100ms", f"{BTC_SYM}@depth@100ms"]
     # market: signal trades/liq/funding + ETH-lead trades
     mkt_streams = [f"{SYM}@aggTrade", f"{SYM}@forceOrder", f"{SYM}@markPrice@1s",
                    f"{ETH_SYM}@aggTrade"]
@@ -794,6 +1051,7 @@ async def main() -> None:
     tasks = [
         asyncio.create_task(ws_consumer("public", pub_streams)),
         asyncio.create_task(ws_consumer("market", mkt_streams)),
+        asyncio.create_task(reconcile_loop()),
         asyncio.create_task(oi_poller()),
         asyncio.create_task(decide_loop(bundle, thr, dlog)),
     ]

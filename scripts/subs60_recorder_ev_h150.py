@@ -113,16 +113,33 @@ def liq_cl(sym, day, out):
     pq.write_table(t, out); return t.num_rows
 
 
+# FUNDING_MODE (2026-07-08 parity audit):
+#   anchor (DEFAULT) — the DEPLOYED policy: fund.parquet is a SINGLE row (first mark_price
+#     rate of the day, mark 0, ts=1ms) -> col13 frozen per day, col44=0. This reproduces the
+#     accidental-but-validated +6.59bp cell (LOO-positive, jitter-robust) as an intentional
+#     variance reduction; byte-matches live axb_live write_window_parquet.
+#   true — training semantics: full stream in ms -> col13 latest rate(t), col44 real basis.
+#     Measured -2.14bp t5 on 20260628-0707 (_recev_h150fix_DOGE).
+FUNDING_MODE = os.environ.get("FUNDING_MODE", "anchor")
+
+
 def funding_cl(sym, day, out):
     d = dl_rec(sym, "mark_price", day, ["exchange_event_ts_us", "local_ts_us", "funding_rate", "mark_price"])
     if d is None or not len(d["exchange_event_ts_us"]):
         return 0
     m = ~np.isnan(d["exchange_event_ts_us"].astype(float))
-    # ts in MILLISECONDS: FB's funding_rate+mark_price reader takes timestamps as-is (ms
-    # convention). The previous ns write pinned col13 to the day's first row and zeroed
-    # col44 for the whole validation (2026-07-08 parity audit) — ms = training semantics.
-    t = pa.table({"funding_rate": np.nan_to_num(d["funding_rate"][m].astype(np.float64)), "mark_price": d["mark_price"][m].astype(np.float64),
-                  "timestamp": (d["exchange_event_ts_us"][m].astype(np.int64) // 1000)}).sort_by("timestamp")
+    if FUNDING_MODE == "anchor":
+        ets = d["exchange_event_ts_us"][m].astype(np.int64)
+        fr = np.nan_to_num(d["funding_rate"][m].astype(np.float64))
+        i = int(np.argmin(ets))
+        t = pa.table({"funding_rate": np.array([fr[i]], np.float64),
+                      "mark_price": np.array([0.0], np.float64),
+                      "timestamp": np.array([1], np.int64)})
+    else:
+        # ts in MILLISECONDS: FB's funding_rate+mark_price reader takes timestamps as-is.
+        # The pre-2026-07-08 ns write pinned col13 to the day's first row and zeroed col44.
+        t = pa.table({"funding_rate": np.nan_to_num(d["funding_rate"][m].astype(np.float64)), "mark_price": d["mark_price"][m].astype(np.float64),
+                      "timestamp": (d["exchange_event_ts_us"][m].astype(np.int64) // 1000)}).sort_by("timestamp")
     pq.write_table(t, out); return t.num_rows
 
 

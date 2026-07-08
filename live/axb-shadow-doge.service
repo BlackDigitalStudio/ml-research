@@ -1,0 +1,26 @@
+[Unit]
+Description=AxB h150 SHADOW (DOGE, perfect-parity engine: mirror-book diffs + day-anchor funding + exchange-ts grid) — no orders
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=delmi
+Group=delmi
+Environment=HOME=/home/delmi
+Environment=MODE=shadow
+Environment=SYMK=DOGE
+Environment=SIGNAL_SYM=dogeusdt
+Environment=EXEC_SYM=DOGEUSDC
+Environment=WORKDIR=/home/delmi/axb_h150s
+Environment=SHADOW_GCS=research_runs/axb_shadow_h150v2/DOGE
+Environment=FB_BIN=/home/delmi/axb/feature_builder
+WorkingDirectory=/home/delmi/axb_h150s
+ExecStart=/home/delmi/axb/venv/bin/python3 /home/delmi/axb_h150s.py
+Restart=always
+RestartSec=5
+Nice=5
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target
