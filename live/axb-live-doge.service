@@ -1,5 +1,5 @@
 [Unit]
-Description=AxB h150 live (DOGEUSDC maker, 4-seed ensemble, entry 60s / hold 150s, budget t5)
+Description=AxB h150 live (DOGEUSDC maker, perfect-parity engine: mirror-book diffs + day-anchor funding + midnight grid, 4-seed ensemble, entry 60s / hold 150s, budget t5)
 After=network-online.target
 Wants=network-online.target
 
@@ -10,6 +10,7 @@ Group=delmi
 Environment=HOME=/home/delmi
 Environment=MODE=live
 Environment=SYMK=DOGE
+Environment=RECEV_DIR=research_runs/_recev_h150anch_DOGE
 Environment=SIGNAL_SYM=dogeusdt
 Environment=EXEC_SYM=DOGEUSDC
 Environment=TRADE_BUDGET=5
