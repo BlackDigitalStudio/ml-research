@@ -348,8 +348,11 @@ BOOKS: dict[str, MirrorBook] = {}          # stream-symbol (lower) -> mirror boo
 # Funding DAY-ANCHOR (validated cell semantics): rate of the day's first mark_price
 # event; col44 forced 0 via mark_price=0 in the single-row fund.parquet.
 FANCHOR = {"day": "", "rate": None}
-# Decision grid anchored at the day's first accepted book tick (ns) == offline
-# grid = arange(bt[0], ..., 3s) per UTC day.
+# Decision grid anchored at CALENDAR UTC MIDNIGHT of the day (ns) — deterministic
+# phase, identical in live and in the offline pipeline (the recorder's bt[0] is a
+# flush-cycle artifact: hour-00 files carry a pre-midnight buffer tail, so a
+# first-tick anchor is not reproducible in real time).
+DAY_NS = 86400 * NS
 GRID = {"day": "", "anchor_ns": None}
 
 
@@ -361,8 +364,8 @@ def _on_doge_tick(ts_ns: int) -> None:
     d = _utc_day_of_ns(ts_ns)
     if GRID["day"] != d:
         GRID["day"] = d
-        GRID["anchor_ns"] = ts_ns
-        log.info("grid anchor %s -> %d (day first tick)", d, ts_ns)
+        GRID["anchor_ns"] = (ts_ns // DAY_NS) * DAY_NS
+        log.info("grid anchor %s -> %d (UTC midnight)", d, GRID["anchor_ns"])
 
 
 async def ws_consumer(path: str, streams: list[str]) -> None:
@@ -980,27 +983,15 @@ RECDATA = "/home/scalper/crypto-market-recorder/data/binance_futures"
 
 
 def recover_anchors() -> None:
-    """Mid-day (re)start: recover the day's grid + funding anchors from the recorder's
-    LOCAL hour files (same VM) so semantics match the offline pipeline exactly. The
-    hour-00 file exists only after ~01:00 UTC; fallbacks are logged approximations
-    corrected at the next day roll."""
+    """Mid-day (re)start: recover the day's FUNDING anchor from the recorder's LOCAL
+    hour-00 mark_price file (same VM) so col13 matches the offline pipeline exactly;
+    REST fallback is a logged approximation corrected at the next day roll. (The grid
+    anchor needs no recovery — it is calendar UTC midnight, deterministic.)"""
     day = datetime.now(timezone.utc).strftime("%Y%m%d")
-    for stream, dst in (("depth_snapshot", "anchor_book.parquet"),
-                        ("mark_price", "anchor_mark.parquet")):
-        src = f"{RECDATA}/{SYM.upper()}/{stream}/{day}_00.parquet"
-        r = subprocess.run(["sudo", "-n", "cp", src, f"{WORK}/{dst}"], capture_output=True)
-        if r.returncode == 0:
-            subprocess.run(["sudo", "-n", "chmod", "644", f"{WORK}/{dst}"], capture_output=True)
-    try:
-        t = pq.read_table(f"{WORK}/anchor_book.parquet", columns=["exchange_event_ts_us"])
-        ets = t["exchange_event_ts_us"].to_numpy()
-        ets = ets[~np.isnan(ets.astype(float))]
-        GRID["day"] = day
-        GRID["anchor_ns"] = int(ets.min()) * 1000
-        log.info("grid anchor recovered from recorder: %s -> %d", day, GRID["anchor_ns"])
-    except Exception as ex:
-        log.warning("grid anchor recovery failed (%s) — will anchor at own first tick "
-                    "(phase off <=3s until next day roll)", ex)
+    src = f"{RECDATA}/{SYM.upper()}/mark_price/{day}_00.parquet"
+    r = subprocess.run(["sudo", "-n", "cp", src, f"{WORK}/anchor_mark.parquet"], capture_output=True)
+    if r.returncode == 0:
+        subprocess.run(["sudo", "-n", "chmod", "644", f"{WORK}/anchor_mark.parquet"], capture_output=True)
     try:
         t = pq.read_table(f"{WORK}/anchor_mark.parquet",
                           columns=["exchange_event_ts_us", "funding_rate"])

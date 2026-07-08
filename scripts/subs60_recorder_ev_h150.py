@@ -215,7 +215,13 @@ for day in rec_days():
     n = len(bt)
     if n < W + H + 100:
         print(f"{day}: thin {n}", flush=True); continue
-    grid = np.arange(bt[0], bt[-1], int(STEP_S * NS))
+    # Grid anchored at CALENDAR UTC MIDNIGHT (== live engine), not bt[0]: the recorder's
+    # hour-00 files carry a pre-midnight flush-buffer tail, so a bt[0] anchor has a
+    # flush-phase-dependent offset that live cannot reproduce in real time.
+    from datetime import datetime as _dt, timezone as _tz
+    mid0 = int(_dt.strptime(day, "%Y%m%d").replace(tzinfo=_tz.utc).timestamp()) * NS
+    grid = np.arange(mid0, bt[-1], int(STEP_S * NS))
+    grid = grid[grid >= bt[0]]
     ends = np.unique(np.clip(np.searchsorted(bt, grid, "right") - 1, 0, n - 1))
     ends = ends[(ends >= W - 1) & (ends < n - H - 1)].astype(np.int64)
     if len(ends) < 50:
