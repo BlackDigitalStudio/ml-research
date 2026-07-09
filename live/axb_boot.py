@@ -90,8 +90,18 @@ print(f"boot: tau seed {len(buf)} scores from {RECEV}")
 # ---- funding day-anchor ----
 day = datetime.now(timezone.utc).strftime("%Y%m%d")
 anchor = None
+# anchor sources in order: recorder LOCAL file (same-VM deploys), recorder GCS bucket
+# (split-VM deploys; hour-00 lands after ~01:00 UTC), REST approximation.
 src = f"{RECDATA}/{SYM.upper()}/mark_price/{day}_00.parquet"
 r = subprocess.run(["sudo", "-n", "cp", src, f"{BOOT}/anchor_mark.parquet"], capture_output=True)
+if r.returncode != 0:
+    try:
+        rec = cl.bucket("recorder-data-asia-0998ac51")
+        rec.blob(f"chronos/scalper-recorder/binance_futures/{SYM.upper()}/mark_price/{day}_00.parquet")            .download_to_filename(f"{BOOT}/anchor_mark.parquet")
+        r = subprocess.CompletedProcess([], 0)
+        print("boot: anchor file fetched from recorder GCS bucket")
+    except Exception as ex:
+        print(f"boot: recorder GCS anchor unavailable: {ex}")
 if r.returncode == 0:
     subprocess.run(["sudo", "-n", "chmod", "644", f"{BOOT}/anchor_mark.parquet"], capture_output=True)
     try:
