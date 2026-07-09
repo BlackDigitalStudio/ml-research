@@ -27,6 +27,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 pub const DEPTH_LEVELS: usize = 20;
 
 pub mod features;
+pub mod features_incr;
 pub mod live_sim;
 
 /// All depth data for a single parquet file, materialized as contiguous ndarrays.
