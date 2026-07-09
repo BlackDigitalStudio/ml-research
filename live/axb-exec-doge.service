@@ -16,7 +16,7 @@ Environment=SIZE_FRAC=1.0
 Environment=WORKDIR=/home/delmi/axb_h150
 Environment=SHADOW_GCS=research_runs/axb_shadow_h150/DOGE
 WorkingDirectory=/home/delmi/axb_h150
-ExecStart=/home/delmi/axb/venv/bin/python3 /home/delmi/axb_exec.py
+ExecStart=/home/delmi/venv/bin/python3 /home/delmi/axb_exec.py
 Restart=always
 RestartSec=5
 Nice=5
