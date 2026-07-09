@@ -1,0 +1,26 @@
+[Unit]
+Description=AxB order-execution sidecar (DOGEUSDC maker lifecycle + decision-log GCS upload; Unix socket for axb_engine)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=delmi
+Group=delmi
+Environment=HOME=/home/delmi
+Environment=MODE=live
+Environment=SYMK=DOGE
+Environment=EXEC_SYM=DOGEUSDC
+Environment=TRADE_BUDGET=5
+Environment=SIZE_FRAC=1.0
+Environment=WORKDIR=/home/delmi/axb_h150
+Environment=SHADOW_GCS=research_runs/axb_shadow_h150/DOGE
+WorkingDirectory=/home/delmi/axb_h150
+ExecStart=/home/delmi/axb/venv/bin/python3 /home/delmi/axb_exec.py
+Restart=always
+RestartSec=5
+Nice=5
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

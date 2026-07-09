@@ -45,6 +45,11 @@ ndarray-npy = "0.9"
 rayon = "1.10"
 memmap2 = "0.9"
 clap = { version = "4", features = ["derive"] }
+# axb_engine (live decision engine) only:
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+ureq = { version = "2", features = ["tls", "json"] }
 
 [profile.release]
 opt-level = 3

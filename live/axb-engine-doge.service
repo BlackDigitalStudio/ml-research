@@ -1,0 +1,27 @@
+[Unit]
+Description=AxB h150 Rust engine (DOGE, ~70us decisions, bit-exact vs anchored validation; orders via axb-exec socket)
+After=network-online.target axb-exec-doge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=delmi
+Group=delmi
+Environment=HOME=/home/delmi
+Environment=MODE=live
+Environment=SYMK=DOGE
+Environment=SIGNAL_SYM=dogeusdt
+Environment=TRADE_BUDGET=5
+Environment=WORKDIR=/home/delmi/axb_h150
+Environment=RECEV_DIR=research_runs/_recev_h150anch_DOGE
+Environment=BUNDLE_DIR=research_runs/deploy_h150/DOGE
+WorkingDirectory=/home/delmi/axb_h150
+ExecStartPre=/home/delmi/axb/venv/bin/python3 /home/delmi/axb_boot.py
+ExecStart=/home/delmi/axb_engine
+Restart=always
+RestartSec=5
+Nice=1
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

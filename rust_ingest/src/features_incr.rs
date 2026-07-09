@@ -163,6 +163,30 @@ impl FeatState {
     pub fn n_ticks(&self) -> usize {
         self.ts.len()
     }
+    #[inline]
+    pub fn n_trades(&self) -> usize {
+        self.t_ts.len()
+    }
+    #[inline]
+    pub fn n_eth(&self) -> usize {
+        self.e_ts.len()
+    }
+    #[inline]
+    pub fn n_liq(&self) -> usize {
+        self.l_ts.len()
+    }
+    #[inline]
+    pub fn n_oi(&self) -> usize {
+        self.oi_ts.len()
+    }
+    #[inline]
+    pub fn bp0_at(&self, idx: usize) -> f64 {
+        self.bp0[idx]
+    }
+    #[inline]
+    pub fn ap0_at(&self, idx: usize) -> f64 {
+        self.ap0[idx]
+    }
 
     // ---------------------------------------------------------------- events
     pub fn push_trade(&mut self, ts: i64, px: f64, qty: f64, is_sell: bool) {
