@@ -1,5 +1,6 @@
 # Memory index
 
+- [Research home = ml-research](research-home-ml-research.md) — репо переименован scalper-bot→ml-research и остаётся домом исследований (история/ветки несущие); trading_algorithm = витрина деплоя; канонический стор памяти = research/memory/ в репо
 - [Research runtime infra](research-runtime-infra.md) — research/runtime/ in-repo = канонические раннеры+KNOWN_PITFALLS; расширять, не переписывать; скорость исследований важнее отдельной стратегии
 - [Scope-bound claims](scope-bound-claims.md) — READ FIRST for any quantitative recall: every number is a measured cell (symbol×year×execution×features×protocol), not a law; noA conclusions ≠ deploy constraints; single walk-forward draws ≠ point estimates
 
