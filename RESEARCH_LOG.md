@@ -1230,3 +1230,113 @@ pA/pBg — harvests the measured seed noise), USDC pairs. Prereqs: recorder-EV c
 config on live recorder days; live engine wiring (btc bookTicker, funding, OI, ETH aggTrade;
 DECIDE_S 3 s, ENTRY_WIN_S 60, HOLD_S 150). Ops note: systemd-run expands `${VAR}` in payloads →
 use bare `$VAR`/script files; 5 seed aggregates were overwritten and deterministically rerun.
+
+## 22. 2026-07-10 — BASELINE: anchored h150 ensemble (DEPLOYED) — year-validated, bit-exact live engine
+
+**Status: NEW PROJECT BASELINE.** First configuration in this project with (a) a year-scale
+walk-forward measurement of the exact traded policy, (b) a live engine proven bit-identical
+to the validation pipeline, and (c) live trading running on it (axb-engine-doge, DOGEUSDC,
+since 2026-07-09 09:13 UTC; first live trade 2026-07-08 verified inside the sim envelope).
+
+### 22.1 The strategy (what actually trades)
+
+- **Signal universe / venue split**: signal computed on DOGEUSDT perp streams (book diffs,
+  aggTrades, forceOrders, markPrice, OI poll, ETH-lead trades, BTC-lead L1 mid); execution
+  on DOGEUSDC (0% maker fee venue).
+- **Decision cadence**: every 3s on the exchange-timestamp grid anchored at calendar UTC
+  midnight; decision tick = last book tick <= grid point (np.unique dedupe semantics).
+- **Model**: two-head XGBoost per seed — A (activity: |rH| top-5% classifier, AUC-tuned) x
+  Bg (direction: gated fill-weighted classifier, size-aware-IC-tuned); per-seed score =
+  rankCDF(pA) * rankCDF(|pBg-0.5|); **deployed score = mean over 4 seeds** (ensemble is
+  load-bearing — see 22.2); side = mean pBg >= 0.5.
+- **Selectivity**: causal day-level tau (np.quantile of a 30-day rolling score buffer,
+  budget t5 = 5 trades/day nominal; realized ~3/day); tau frozen within a UTC day.
+- **Execution policy**: maker-only. GTX entry at touch, 60s entry window from decision;
+  hold 150s FROM FILL; pegged maker-only reduce-only exit chased until filled (taker
+  backstop only at catastrophic guards). Notional = 1x deposit (SIZE_FRAC=1.0, lev 2 =
+  margin headroom only).
+- **Feature semantics (ANCHORED — intentional, validated)**: col13 (funding rate) frozen at
+  the day's first mark_price value; col44 (funding basis) = 0. Found via the 2026-07-08
+  funding ns/ms bug forensics (ledger, fix 079fa29): the "broken" day-anchored variant
+  measured ROBUST (+8.6bp, LOO 0/10 neg, jitter P>0=100%) while the "correct" true-funding
+  semantics measured -2.1bp (noise) on the same recorder days — freezing a hypersensitive
+  input (±0.17 score per 1e-4 raw) is variance reduction that tail selection rewards.
+  Adopted as the policy definition, not a bug.
+
+### 22.2 The result (all cells preregistered / frozen-protocol)
+
+| Cell | EV/tr t5 | Robustness |
+|---|---|---|
+| **YEAR x ENSEMBLE (= deployed scoring)** — 371d CL, 6 walk-forward folds (W200/T30/EMB2), 563 trades, 3.1/day, hit 65.2% | **+13.35bp** | ALL 6 folds positive (+2.1..+31.0 %/fold-month); LOFO +10.85..+15.19; score-jitter sd=0.02 -> p50 +7.49, sd=0.05 -> p50 +3.13, **P(EV>0)=100% both** |
+| YEAR x per-seed (4 seeds) | +8.14±2.55 [7.0/12.5/6.0/7.1] | 4/4 seeds positive; fold2 carries ~60% (LOFO-fold2 +3.50); jitter-fragile (sd0.05 -> +0.24, P>0=74%) |
+| 10 recorder days x ensemble (live venue view) | +8.61bp (66tr) | LOO 0/10 negative; jitter P>0 = 100/100/98% at sd .02/.05/.10 |
+| t10 (per-seed year) | +4.64±0.93 | budget surface monotone t5>t10>t20>t40~0 |
+
+Consistency triangle: year-ensemble +13.4 / year-per-seed +8.1 / recorder-10d-ensemble +8.6
+— one alpha class across two venues and two horizons. **Conservative stressed floor for the
+traded config ~ +3bp/tr** (year ensemble under sd=0.05 selection noise, never negative in
+100 reps). ROI translation at current size (~$10 notional): ~40bp/day base (~+12%/mo, all
+fold-months positive), ~10bp/day stressed floor (~+3%/mo). CAPACITY CAVEAT: these are edge
+densities at $10-1k notional (always-last queue model); not scalable ROI claims.
+
+Key structural finding: **ensemble averaging of rank-scores is load-bearing** — it removes
+both the fold concentration (fold4: negative in all 4 seeds per-seed -> +2.5bp/tr ensemble)
+and the selection-noise fragility (P>0 at sd0.05: 74% per-seed -> 100% ensemble). The
+multiplicative rank-score is structurally fragile near pBg~0.5 (measured live: ~5 sim-only
+takes/day from independent-WS jitter); averaging 4 seeds is what stabilizes the tail.
+
+### 22.3 Architecture (as deployed)
+
+- **axb_engine (Rust, ~70us decision path, live 1.0-1.2ms incl. logging)** on the recorder
+  VM: MirrorBook full-book reconstruction from @depth@100ms diffs (port of the recorder's
+  OrderBookV2: REST seed limit=100, cap 100 levels, skip u<=last, no pu-chain, reconcile
+  900s / reseed>=2 findings) for DOGEUSDT + BTCUSDT; features_incr day-anchored append-only
+  prefix state (midnight reset == per-day sim files); gbt bit-exact XGBoost predictor;
+  causal tau port; decision JSONL; orders via Unix socket.
+- **axb_exec (Python sidecar)**: verbatim battle-tested maker trade lifecycle + own
+  DOGEUSDC bookTicker WS + hourly GCS decision upload.
+- **axb_boot (Python, ExecStartPre)**: GCS bundle -> npys; **empirically solved xgboost
+  base-margin bits** (one-tree equation; the float ProbToMargin formula is 1 ulp off on 1
+  of 8 models); tau seed from the anchored recorder score distribution; funding day-anchor
+  (recorder local file -> recorder GCS bucket -> REST fallback).
+- **Bit-exactness keys** (all measured, not assumed): day-anchored prefixes reproduce batch
+  float summation order; xgboost f32 margin accumulates base-FIRST; sigmoid = glibc expf
+  (numpy SIMD exp does NOT match); leaf values live in split_conditions.
+
+### 22.4 How it was validated (the part that makes this a baseline)
+
+1. **Golden parity harnesses** (fb_incr_harness + score_harness, day 20260707, 28546
+   samples): features 0/2.03M cells mismatched vs frozen feature_builder; F71 (incl. libm
+   ToD/btc_lead) 0/2.03M; 8-model predictions 0/228k vs Python xgboost; ensemble score
+   0/28546. The engine equals the validation pipeline BYTE-FOR-BYTE by construction; any
+   model/feature change must re-pass both harnesses before deploy.
+2. **Year cell, frozen protocol, preregistered** (ledger tb3s-20260709_h150anch_year_4seeds
+   BEFORE running): the original subs60_xgb_optuna_ic.py byte-unchanged; intervention =
+   dataset only (col13 := day-first, col44 := 0 on the tb3s h150 combined npz). Per-fold
+   Optuna (25 trials, A-AUC/B-IC), 4 seeds sequential, full artifact capture (per-fold
+   scores, OPTUNA jsons, run log -> GCS).
+3. **Robustness battery on every cell**: leave-one-fold/day-out + score perturbation at the
+   measured live-jitter scale (live-vs-sim same-tick score |d| p50 0.007-0.026) — the
+   perturbation gate is now REQUIRED for any tail-selection EV claim (extends the §20 rule).
+4. **EV(latency) sweep** (entry-delay-patched grid_sim, selection held fixed): EV flat
+   +8.6..+10.4bp across 0-3000ms entry delay -> the policy is latency-insensitive; the
+   engine's value is parity-by-construction + CPU, NOT latency alpha (ledger
+   latsweep-20260709).
+5. **Sim-live execution parity** (first live trade, 2026-07-08): long 139 DOGE @0.07311 ->
+   0.07291, -27.4bp live vs sim adjacent-tick envelope -24.6/-35.5bp; ROI@2x -0.55%
+   reproduced. Decision-layer live parity: take5 agreement 74/74 vs the Python engine in
+   shadow; tau matched to 6dp.
+
+### 22.5 Known limitations / next
+
+- Majority-vote side approximation in the year-ensemble cell (15.9% raw 2-2 ties; deployed
+  uses mean pBg) — exact-side rerun is cheap if it ever matters.
+- Regime structure: the edge is carried by strong windows (fold2-type months up to +30%);
+  months near zero are NORMAL; one mild negative regime exists per-seed (fold4) though the
+  ensemble held it positive.
+- Capacity curve unmeasured beyond ~$1k notional — scale-up must be data-driven (live
+  fill-rate / queue degradation), NO realized-EV-based scaling before ~100-200 live trades
+  (se ~ 2bp at 3/day ~ 1-2 months).
+- Next: WS capture layer (engine records its own consumed stream; daily replay must equal
+  the decision log bit-for-bit) — removes the last measurement/live gap; twin-engine
+  session-jitter quantification; per-trade live-vs-sim execution ledger as trades accrue.
