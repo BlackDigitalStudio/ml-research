@@ -1,0 +1,22 @@
+# Memory index
+
+- [Research runtime infra](research-runtime-infra.md) — research/runtime/ in-repo = канонические раннеры+KNOWN_PITFALLS; расширять, не переписывать; скорость исследований важнее отдельной стратегии
+- [Scope-bound claims](scope-bound-claims.md) — READ FIRST for any quantitative recall: every number is a measured cell (symbol×year×execution×features×protocol), not a law; noA conclusions ≠ deploy constraints; single walk-forward draws ≠ point estimates
+
+- [Audit before long runs](audit-before-long-runs.md) — static bug/efficiency audit BEFORE launching; no launch→find-bug→relaunch loop
+- [Capture all information](capture-all-information.md) — over-save run artifacts (trials, weights, predictions, stats); losing data costs more than storage
+- [Recorder VM live](recorder-vm-live.md) — recorder runs 24/7 on GCP VM scalper-recorder (Tokyo, ~$14-16/mo billing), not Windows
+- [Verify no duplicate VM runs](verify-no-duplicate-vm-runs.md) — check for a same-command duplicate before/after launching long VM runs; wakeup launchers can double-fire
+- [Binance WS routed paths](binance-ws-routed-paths.md) — Binance futures WS migrated to /public,/market,/private (2026-04-23); legacy /ws drops /market (forceOrder/markPrice/aggTrade) silently
+- [Recorder deploy mechanics](recorder-deploy-mechanics.md) — live recorder is at /home/scalper/crypto-market-recorder (not /opt/chronos); deploy = scp+sudo cp+restart, logs/data under that dir
+- [Execute explicit commands directly](execute-explicit-commands-directly.md) — on an explicit simple operational command, just do it; no self-added precautionary checks
+- [GCP accounts & billing migration](gcp-accounts-billing-migration.md) — old billing 018133 delinquent ($150 unpaid); project-0998ac51 relinked to new $300 account (01CB22); full bucket backups on new project-d39e90d0
+- [CL↔recorder sampling mismatch](cl-recorder-sampling-mismatch.md) — CL trained ≠ live recorder (event-driven 1.3/s vs uniform 9/s, 3× trade dup); tick-window vol features broke transfer; 1s-grid fix = plan A (edge kept, transfer 0.41→0.73)
+- [Live trading deploy](live-trading-deploy.md) — axb-live ON since 2026-07-05 (Tokyo VM, DOGEUSDC maker t10, 100% of ~10 USDC); keys on VM config.env, static IP 35.221.108.194; Cryptolake lapsed; sim-vs-live audit: CL labels tick-based (~2-3min not 30s!), exit ran-out marked-at-touch (top-selectivity EV survives), never-taker exit policy; rev6: live-config year EV −2.35bp/tr (regime-conditional positives only)
+- [Label-matching lookahead — CORRECTED](label-matching-lookahead.md) — lookahead refuted model-free; real finding: year walk-forward EV has ±3-5bp structural variance under label noise → old-semantics maker edge never statistically identified; honest-30s stably negative; perturbation gate required for tail-selection year-EVs
+- [h150 sim-live parity](h150-sim-live-parity.md) — funding ns/ms bug → 3 semantics; ANCHORED policy (col13 day-frozen, col44=0) is the robust cell: +8.61bp t5, LOO 0/10 neg, jitter P>0=100% (true-funding −2.14 = noise); tau from _recev_h150anch_DOGE
+- [Rust sub-ms engine](rust-subms-engine.md) — axb_engine LIVE since 2026-07-09 09:13 UTC (units axb-engine-doge + axb-exec-doge): bit-exact decision path proven by harnesses (features 0/2M, predictions 0/228k, score 0/28.5k); keys: day-anchored prefixes, xgboost base-FIRST f32 accumulation + empirically-solved base bits, glibc expf; EV(latency) flat 0–3000ms → engine value = parity-by-construction, not EV
+- [h150 anchored year cell](h150-anchored-year.md) — YEAR measurement of the traded config (371d CL, 6 folds×4 seeds): ENSEMBLE (deployed scoring) +13.35bp t5, ALL folds positive, LOFO ≥+10.9, jitter floor ~+3bp (sd0.05, P>0=100%); per-seed weaker (+8.14±2.55, fold2-concentrated, jitter-fragile) — ensemble averaging is load-bearing
+- [Deploy-scope budgets](deploy-scope-budgets.md) — validation runs: AxB t5/t10 only (BUDGETS=5,10); don't inherit 4-budget env from old scripts; noA unreported
+- [xsym cross-symbol run](xsym-cross-symbol-run.md) — HD3 rev8 launched 2026-07-10 on hd2-feats-003 (unit xsym): 7 symbols × anchored h150 year × t5 × 4 seeds; H_TICKS=1800 is the cross-symbol protocol (не 1500); stop VM after collection
+- [h150 deploy candidate](h150-deploy-candidate.md) — honest 60s-entry/150s-hold/full-features cell: DOGE +6.27±0.9, BTC +9.69±1.8 (4 seeds, PASS), ETH FAIL; hold sweep peaks at 150s; deploy = DOGE t10 + seed-ensemble scoring, pending recorder-EV cross-check + live wiring
