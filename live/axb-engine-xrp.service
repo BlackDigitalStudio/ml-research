@@ -1,6 +1,6 @@
 [Unit]
-Description=AxB h150 Rust engine (XRP, SHADOW — decisions only, no exec socket; split-VM deploy, funding anchor via recorder GCS/REST fallback)
-After=network-online.target
+Description=AxB h150 Rust engine (XRP; split-VM deploy, funding anchor via recorder GCS/REST fallback; orders via axb-exec-xrp socket)
+After=network-online.target axb-exec-xrp.service
 Wants=network-online.target
 
 [Service]
@@ -8,7 +8,7 @@ Type=simple
 User=delmi
 Group=delmi
 Environment=HOME=/home/delmi
-Environment=MODE=shadow
+Environment=MODE=live
 Environment=SYMK=XRP
 Environment=SIGNAL_SYM=xrpusdt
 Environment=TRADE_BUDGET=5

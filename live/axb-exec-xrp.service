@@ -1,0 +1,23 @@
+[Unit]
+Description=AxB exec sidecar (XRPUSDC maker lifecycle; Unix socket for axb-engine-xrp)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=delmi
+Group=delmi
+Environment=HOME=/home/delmi
+Environment=MODE=live
+Environment=SYMK=XRP
+Environment=EXEC_SYM=XRPUSDC
+Environment=TRADE_BUDGET=5
+Environment=SIZE_FRAC=0.5
+Environment=WORKDIR=/home/delmi/axb_h150
+WorkingDirectory=/home/delmi/axb_h150
+ExecStart=/usr/bin/python3 /home/delmi/axb_exec.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
