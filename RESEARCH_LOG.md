@@ -1340,3 +1340,56 @@ takes/day from independent-WS jitter); averaging 4 seeds is what stabilizes the 
 - Next: WS capture layer (engine records its own consumed stream; daily replay must equal
   the decision log bit-for-bit) — removes the last measurement/live gap; twin-engine
   session-jitter quantification; per-trade live-vs-sim execution ledger as trades accrue.
+
+## 23. 2026-07-11 — HD3 rev8: cross-symbol year surface of the anchored h150 policy (7 symbols)
+
+**Question (exploratory):** on which symbols does the DEPLOYED anchored-h150 policy class
+(60s entry / 150s hold from fill / pegged never-taker chase / anchored funding / causal t5 /
+4-seed ensemble) yield year-scale alpha, how large, and how seed/selection-stable?
+Protocol byte-frozen = rev7; new datasets (BNB/LTC/SOL/XRP/LINK) built at the recovered
+cross-symbol parameter **H_TICKS=1800** (FULLFEAT; bit-exact pipeline reproduction proven
+before launch); BTC/ETH label files reused from s21 builds; anchored intervention
+col13:=day-first, col44:=0. Ledger `tb3s-20260710_h150anch_year_xsym` (+ 2 preregistered
+amendments).
+
+**The surface** (t5, bp/trade; per-seed = 4 seeds mean±sd; ENS = deployed mean-rank scoring,
+majority-vote side; jitter = P(EV>0) under score perturbation, 100 reps):
+
+| sym | per-seed EV [seeds] | ENS EV (n, hit) | LOFO min | jitter sd.02 / sd.05 |
+|---|---|---|---|---|
+| DOGE (ref, s22) | +8.14±2.55 [7.0/12.5/6.0/7.1] 4/4 | **+13.35** (563, 65.2%) | +10.85 | P100% / **P100%** |
+| **XRP** | **+10.97±3.50** [10.6/11.4/6.0/15.9] 4/4 | **+12.68** (504, 58.5%) | +8.36 | P100% / P41% |
+| BTC | +6.20±2.76 [4.5/6.9/10.4/3.0] 4/4 | +3.83 (574, 54.9%) | +1.11 | P56% / P0% |
+| ETH | +4.86±3.83 [-0.7/7.1/3.5/9.5] 3/4 | +7.36 (419, 55.6%) | +3.34 | P23% / P4% |
+| SOL | -2.59±4.37 | -5.05 (773) | — | P0% / P0% |
+| BNB | -4.24±0.57 0/4 | -3.00 (775) | — | P0% / P0% |
+| LTC | -8.77±4.29 0/4 | -10.77 (611) | — | P0% / P0% |
+| LINK | degenerate: 246d/2 folds, causal t5 selects 0-3 trades/seed | — | — | — |
+
+**Conditions that drive the surface (the deliverable):**
+1. The policy class carries year alpha on a **minority of symbols**; argmax = XRP at
+   DOGE-magnitude. Positive cells are thin-book alts (DOGE 1.4-2.3/s, XRP ~1.9/s).
+2. **Ensemble stabilization is NOT universal**: DOGE amplifies (+8.1→+13.4) and is
+   jitter-proof at sd.05; XRP amplifies (+11.0→+12.7) but survives only sd.02; BTC
+   ensemble DEGRADES the per-seed mean (+6.2→+3.8) and is selection-fragile. The
+   load-bearing DOGE finding (s22) does not transfer for free.
+3. Sign does not reduce to book density: LTC/BNB (~1.3-1.4/s) and SOL (~2.3/s) are
+   negative at densities similar to the positives. Symbol identity matters beyond density.
+4. BTC/ETH cells carry the **H_TICKS=1800 caveat** (~200s forward path at ~9 ticks/s →
+   chase run-out marked at touch more often) — not execution-comparable to thin-book cells.
+5. Fold structure: XRP concentrated in folds 1-3, BTC in fold3; LTC negative broadly
+   (5/6 folds); months near zero remain normal for this class (s22).
+
+**Secondary deploy-gate annotation** (confirmatory question only): XRP = conditional
+candidate — passes seed-gate (mean−sd = +7.47) and ens jitter at sd.02 (P100), fails sd.05
+(P41); next step per prereg = rev6-style recorder-EV cross-check with that flag. BTC fails
+the required perturbation gate despite seed-gate pass. ETH marginal. Others fail. No
+capital action taken.
+
+**Ops (research-throughput line):** campaign ran on 2 VMs (n2-highmem-8 → n2-highmem-32 in
+the 32-vCPU delmiron27 project), 28 seed-runs ≈ 200 core-h ≈ $15, ~19h wall first-launch →
+last-ensemble incl. three debugged incidents (OOM cgroup kill; /tmp binary wipe → partial
+datasets caught+guarded; GCE default read-only scopes). Seed-parallel orchestrator v2
+(`research/runtime/orchestrate2.py`, per-seed jsons recomputed from PERFOLD — <1e-7bp vs
+direct) did 15 seed-runs in 5.7h. Next-run projection with baked image + full parallelism:
+~3h end-to-end. All run knowledge captured in `research/runtime/KNOWN_PITFALLS.md`.
