@@ -108,3 +108,7 @@ every production invocation (env + command) in the ledger record.
   capture-everything / never-kill-in-flight discipline.
 - The model identifier from the system prompt stays out of commits, PRs,
   code comments, and any pushed artifact — chat replies only.
+- **Deploy-showcase ritual**: every deploy add/remove/resize/re-weight updates
+  `BlackDigitalStudio/trading_algorithm` in the SAME change-window —
+  `DEPLOYMENTS.md` manifest + unit files + validation-tool snapshots. Production
+  and that repo must never diverge (token: `C:\Разработки\ml_research_token.txt`).
