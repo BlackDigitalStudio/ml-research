@@ -52,6 +52,21 @@
 - Combined-npz existence in GCS is the build-resume marker: a PARTIAL combined npz
   poisons resume. Only combine after the completeness floor passes; delete bad
   combined npz (dailies are the durable unit).
+- **Recorder streams are NOT uniform over time** (three data regimes): CL year =
+  full features; recorder early days = book/trades(+OI) only; full recorder streams
+  later. Per-symbol onsets (XRPUSDT): depth/trades/OI 2026-06-01, mark_price
+  (funding) 2026-06-15, liquidation 2026-06-28 -> full-feature recorder window
+  starts 06-28 (why the DOGE deploy cell starts there). ALWAYS inventory per-stream
+  day ranges before a recorder-EV window; recorder_ev auto-skips days without
+  funding, but a "N days" request silently spans regime boundaries.
+- **Raw recorder-EV script output is NOT the measurement cell**: its causal() has an
+  empty day-1 tau buffer -> day-1 selects ~everything (thousands of trades). The
+  cell is computed by the separate causal analysis (subs60_recev_causal.py
+  methodology: day-0 warmup, q vs deploy WPD). True for the DOGE +8.61 cell too.
+- Recorder-day tail cells are tau-warmup sensitive: with a 1-day warmup buffer a
+  10-day window gave XRP +0.11bp; the same days under the full 13-day window
+  (3-day warmup, deployment-like) gave +14.78bp all-LOO-positive. Use the maximum
+  stream-complete window, never a bare "last N days".
 
 ## xgboost / determinism
 - Results depend on nthread (hist accumulation order): same seed + same nthread =
