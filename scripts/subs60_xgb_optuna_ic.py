@@ -152,8 +152,14 @@ def metrics(pf):
                perfold=[round(float(p.sum() * 0.01), 1) for p in pf])
 
 
-perfold = []
-for fi, (trn, tst) in enumerate(FOLDS):
+# FOLD_PAR>1: run folds concurrently (folds share no mutable state — fresh seeded
+# optuna study / RandomState per call, per-train xgb seed+nthread unchanged), so
+# results are bit-identical to sequential; only stdout line order may differ.
+# Parity-gated (ledger xgb-optuna-foldpar-REFACTOR_PREREG). Default 1 = sequential.
+FOLD_PAR = int(os.environ.get("FOLD_PAR", "1"))
+
+
+def run_fold(fi, trn, tst):
     dtr = day[trn]; tr_days = sorted(set(dtr.tolist())); sv = set(tr_days[-SUBVAL_D:])
     sub = trn & np.isin(day, list(tr_days[:-(SUBVAL_D + EMB)])); val = trn & np.isin(day, list(sv))
     thr = float(np.quantile(np.abs(rH[trn]), 1 - NF_RATE)); yA = (np.abs(rH) >= thr).astype(int)
@@ -178,8 +184,16 @@ for fi, (trn, tst) in enumerate(FOLDS):
     axb_tr = (np.searchsorted(sA, pA_tr, "right") / len(sA)) * (np.searchsorted(sBg, np.abs(pBg_tr - 0.5), "right") / len(sBg))
     axb_te = cdf_map(pA_te, sA) * cdf_map(np.abs(pBg_te - 0.5), sBg)
     noa_tr = np.searchsorted(sBf, np.abs(pBf_tr - 0.5), "right") / len(sBf); noa_te = cdf_map(np.abs(pBf_te - 0.5), sBf)
-    perfold.append((axb_tr, axb_te, noa_tr, noa_te, day[tri], day[tei], pBg_te >= 0.5, pBf_te >= 0.5, fl[tei], fs[tei], netl[tei], nets[tei]))
     print(f"  fold{fi}: A AUC={aucA:.3f} | B IC(val)={icB:+.4f} (d{hpB['max_depth']},nr{biB})", flush=True)
+    return (axb_tr, axb_te, noa_tr, noa_te, day[tri], day[tei], pBg_te >= 0.5, pBf_te >= 0.5, fl[tei], fs[tei], netl[tei], nets[tei])
+
+
+if FOLD_PAR > 1:
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=FOLD_PAR) as _ex:
+        perfold = list(_ex.map(lambda a: run_fold(*a), [(fi, trn, tst) for fi, (trn, tst) in enumerate(FOLDS)]))
+else:
+    perfold = [run_fold(fi, trn, tst) for fi, (trn, tst) in enumerate(FOLDS)]
 
 if os.environ.get("SAVE_PF", "") == "1":   # capture-everything: per-fold test scores for offline selectivity work
     tag = os.environ.get("PFTAG", "")
