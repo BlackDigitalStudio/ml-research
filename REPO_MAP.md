@@ -21,17 +21,18 @@ to `BlackDigitalStudio/trading_algorithm`; ledger deploy records pin the commits
 
 ## FROZEN REFERENCE (valid, rarely touched)
 - `research/*.md` (HANDOFF_*, PLAN*, CRYPTOLAKE_SCHEMA…) — tier handoffs and schemas.
-- `STRATEGY.md`, `mamba2_arch.md`, `research/TCN_CHECKPOINT.md` — closed-tier docs.
+- `research/TCN_CHECKPOINT.md` — closed-tier doc.
+- `scripts/hd1_seq_core.py` — the frozen HM1 §5 confirmatory gate (CLAUDE.md-bound).
 
-## HISTORICAL — do not extend; superseded tiers and the pre-HD strategy stack
-(kept for ledger provenance; verify imports before assuming anything here is dead)
-- `src/` — old live-sim/strategy stack (pre-axb).
-- `scripts/` everything NOT `subs60_*`: `hd1_*`, `hd2_*`, `ha*`, `h3/h7`, `grid_*`,
-  `phase_b_*`, `bakeoff*`, stacker/SSL/RL families — closed HD1/HD2 and earlier tiers.
-- `modal_bakeoff/`, `runs/`, `research_runs/` (local), `catboost_info/`, `tools/`,
-  `docs/`, `main.py`, `backtest*.py` — legacy.
+## ARCHIVED (physically moved 2026-07-11 — see `archive/README.md`)
+Everything historical now lives under `archive/`, moved as-is with git history
+(`git log --follow`): the pre-HD strategy stack (`src/`, `main.py`, `systemd/`,
+`tests/`, `requirements*`), closed tiers (hd1_*/hd2_*/ha*/grid_*/phase_b/stacker/
+SSL/RL/mamba script families incl. the mamba-linked `subs60_{ft_stability,
+gru_gridsim,maker_grid}.py`), old run outputs and superseded docs. Not maintained;
+do not extend; re-verify any number from there against the ledger before use.
 
 Rule of thumb: if you are about to WRITE code outside `research/runtime/`,
 `scripts/subs60_*`, `rust_ingest/`, or `live/` — stop and check you are not
-resurrecting a closed tier. If you are about to READ a number out of HISTORICAL
+resurrecting a closed tier. If you are about to READ a number out of archived
 docs — re-verify against the ledger and current data first (CLAUDE.md rules).
