@@ -30,3 +30,12 @@ metadata:
 6. USDC-vs-USDT venue gap measured (2 days L2): queue 20x thinner but flow 11x thinner → entry/exit fill proxies IDENTICAL (0.31/0.32, 0.26/0.26); USDC touch capacity ~$1k — fine at $10, matters at scale.
 
 **REVISED YEAR-LONG EXPECTATION (HD3 rev6 + §20a, 2026-07-05):** the live configuration (2-3min-trained B, honest 30s execution) has year EV **−2.35 bp/tr** (only the 2 most recent folds positive, + recorder-EV +10.3/7d = regime-conditional). The historical +3.4..+4.2 year baselines were NOT lookahead-inflated (refuted model-free) — they are draws from a protocol whose year-EV has ±3-5bp structural variance under label noise, mean ~+1±3 → edge never statistically identified; see [[label-matching-lookahead]]. Honest-30s cells consistently negative (−3.8…−2.4, all budgets/training horizons). Retraining on 30s targets does not fix it. Live left running per user (operational validation at $10).
+
+
+**XRP live (2026-07-11 13:45 UTC):** dedicated VM axb-xrp-1 (e2-medium, asia-northeast1-b,
+gen-lang-client project, static IP 35.200.67.85 whitelisted on the shared keys), units
+axb-engine-xrp + axb-exec-xrp, XRPUSDC maker t5, SIZE_FRAC=0.5 of shared availableBalance
+(~20 USDC total after +10 top-up). FLAGGED: DOGE still SIZE_FRAC=1.0 -> its sizing doubled
+to ~20 notional; user decision pending. Engine binary = md5-identical DOGE binary, glibc
+matched, base bits boot-asserted. Split-VM WS wedge pitfall: engine WS hangs silently on
+NAT/IP change - restart unit (KNOWN_PITFALLS).
