@@ -1436,3 +1436,10 @@ Conditions that drive the surface:
 Coverage r10: BTC/ETH ~0.99, DOGE/XRP 0.77–0.81 (свойство ячейки: разреженная книга +
 правило [H−2,H]). Artifacts: `research_runs/h2_dir10/` (daily {ts,mid,bid0,ask0,R,RV} —
 переиспользуемы для stage-2 сима; per-day stat tensors; code). VM dir10-1, ~35 мин, <$1.
+
+**s24 addendum (tail-selectivity, user question)**: top-K/день cut (K=5 ≈ деплойные
+0.017%): захват НАСЫЩАЕТСЯ в хвосте — 1%→0.02% добавляет лишь ~10–25% (BTC imb_L5@10s
++0.84→+1.02bp hit 0.72; DOGE OBI_L1 +0.93→+1.14bp; ETH/XRP COMP ~+1.0/+1.35bp), в
+отличие от обученного скора, где хвост несёт всё. Осторожно: f32 top3_asym в экстремальном
+хвосте DOGE/XRP ИНВЕРТИРУЕТСЯ (реверсия) — монотонность хвоста проверять посигнально;
+book-shape и COMP монотонны на всех 4. Ledger `dir10-20260712_cl_screen_tailamend`.
