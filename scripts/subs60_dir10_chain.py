@@ -16,6 +16,10 @@ from google.cloud import storage
 PROJ = "project-0998ac51-36ba-445c-bc7"; BUCKET = "market-data-0998ac51"
 SYMS = os.environ.get("SYMS", "BTC,ETH,DOGE,XRP").split(",")
 START = os.environ.get("START", "0000"); END = os.environ.get("END", "9999")
+HORS_ALL = [5.0, 10.0, 15.0, 20.0, 30.0, 60.0]          # layout of R/RV in h2_dir10 dailies
+HOR_S = float(os.environ.get("HOR_S", "10"))             # chain step quantum, seconds
+HIDX = HORS_ALL.index(HOR_S)
+SUF = "" if HOR_S == 10.0 else f"_h{int(HOR_S)}"
 LABSUB = "research_runs/maker_labels_tb3s_h150"
 D10 = "research_runs/h2_dir10"
 NS = 1_000_000_000
@@ -53,7 +57,7 @@ for sym in SYMS:
         if len(F) != R.shape[1]:
             continue
         # recompute per cell with step tracking pooled
-        r10 = R[1].astype(np.float64); rv = RV[1]
+        r10 = R[HIDX].astype(np.float64); rv = RV[HIDX]
         comp = np.zeros(len(F), np.float64)
         for c in COMP_COLS:
             x = F[:, c].astype(np.float64)
@@ -85,7 +89,7 @@ for sym in SYMS:
                         stepsum[ci, k - 1] += dd * r10[t]; stepcnt[ci, k - 1] += 1
                     if k == 1:
                         st1 += dd * r10[t]
-                    tgt = dtd[t] + 10 * NS
+                    tgt = dtd[t] + int(HOR_S) * NS
                     j = int(np.searchsorted(dtd, tgt, "left"))
                     if j >= n or abs(int(dtd[j]) - int(tgt)) > 2 * NS:
                         if j > 0 and abs(int(dtd[j - 1]) - int(tgt)) <= 2 * NS:
@@ -106,7 +110,7 @@ for sym in SYMS:
             row.append(np.array([nep, slen, l1, l2, l3p, tot, st1, r_flip, r_weak, r_data, r_cap, 0, 0, 0], np.float64))
         per_day.append(np.stack(row)); keep_days.append(d)
     P = np.stack(per_day)  # (D, ncells, NST)
-    print(f"\n================ {sym} — {len(keep_days)} days, chained 10s holds ================", flush=True)
+    print(f"\n================ {sym} — {len(keep_days)} days, chained {int(HOR_S)}s holds ================", flush=True)
     print("  cell (sig, q_entry, q_cont): ep/day len P(>=2) P(>=3) | bp/ep total step1 added | step-k bp k=1..4 | stop flip/weak/data/cap", flush=True)
     for ci, (sname, qe, qc0) in enumerate(CELLS):
         v = P[:, ci, :]; v = v[np.isfinite(v[:, 0])]
@@ -129,5 +133,5 @@ for sym in SYMS:
     np.savez_compressed(buf, per_day=P, days=np.array(keep_days),
                         cells=np.array([f"{s}|{qe}|{qc}" for s, qe, qc in CELLS]),
                         stepsum=stepsum, stepcnt=stepcnt)
-    bk.blob(f"{D10}/{sym}_chain.npz").upload_from_string(buf.getvalue())
-    print(f"  [saved] {D10}/{sym}_chain.npz ({time.time()-t0:.0f}s)", flush=True)
+    bk.blob(f"{D10}/{sym}_chain{SUF}.npz").upload_from_string(buf.getvalue())
+    print(f"  [saved] {D10}/{sym}_chain{SUF}.npz ({time.time()-t0:.0f}s)", flush=True)
