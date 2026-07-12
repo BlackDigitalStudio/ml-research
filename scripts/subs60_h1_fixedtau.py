@@ -42,8 +42,21 @@ def fixed_tau(p, K):
     return float(np.mean(np.concatenate(tops))) if tops else float("inf")
 
 
-def sel_fixed(p, K, jit=0.0, rng=None):
-    tau = p[f"tauf{K}"]
+def fixq_tau(p, K):
+    """FIXQ variant: tau = the val-window quantile matched to K/day selectivity,
+    frozen for the whole fold test (hardcoded number, no daily adaptation)."""
+    trd = sorted(set(p["day_tr"].tolist()))[-KDAYS:]
+    m = np.isin(p["day_tr"], trd)
+    s = p["tr"][m]; nd = len(trd)
+    if not len(s):
+        return float("inf")
+    wpd = len(s) / max(nd, 1)
+    q = max(0.0, 1.0 - K / max(wpd, 1.0))
+    return float(np.quantile(s, q))
+
+
+def sel_fixed(p, K, jit=0.0, rng=None, key="tauf"):
+    tau = p[f"{key}{K}"]
     te = p["te"] + (rng.normal(0, jit, len(p["te"])) if jit > 0 else 0.0)
     return np.where(te >= tau)[0]
 
@@ -104,25 +117,32 @@ for SYM in SYMS:
         for p in fl_:
             for K in BUDGETS:
                 p[f"tauf{K}"] = fixed_tau(p, K)
+                p[f"tauq{K}"] = fixq_tau(p, K)
     res = {"sym": SYM, "nf": nf, "tot_days": tot_days}
     for K in BUDGETS:
         print(f"-- budget K={K} (rule: tau = mean of val-window per-day top-{K}) --", flush=True)
-        pseed_f, pseed_d = [], []
+        pseed_f, pseed_q, pseed_d = [], [], []
         for s in range(4):
             rf = evaluate(seedfolds[s], lambda p: sel_fixed(p, K), tot_days)
+            rq = evaluate(seedfolds[s], lambda p: sel_fixed(p, K, key="tauq"), tot_days)
             rd = evaluate(seedfolds[s], lambda p: sel_dyn(p, K), tot_days)
-            pseed_f.append(rf); pseed_d.append(rd)
+            pseed_f.append(rf); pseed_q.append(rq); pseed_d.append(rd)
             print(f"  seed{s}: FIXED ev={rf['ev']:+6.2f} tpd={rf['tpd']:4.1f} bpd={rf['bpd']:+6.1f} hit={100*rf['hit']:4.1f}% z0d={rf['zshare']:.2f} "
+                  f"| FIXQ ev={rq['ev']:+6.2f} tpd={rq['tpd']:4.1f} bpd={rq['bpd']:+6.1f} "
                   f"| DYN ev={rd['ev']:+6.2f} tpd={rd['tpd']:4.1f} bpd={rd['bpd']:+6.1f}", flush=True)
         ef = evaluate(ensfolds, lambda p: sel_fixed(p, K), tot_days)
+        eq = evaluate(ensfolds, lambda p: sel_fixed(p, K, key="tauq"), tot_days)
         ed = evaluate(ensfolds, lambda p: sel_dyn(p, K), tot_days)
         print(f"  ENS  : FIXED ev={ef['ev']:+6.2f} tpd={ef['tpd']:4.1f} bpd={ef['bpd']:+6.1f} hit={100*ef['hit']:4.1f}% z0d={ef['zshare']:.2f} n={ef['n']}", flush=True)
         print(f"         perfold {ef['perfold']}", flush=True)
+        print(f"  ENS  : FIXQ  ev={eq['ev']:+6.2f} tpd={eq['tpd']:4.1f} bpd={eq['bpd']:+6.1f} hit={100*eq['hit']:4.1f}% z0d={eq['zshare']:.2f} n={eq['n']}", flush=True)
+        print(f"         perfold {eq['perfold']}", flush=True)
         print(f"  ENS  : DYN   ev={ed['ev']:+6.2f} tpd={ed['tpd']:4.1f} bpd={ed['bpd']:+6.1f} hit={100*ed['hit']:4.1f}% n={ed['n']}", flush=True)
         print(f"         perfold {ed['perfold']}", flush=True)
         jf = {}
         for sd_j in (0.02, 0.05):
             for tag, fn in (("FIXED", lambda p, j, r: sel_fixed(p, K, j, r)),
+                            ("FIXQ", lambda p, j, r: sel_fixed(p, K, j, r, key="tauq")),
                             ("DYN", lambda p, j, r: sel_dyn(p, K, j, r))):
                 rng = np.random.default_rng(0); r = []
                 for rep in range(100):
@@ -132,7 +152,9 @@ for SYM in SYMS:
                 p50 = np.nanquantile(r, .5); pos = 100 * np.nanmean(r > 0)
                 jf[f"{tag}_sd{sd_j}"] = dict(p10=float(np.nanquantile(r, .1)), p50=float(p50), p90=float(np.nanquantile(r, .9)), Ppos=float(pos))
                 print(f"  ENS jitter {tag} sd={sd_j}: p50={p50:+.2f} P(EV>0)={pos:.0f}%", flush=True)
-        res[f"K{K}"] = dict(perseed_fixed=pseed_f, perseed_dyn=pseed_d, ens_fixed=ef, ens_dyn=ed, jitter=jf,
-                            tauf=[[p[f"tauf{K}"] for p in fl_] for fl_ in [ensfolds]])
-    bk.blob(f"{OUT}/{SYM}_h1.json").upload_from_string(json.dumps(res, default=str))
-    print(f"[saved] {OUT}/{SYM}_h1.json", flush=True)
+        res[f"K{K}"] = dict(perseed_fixed=pseed_f, perseed_fixq=pseed_q, perseed_dyn=pseed_d,
+                            ens_fixed=ef, ens_fixq=eq, ens_dyn=ed, jitter=jf,
+                            tauf=[[p[f"tauf{K}"] for p in fl_] for fl_ in [ensfolds]],
+                            tauq=[[p[f"tauq{K}"] for p in fl_] for fl_ in [ensfolds]])
+    bk.blob(f"{OUT}/{SYM}_h1v2.json").upload_from_string(json.dumps(res, default=str))
+    print(f"[saved] {OUT}/{SYM}_h1v2.json", flush=True)
