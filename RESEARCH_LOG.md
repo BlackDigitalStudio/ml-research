@@ -1393,3 +1393,46 @@ datasets caught+guarded; GCE default read-only scopes). Seed-parallel orchestrat
 (`research/runtime/orchestrate2.py`, per-seed jsons recomputed from PERFOLD — <1e-7bp vs
 direct) did 15 seed-runs in 5.7h. Next-run projection with baked image + full parallelism:
 ~3h end-to-end. All run knowledge captured in `research/runtime/KNOWN_PITFALLS.md`.
+
+## 24. 2026-07-12 — HD4 rev1: 10s-направление предсказуемо model-free на всех 4 символах; BTC — сильнейший (dir10 screen)
+
+**Program**: BTC/ETH expansion, user hypothesis 2 (продление h150-холда 10s-квантами по
+сигналу направления в t=fill+150s). Rev1 = stage-1 exploratory screen: predictability of
+the NEXT-10s mid direction from the deployed algorithm's own feature signals, **no ML, no
+fitting** (prereg `dir10-20260712_cl_screen`; script `scripts/subs60_dir10_screen.py`).
+Cell: CL year (2025-05-09..2026-06-02), tb3s 3s decision grid (maker_labels_tb3s_h150
+dailies, F71), forward mid log-ret at H∈{5,10,15,20,30,60}s (realized horizon ∈[H−2,H],
+no future-side slack), daily rank-IC / dir-hit / signed capture at |signal| cuts
+q∈{0,.5,.9,.99}; COMP = preregistered fixed-sign rank composite
+[0,1,12,26,27,28,62,63,64,65,66].
+
+**The surface (headline, H=10s, mean daily rank-IC over the year):**
+
+| sym | COMP ric@10s | argmax feature ric@10s | hit@q90 | capture @q90 / @q99 (bp/10s) | months ric>0 |
+|---|---|---|---|---|---|
+| **BTC** | **+0.239** | OBI_L1/microprice **+0.266** | **0.666** | +0.73 / +0.85 | 14/14 (+0.13..+0.33) |
+| ETH | +0.146 | OBI_L1/imb_L5 +0.169 | 0.62 | +0.76 / +0.87 | 13/13 |
+| XRP | +0.143 | microprice +0.189 | 0.576 | +0.80 / +0.93 | 13/13 |
+| DOGE | +0.119 | microprice/OBI_L1 +0.171 | 0.561 | +0.86 / +0.95 | 13/13 |
+
+Conditions that drive the surface:
+1. **Argmax = мгновенная форма книги** (OBI_L1/microprice ≈ rank-дубликаты, imb_L5,
+   OBI_L10/L20). OFI-семейство (1–5s суммы) — самое стабильное по дням (BTC imb_d5
+   t=+141), но capture ниже (~+0.3–0.4bp). Кросс-АКТИВНЫЙ суб-минутный лид жив, но
+   второго порядка (eth_r5→BTC ric +0.106, t+72; btc_r* нигде не в топ-12).
+2. **Порядок символов ИНВЕРТИРОВАН относительно h150 maker-EV**: BTC (слабейший в year
+   maker-EV) — сильнейший по 10s-направлению; плотная книга делает book-shape
+   информативнее. Сигнал для продления холда есть именно там, где базовая политика
+   слабее всего.
+3. **Decay**: rank-IC ~половинится 5s→15s (BTC COMP +0.30→+0.20); кумулятивный capture
+   слабо растёт с H при падающем hit — 10s-квант около колена кривой.
+4. **Монотонность по силе сигнала** на всех символах/горизонтах (COMP@10s q0→q99:
+   +0.28→+0.77..0.84bp) — «уверенность» для гейта продления существует.
+
+**Что это НЕ измеряет (stage 2, отдельный prereg):** capture = валовый mid-ход за
+горизонт, не EV продления (нет стоимости перестановки pegged-exit / adverse selection);
+ячейки безусловные — не conditioned на «150s внутри заполненной h150-позиции»;
+кросс-БИРЖЕВЫЕ колонки в CL структурно мертвы → rev на данных рекордера следом.
+Coverage r10: BTC/ETH ~0.99, DOGE/XRP 0.77–0.81 (свойство ячейки: разреженная книга +
+правило [H−2,H]). Artifacts: `research_runs/h2_dir10/` (daily {ts,mid,bid0,ask0,R,RV} —
+переиспользуемы для stage-2 сима; per-day stat tensors; code). VM dir10-1, ~35 мин, <$1.
