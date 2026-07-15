@@ -21,6 +21,14 @@
 - Debian 12 pip needs `--break-system-packages` (PEP 668).
 - **Training RAM is 13-14GB/job** (371d dataset, float64 F + Fn + DMatrix). n2-standard-8
   (31GB) fits TWO jobs, not three-plus-builds. highmem for parallel campaigns.
+- **Sizing jobs to ~96% of RAM kills the GUEST NETWORK, not just a job** (2026-07-15,
+  xsym-32: 16 x 14GB = 226GB RSS on 235GB, zero swap). Under that pressure the kernel
+  reclaimed/killed host daemons -> routes gone, metadata server + GCS unreachable
+  ("Network is unreachable"), SSH dead while trainings kept computing into a void (all
+  uploads = TransportError, 8h lost, VM only recoverable by reset). Budget: jobs x 14GB
+  <= ~70-75% of RAM, ALWAYS add a swapfile (16G) as a daemon lifeline, and make any
+  remote-poll watcher wrap ssh in `timeout` + alarm on N consecutive failures (a hung
+  ssh inside command substitution stalls the watcher silently).
 
 ## Process management
 - `pgrep -f 'pattern'` matches YOUR OWN ssh/bash wrapper carrying the pattern string —
