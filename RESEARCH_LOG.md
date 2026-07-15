@@ -1543,3 +1543,12 @@ RECEV_DIR → `_recev_h150anch2_DOGE` (17 дней, 485 078 скоров), SIZE_
 retry-обёртка chronos-gcs-sync + staleness-guard в chronos-retention (не удалять при
 несвежем синке) — задеплоено и запушено в crypto-market-recorder@main. Реальный джиттер
 XRP: sd 0.0171, corr 0.9913, near-τ p50 0.0052, 3/3 сделок и 7/7 take5 воспроизведены.
+
+**s27 addendum (2026-07-15 04:38 UTC)**: XRP FIXQ t5 задеплоен по явному решению юзера
+(override 4-дневного гейта: вес годового walk-forward выше тонкого окна; условия
+(1)(3)(4) были PASS, отменено только bpd-условие с разницей в одну сделку). FREEZE_TAU=1,
+τ-seed `_recev_h150anch2_XRP` (17д, 485 727 скоров), frozen taus [.925442/.906163/
+.876075/.838157] бит-в-бит с offline; flat-checked restart. Оба live-инстанса теперь на
+FIXQ (DOGE t10 gate-PASS, XRP t5 override). План: ≥10 live-дней FIXQ, затем сравнение с
+DYN-контрфактуалом (бит-экзактен по captured features). Ledger
+`fixq_recev-20260714_XRP_deploygate_OVERRIDE_DEPLOY`.
