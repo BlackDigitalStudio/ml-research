@@ -32,7 +32,10 @@ ranks above any single static strategy (user directive 2026-07-11, clarified
      (live-adjustable). Skip/done marker = `OPTUNA_IC_{SYM}_qm0_SEED{s}.json` in GCS.
    - `orchestrate.py` (v1) — build->combine->anch->train chains per symbol; still the
      entry point when datasets must be BUILT first. Seeds sequential (superseded by
-     v2 for training; use v1 for builds, v2 for training).
+     v2 for training; use v1 for builds, v2 for training). `XSYM_BUILD_SHARDS=K`
+     runs K sharded instances of the frozen builder per symbol (PARITY/NSHARD; day
+     sets disjoint) — near-linear build speedup, ~6GB disk churn per shard workdir.
+     Subdir/param envs: XSYM_SUB_H, XSYM_SUB_A, XSYM_H_TICKS, XSYM_TRAIN=0, XSYM_XD.
    - `perseed_from_pf.py` — recomputes the per-seed json from PERFOLD artifacts
      (deterministic, <1e-7bp vs direct; makes seeds parallelizable).
    - `ens_sym.py` — the DEPLOYED-scoring ensemble cell (mean 4-seed rank score,
@@ -67,7 +70,9 @@ python3 subs60_xgb_optuna_ic.py {SYM} maker_labels_tb3s_h150anch 0 {NTHREAD}
 
 ## Sizing (measured 2026-07-10, 371d/9-10M-row dataset)
 - Training job: **13-14 GB RSS**, ~2.2h at nthread=4, ~2.7h at 3, ~3.5h at 2.
-  xgboost-hist scales weakly past ~4 threads. Budget RAM = 14GB x concurrent jobs + 10%.
+  xgboost-hist scales weakly past ~4 threads. Budget RAM = 14GB x concurrent jobs
+  **<= 75% of physical RAM** (orchestrate2 clamps this itself via XSYM_JOB_GB; the
+  2026-07-15 96%-RAM packing killed the guest network — see KNOWN_PITFALLS) + swap on.
 - Day build: ~5-10s CPU + download; ~1-1.5h per 365d symbol on idle 8 vCPU.
 - Combine: ~5GB RAM, minutes. Anch prep: ~4GB, minutes.
 - Full 7-symbol x 4-seed campaign ~ 200 core-hours.

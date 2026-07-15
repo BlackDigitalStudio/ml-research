@@ -17,6 +17,10 @@ GB = "gs://market-data-0998ac51/research_runs"
 SUB_H = os.environ.get("XSYM_SUB_H", "maker_labels_tb3s_h150")
 SUB_A = os.environ.get("XSYM_SUB_A", "maker_labels_tb3s_h150anch")
 TRAIN = os.environ.get("XSYM_TRAIN", "1") == "1"   # 0 = build/combine/anch only
+# day-parallel build: K sharded instances of the FROZEN builder (its own PARITY/NSHARD
+# envs; day set is disjoint by construction, dailies in GCS are the shared state).
+# Each shard needs its own WORKDIR (~6GB churn at H=5100) — size the disk accordingly.
+BUILD_SHARDS = max(1, int(os.environ.get("XSYM_BUILD_SHARDS", "1")))
 BUILD_SYMS = [s for s in os.environ.get("XSYM_BUILD", "BNB,LTC,SOL,XRP,LINK").split(",") if s]
 READY_SYMS = [s for s in os.environ.get("XSYM_READY", "BTC,ETH").split(",") if s]
 BUILD_ENV = {"FULLFEAT": "1", "H_TICKS": os.environ.get("XSYM_H_TICKS", "1800"),
@@ -131,11 +135,24 @@ def build_symbol(sym):
     env = dict(BUILD_ENV, SYMF=f"{sym}-USDT-PERP", WORKDIR=f"{XD}/wk_{sym}")
     need = MIN_DAYS.get(sym, MIN_DAYS_DEFAULT)
     if not gcs_exists(f"{GB}/{SUB_H}/{sym}.npz"):
-        log(f"{sym}: BUILD dailies start")
-        rc = run(["/usr/bin/python3", f"{XD}/subs60_build_tb3s_labels.py"], env,
-                 f"{XD}/build_{sym}.log")
-        if rc != 0:
-            log(f"{sym}: BUILD FAILED rc={rc} — aborted"); return
+        log(f"{sym}: BUILD dailies start ({BUILD_SHARDS} shard(s))")
+        if BUILD_SHARDS == 1:
+            rcs = [run(["/usr/bin/python3", f"{XD}/subs60_build_tb3s_labels.py"], env,
+                       f"{XD}/build_{sym}.log")]
+        else:
+            shard_ths, rcs = [], [None] * BUILD_SHARDS
+            def _shard(i):
+                senv = dict(env, PARITY=str(i), NSHARD=str(BUILD_SHARDS),
+                            WORKDIR=f"{XD}/wk_{sym}_s{i}")
+                rcs[i] = run(["/usr/bin/python3", f"{XD}/subs60_build_tb3s_labels.py"],
+                             senv, f"{XD}/build_{sym}_s{i}.log")
+            for i in range(BUILD_SHARDS):
+                t = threading.Thread(target=_shard, args=(i,)); t.start(); shard_ths.append(t)
+                time.sleep(3)
+            for t in shard_ths:
+                t.join()
+        if any(rc != 0 for rc in rcs):
+            log(f"{sym}: BUILD FAILED rcs={rcs} — aborted"); return
         nd = daily_count(sym)
         if nd < need:
             log(f"{sym}: BUILD INCOMPLETE ({nd} dailies < {need}) — aborted, NOT combining")

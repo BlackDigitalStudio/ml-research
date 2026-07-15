@@ -21,6 +21,15 @@ NTHREAD = os.environ.get("XSYM_NTHREAD", "2")
 run_lock = threading.Lock()
 n_running = 0
 
+# RAM budget clamp (2026-07-15 pitfall: 96%-RAM job packing killed the guest network).
+# Whatever SLOTS asks for, never exceed 75% of physical RAM at XSYM_JOB_GB per job.
+JOB_GB = float(os.environ.get("XSYM_JOB_GB", "14"))
+try:
+    _TOT_GB = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
+    RAM_SLOTS = max(1, int(_TOT_GB * 0.75 / JOB_GB))
+except (ValueError, OSError):
+    _TOT_GB, RAM_SLOTS = 0.0, 15
+
 
 def log(s):
     print(f"[{time.strftime('%m-%d %H:%M:%S')}] {s}", flush=True)
@@ -28,9 +37,9 @@ def log(s):
 
 def slots():
     try:
-        return max(1, int(open(f"{XD}/SLOTS").read().strip()))
+        return max(1, min(int(open(f"{XD}/SLOTS").read().strip()), RAM_SLOTS))
     except Exception:
-        return 15
+        return min(15, RAM_SLOTS)
 
 
 def run(cmd, env, logf):
@@ -75,7 +84,10 @@ def job(sym, s):
 
 
 def main():
-    log(f"xsym v2 (seed-parallel) start | jobs={JOBS} nthread={NTHREAD} slots={slots()}")
+    log(f"xsym v2 (seed-parallel) start | jobs={JOBS} nthread={NTHREAD} slots={slots()} "
+        f"(RAM {_TOT_GB:.0f}GB -> clamp {RAM_SLOTS} at {JOB_GB}GB/job)")
+    if "swapfile" not in open("/proc/swaps").read():
+        log("WARNING: no swap active — system daemons have no OOM lifeline (KNOWN_PITFALLS)")
     ths = []
     for sym, s in JOBS:
         t = threading.Thread(target=job, args=(sym, s), name=f"{sym}s{s}"); t.start(); ths.append(t)

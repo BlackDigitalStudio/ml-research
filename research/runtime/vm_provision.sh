@@ -20,8 +20,10 @@ gcloud compute ssh "$NAME" --project="$PROJ" --zone="$ZONE" --command='
   sudo apt-get -qq update && sudo apt-get -qq install -y python3-pip git &&
   pip3 install -q --break-system-packages numpy==2.4.6 xgboost==3.2.0 optuna==4.8.0 \
       google-cloud-storage==3.10.1 scipy==1.17.1 pyarrow &&
-  if ! swapon --show 2>/dev/null | grep -q swapfile; then
-    sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+  if ! sudo /usr/sbin/swapon --show 2>/dev/null | grep -q swapfile; then
+    sudo fallocate -l 16G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile &&
+    sudo /usr/sbin/swapon /swapfile &&
+    echo "/swapfile none swap sw 0 0" | sudo tee -a /etc/fstab >/dev/null
   fi &&
   python3 -c "import xgboost,optuna,numpy; print(\"deps:\", xgboost.__version__, optuna.__version__, numpy.__version__)" &&
   echo test | gsutil cp - gs://market-data-0998ac51/research_runs/_provision_write_test.txt &&
