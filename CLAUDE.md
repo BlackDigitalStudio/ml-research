@@ -81,8 +81,12 @@ file or prior-session summary:
 
 ## Run infrastructure is a first-class asset (binding)
 
-Research throughput (speed × accuracy of runs) ranks ABOVE any single strategy
-(user directive 2026-07-11). Before writing ANY run/backtest orchestration code,
+The speed of ALPHA DISCOVERY and strategy/algorithm development — the full loop
+hypothesis -> measurement -> decision -> deploy -> adaptation — ranks above any
+single static, non-adaptive, non-scalable strategy (user directive 2026-07-11,
+clarified 2026-07-15). Run speed/accuracy is an INSTRUMENT of that loop, not the
+objective: a fast run that answers a question which changes no decision adds zero
+alpha per unit time. Before writing ANY run/backtest orchestration code,
 read `research/runtime/README.md` and `research/runtime/KNOWN_PITFALLS.md` — the
 runners, VM recipes, binary builds, sizing numbers and debugged failure modes
 already exist there. Improve them in place (with the parity ritual for anything

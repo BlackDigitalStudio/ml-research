@@ -4,9 +4,10 @@ Purpose: **stop re-deriving the backtest/run infrastructure.** Everything needed
 execute a year-scale walk-forward measurement of the h150 family (and future tiers)
 lives here, battle-tested. If you are an agent about to "quickly write a runner
 script" — the runner already exists in this directory. Improve it in place, with a
-parity check, instead of writing a new one. Velocity and accuracy of RUNS is a
-first-class asset of this project, ranked above any single strategy
-(user directive 2026-07-11; see CLAUDE.md pointer).
+parity check, instead of writing a new one. Run velocity/accuracy is an instrument
+of the real objective — speed of alpha discovery and strategy development, which
+ranks above any single static strategy (user directive 2026-07-11, clarified
+2026-07-15; see CLAUDE.md).
 
 ## The two layers — never confuse them
 
