@@ -372,6 +372,11 @@ async def uploader() -> None:
             ddir = f"{WORK}/decisions"
             for fn in sorted(os.listdir(ddir)):
                 mkt.blob(f"{SHADOW_GCS}/decisions/{fn}").upload_from_filename(f"{ddir}/{fn}")
+            # engine feature-capture files (bit-exact replay inputs)
+            fdir = f"{WORK}/features"
+            if os.path.isdir(fdir):
+                for fn in sorted(os.listdir(fdir)):
+                    mkt.blob(f"{SHADOW_GCS}/features/{fn}").upload_from_filename(f"{fdir}/{fn}")
             log.info("decisions uploaded")
         except Exception as ex:
             log.warning("decision upload failed: %s", ex)

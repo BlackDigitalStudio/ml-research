@@ -167,6 +167,7 @@ impl MirrorBook {
 struct Tau {
     buf: Vec<f64>,
     pending: Vec<f64>,
+    frozen: bool,
     day: String,
     taus: [f64; 4],
     cap: usize,
@@ -191,9 +192,17 @@ fn np_quantile_linear(sorted: &[f64], q: f64) -> f64 {
 impl Tau {
     fn new(work: &PathBuf, boot: &PathBuf, day: &str) -> Result<Self> {
         let cap = (KDAYS as f64 * WPD) as usize;
+        // FREEZE_TAU=1 -> FIXQ policy (HD5-DEPLOY): taus fixed at the boot-seed
+        // quantiles for the whole run; recalibration = refresh RECEV_DIR + restart.
+        // Frozen mode always derives from tau_seed.npy (never state_buf.npy) so a
+        // restart is idempotent and rolling state cannot leak into the threshold.
+        let frozen = std::env::var("FREEZE_TAU").map(|v| v == "1").unwrap_or(false);
         let (buf, pending, saved_day): (Vec<f64>, Vec<f64>, String) = {
             let b = work.join("state_buf.npy");
-            if b.exists() {
+            if frozen {
+                let sv: Array1<f64> = read_npy(boot.join("tau_seed.npy")).context("tau_seed")?;
+                (sv.to_vec(), Vec::new(), String::new())
+            } else if b.exists() {
                 let bv: Array1<f64> = read_npy(&b).context("state_buf")?;
                 let pv: Array1<f64> = read_npy(work.join("state_pending.npy")).unwrap_or_else(|_| Array1::zeros(0));
                 let d = std::fs::read_to_string(work.join("state_day.txt")).unwrap_or_default();
@@ -204,12 +213,12 @@ impl Tau {
             }
         };
         let pending = if saved_day == day { pending } else { Vec::new() };
-        let mut t = Self { buf, pending, day: day.to_string(), taus: [0.0; 4], cap, work: work.clone() };
+        let mut t = Self { buf, pending, day: day.to_string(), taus: [0.0; 4], cap, work: work.clone(), frozen };
         if t.buf.len() > t.cap {
             t.buf = t.buf.split_off(t.buf.len() - t.cap);
         }
         t.recompute();
-        eprintln!("tau seeded: buf={} pending={} taus={:?}", t.buf.len(), t.pending.len(), t.taus);
+        eprintln!("tau seeded: buf={} pending={} taus={:?} frozen={}", t.buf.len(), t.pending.len(), t.taus, t.frozen);
         Ok(t)
     }
     fn recompute(&mut self) {
@@ -226,8 +235,10 @@ impl Tau {
                 self.buf = self.buf.split_off(self.buf.len() - self.cap);
             }
             self.day = day.to_string();
-            self.recompute();
-            eprintln!("UTC day roll -> {} buf={} taus={:?}", day, self.buf.len(), self.taus);
+            if !self.frozen {
+                self.recompute();
+            }
+            eprintln!("UTC day roll -> {} buf={} taus={:?} frozen={}", day, self.buf.len(), self.taus, self.frozen);
         }
         self.pending.push(score);
         self.taus
@@ -461,6 +472,7 @@ fn main() -> Result<()> {
     let eth_sym = "ethusdt".to_string();
     let trade_budget: f64 = std::env::var("TRADE_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
     std::fs::create_dir_all(work.join("decisions"))?;
+    std::fs::create_dir_all(work.join("features"))?;
 
     let seeds = load_seeds(&boot)?;
     eprintln!("engine: {} seeds loaded, MODE={mode}", seeds.len());
@@ -765,6 +777,18 @@ fn main() -> Result<()> {
                 let day_file = work.join("decisions").join(format!("{grid_day}.jsonl"));
                 if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&day_file) {
                     let _ = writeln!(f, "{}", rec);
+                }
+                // feature capture: the engine's own decision inputs, so offline replay
+                // is bit-exact by construction (independent of the recorder stream).
+                // Record = grid_ts_us i64 LE + 71 x f32 LE (292 B, ~8.4 MB/day).
+                let feat_file = work.join("features").join(format!("{grid_day}.bin"));
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&feat_file) {
+                    let mut fbuf = Vec::with_capacity(8 + 71 * 4);
+                    fbuf.extend_from_slice(&(g_eff / 1000).to_le_bytes());
+                    for c in 0..71 {
+                        fbuf.extend_from_slice(&x71[c].to_le_bytes());
+                    }
+                    let _ = f.write_all(&fbuf);
                 }
                 if takes.iter().any(|&t| t) || n_dec % 100 == 0 {
                     eprintln!("#{n_dec} score={sc:.4} side={} takes={:?} lat={lat_ms:.2}ms",
