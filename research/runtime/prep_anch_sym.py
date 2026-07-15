@@ -2,16 +2,18 @@
 """HD3 rev8: anchored-semantics dataset for SYM — prep_anch_year.py generalized to a SYM arg,
 transform IDENTICAL (dataset-only intervention): F col13 := the day's FIRST row value
 (day-frozen funding), col44 := 0 (basis zeroed). Labels/folds/days/rH/fills byte-identical.
-maker_labels_tb3s_h150/{SYM}.npz -> maker_labels_tb3s_h150anch/{SYM}.npz."""
+maker_labels_tb3s_h150/{SYM}.npz -> maker_labels_tb3s_h150anch/{SYM}.npz
+(subdirs overridable via ANCH_SRC_SUB / ANCH_DST_SUB)."""
 import io
+import os
 import sys
 import numpy as np
 from google.cloud import storage
 
 SYM = sys.argv[1]
 PROJ = "project-0998ac51-36ba-445c-bc7"; BUCKET = "market-data-0998ac51"
-SRC = f"research_runs/maker_labels_tb3s_h150/{SYM}.npz"
-DST = f"research_runs/maker_labels_tb3s_h150anch/{SYM}.npz"
+SRC = f"research_runs/{os.environ.get('ANCH_SRC_SUB', 'maker_labels_tb3s_h150')}/{SYM}.npz"
+DST = f"research_runs/{os.environ.get('ANCH_DST_SUB', 'maker_labels_tb3s_h150anch')}/{SYM}.npz"
 bk = storage.Client(project=PROJ).bucket(BUCKET)
 
 d = dict(np.load(io.BytesIO(bk.blob(SRC).download_as_bytes()), allow_pickle=True))

@@ -12,9 +12,9 @@ import subprocess
 import threading
 import time
 
-HOME = "/home/delmi"; XD = f"{HOME}/xsym"
+HOME = "/home/delmi"; XD = os.environ.get("XSYM_XD", f"{HOME}/xsym")
 GB = "gs://market-data-0998ac51/research_runs"
-SUB_A = "maker_labels_tb3s_h150anch"
+SUB_A = os.environ.get("XSYM_SUB", "maker_labels_tb3s_h150anch")  # children read XSYM_SUB too
 JOBS = [(p.split(":")[0], int(p.split(":")[1]))
         for p in os.environ.get("XSYM_JOBS", "").split(",") if p]
 NTHREAD = os.environ.get("XSYM_NTHREAD", "2")

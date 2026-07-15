@@ -12,19 +12,22 @@ import subprocess
 import threading
 import time
 
-HOME = "/home/delmi"; XD = f"{HOME}/xsym"
+HOME = "/home/delmi"; XD = os.environ.get("XSYM_XD", f"{HOME}/xsym")
 GB = "gs://market-data-0998ac51/research_runs"
-SUB_H = "maker_labels_tb3s_h150"; SUB_A = "maker_labels_tb3s_h150anch"
+SUB_H = os.environ.get("XSYM_SUB_H", "maker_labels_tb3s_h150")
+SUB_A = os.environ.get("XSYM_SUB_A", "maker_labels_tb3s_h150anch")
+TRAIN = os.environ.get("XSYM_TRAIN", "1") == "1"   # 0 = build/combine/anch only
 BUILD_SYMS = [s for s in os.environ.get("XSYM_BUILD", "BNB,LTC,SOL,XRP,LINK").split(",") if s]
 READY_SYMS = [s for s in os.environ.get("XSYM_READY", "BTC,ETH").split(",") if s]
-BUILD_ENV = {"FULLFEAT": "1", "H_TICKS": "1800", "ENTRY_MS": "60000",
+BUILD_ENV = {"FULLFEAT": "1", "H_TICKS": os.environ.get("XSYM_H_TICKS", "1800"),
+             "ENTRY_MS": "60000",
              "HOLDS_S": "90,150,240", "CHASE_MS": "300000", "STEP_S": "3",
              "START": "2025-05-09", "END": "2026-06-02",
              "OUTSUB": f"research_runs/{SUB_H}", "RAYON_NUM_THREADS": "2",
              # persistent binary paths — /tmp is wiped on every VM stop/start
-             "FB_BIN": f"{XD}/bins/fb_target/release/feature_builder",
-             "BS_BIN": f"{XD}/bins/husdc_target/release/build_samples",
-             "GRID_BIN": f"{XD}/bins/husdc_target/release/grid_sim_exitdbg"}
+             "FB_BIN": os.environ.get("FB_BIN", f"{XD}/bins/fb_target/release/feature_builder"),
+             "BS_BIN": os.environ.get("BS_BIN", f"{XD}/bins/husdc_target/release/build_samples"),
+             "GRID_BIN": os.environ.get("GRID_BIN", f"{XD}/bins/husdc_target/release/grid_sim_exitdbg")}
 NTHREAD = os.environ.get("XSYM_NTHREAD", "3")
 # completeness floor before combine/train: LINK has a genuine 119d raw outage
 MIN_DAYS = {"LINK": 230}
@@ -146,12 +149,12 @@ def build_symbol(sym):
             log(f"{sym}: COMBINE FAILED rc={rc} — aborted"); return
     else:
         log(f"{sym}: combined h150 npz exists, skip build")
-    if prep_anch(sym):
+    if prep_anch(sym) and TRAIN:
         train_chain(sym)
 
 
 def ready_symbol(sym):
-    if prep_anch(sym):
+    if prep_anch(sym) and TRAIN:
         train_chain(sym)
 
 

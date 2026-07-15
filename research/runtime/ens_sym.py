@@ -3,16 +3,18 @@
 discovery), methodology IDENTICAL to the DOGE rev7 cell: deployed scoring = mean of the 4
 per-seed rank-scores, side = majority vote of per-seed sides (ties counted), causal t5,
 base EV + per-fold + LOFO + score-jitter perturbation (sd 0.02/0.05 x 100 reps).
-Also prints the per-seed AxB_t5 summary from the OPTUNA_IC SEED jsons."""
+Also prints the per-seed AxB_t5 summary from the OPTUNA_IC SEED jsons.
+Artifact subdir overridable via XSYM_SUB."""
 import io
 import json
+import os
 import sys
 import numpy as np
 from google.cloud import storage
 
 SYM = sys.argv[1]
 bk = storage.Client(project='project-0998ac51-36ba-445c-bc7').bucket('market-data-0998ac51')
-SUB = 'research_runs/maker_labels_tb3s_h150anch'
+SUB = 'research_runs/' + os.environ.get('XSYM_SUB', 'maker_labels_tb3s_h150anch')
 KDAYS = 30
 
 evs = []

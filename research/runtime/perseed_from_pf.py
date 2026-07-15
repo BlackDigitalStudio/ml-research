@@ -5,15 +5,16 @@ the seeds-sequential constraint. Math is IDENTICAL to subs60_xgb_optuna_ic.py's
 causal_rolling + metrics (KDAYS=30, t5); inputs (axb_tr/axb_te/day/side/fills/nets)
 are exactly what the frozen script saved per fold. Validated bit-equal against the
 sequential-era BTC/ETH/LTC SEED jsons before use.
-Usage: perseed_from_pf.py SYM SEED"""
+Usage: perseed_from_pf.py SYM SEED  (artifact subdir overridable via XSYM_SUB)"""
 import io
 import json
+import os
 import sys
 import numpy as np
 from google.cloud import storage
 
 SYM, SEED = sys.argv[1], int(sys.argv[2])
-SUB = "research_runs/maker_labels_tb3s_h150anch"
+SUB = "research_runs/" + os.environ.get("XSYM_SUB", "maker_labels_tb3s_h150anch")
 KDAYS = 30
 TGT = 5.0
 bk = storage.Client(project="project-0998ac51-36ba-445c-bc7").bucket("market-data-0998ac51")
