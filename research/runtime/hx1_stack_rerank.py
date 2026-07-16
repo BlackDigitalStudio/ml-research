@@ -231,6 +231,10 @@ def main():
     if stage in ("map", "all"):
         for sym in SYMS:
             for day in day_list():
+                if subprocess.run(f"gcloud storage ls {OUT}/map/{sym}/{day}.npy",
+                                  shell=True, capture_output=True).returncode == 0:
+                    print(f"map {sym} {day}: SKIP (exists)", flush=True)
+                    continue
                 try:
                     n = build_map(sym, day, workdir)
                     print(f"map {sym} {day}: {n} decisions OK", flush=True)
