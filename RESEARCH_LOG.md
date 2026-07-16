@@ -1603,3 +1603,17 @@ captured-features реплей движка v2 и FIXQ убирают сам и�
 движке (BTC нужен TRUE, бут сейчас сидит day-anchor). ETH×anch не кандидат (P65 на
 реалистичном уровне). Ledger `perturbation-gate-redefinition-20260716` +
 `..._GATE_REANNOT`.
+
+## 29. 2026-07-16 — BTC LIVE: третий инстанс (true-funding, DYN t5, honest-бандл)
+
+Цепочка rev13 за один день: инвентаризация BTC-стримов (полные фичи с 06-28) → honest-бандл
+(4 сида, deploy_h150d/BTC, labels h150d) → движок v3 = v2 + **FUNDING_MODE=true** (golden
+parity BYTE-EXACT 28531×64 в обоих режимах) + self-lead (signal==btc_lead, один стрим) →
+recorder-EV 15 eval-дней: **+11.09bp/tr, 58 сделок, hit 65.5%, LOO 0/15 минусов**, jitter
+P88/86 на sd .017/.02 → гейт формально FAIL по (c) на 2–4пп (малое n; p50 +3.85 ≈ годовые
++3.68 при P100) → **оверрайд юзера, live 09:31:19 UTC** (axb-btc-1, статик 34.104.234.216,
+SIZE_FRAC=0.5, ключи DOGE, вайтлист). Треугольник согласованности: год ENS +12.27 /
+v2-бридж +12.59 / рекордер +11.09. Символ-условность зафиксирована деплоем: DOGE/XRP =
+anchored+FIXQ, BTC = true+DYN (HD5 rev2: FIXQ теряет январский дрейф, bpd +19.3 vs +30.4).
+Витрина обновлена тем же окном. Открыто: shadow-vs-offline приёмка первого полного дня,
+ре-гейт (c) на ~25 днях, месячный τ-рефреш.
