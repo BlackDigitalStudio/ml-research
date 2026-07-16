@@ -18,6 +18,9 @@ SUB_A = os.environ.get("XSYM_SUB", "maker_labels_tb3s_h150anch")  # children rea
 JOBS = [(p.split(":")[0], int(p.split(":")[1]))
         for p in os.environ.get("XSYM_JOBS", "").split(",") if p]
 NTHREAD = os.environ.get("XSYM_NTHREAD", "2")
+# XSYM_TRAINER: which frozen trainer script to run (must exist in XD). Default = v1
+# for backward compatibility; pass subs60_xgb_sobol_v2.py for protocol-v2 campaigns.
+TRAINER = os.environ.get("XSYM_TRAINER", "subs60_xgb_optuna_ic.py")
 run_lock = threading.Lock()
 n_running = 0
 
@@ -67,11 +70,11 @@ def job(sym, s):
     try:
         log(f"{sym} seed{s}: TRAIN start")
         env = {"SEED": str(s), "CFGIDX": "1", "BUDGETS": "5", "SAVE_PF": "1", "PFTAG": f"_S{s}"}
-        rc = run(["/usr/bin/python3", f"{XD}/subs60_xgb_optuna_ic.py", sym, SUB_A, "0", NTHREAD],
+        rc = run(["/usr/bin/python3", f"{XD}/{TRAINER}", sym, SUB_A, "0", NTHREAD],
                  env, f"{XD}/train_{sym}_s{s}.log")
         if rc != 0:
             log(f"{sym} seed{s}: rc={rc}, RETRY")
-            rc = run(["/usr/bin/python3", f"{XD}/subs60_xgb_optuna_ic.py", sym, SUB_A, "0", NTHREAD],
+            rc = run(["/usr/bin/python3", f"{XD}/{TRAINER}", sym, SUB_A, "0", NTHREAD],
                      env, f"{XD}/train_{sym}_s{s}.log")
         if rc != 0:
             log(f"{sym} seed{s}: FAILED rc={rc}"); return

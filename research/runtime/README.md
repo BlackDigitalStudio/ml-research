@@ -12,9 +12,23 @@ ranks above any single static strategy (user directive 2026-07-11, clarified
 ## The two layers — never confuse them
 
 1. **FROZEN PROTOCOL (measurement)** — byte-identified by git, never copy-edited:
-   - `scripts/subs60_xgb_optuna_ic.py` — walk-forward W200/T30/EMB2, per-fold Optuna
-     25 trials (A-AUC, B-IC), causal rolling tau. Parameterized ONLY via
-     env/argv: `SYM LABELSUB QMIDX NTHREAD` + `SEED CFGIDX BUDGETS SAVE_PF PFTAG N_TRIALS`.
+   - **`scripts/subs60_xgb_sobol_v2.py` — PROTOCOL v2, THE DEFAULT for new tiers**
+     (adopted 2026-07-16, user decision; ledger xgb-sobol-v2-BRIDGE + AMEND2, md5
+     a751ec3fef8ff32302fbf80af9be6481). Same measurement semantics as v1; search =
+     deterministic seeded Sobol (25 pts, same ranges), QuantileDMatrix finals +
+     inplace_predict (isolation-proven RESULT-IDENTICAL to v1's matrix path),
+     ~7.5GB RSS/job, x2.4-2.7 faster/job; FOLD_PAR=6 bit-equal to sequential.
+     Extra env: `SOBOL_PAR` (trial threads, dflt 6), `OUT_SUB` (artifact subdir),
+     `DATA_CACHE` (local npz cache), `SEARCH_MODE=tpe` (isolation mode only).
+     **RULES: (i) v2 cells are ledger-tagged v2 and NEVER compared to v1 cells on
+     seed-sd — v2 removes the TPE-trajectory noise that dominated v1 seed variance
+     (measured: BTC h150d sd 6.32 -> 1.80, ens unchanged +12.27 <-> +12.59); mean-sd
+     seed-gates need v2 recalibration; cross-protocol comparisons at ensemble/
+     conclusion level only. (ii) v1 stays frozen for v1-comparable reruns.**
+   - `scripts/subs60_xgb_optuna_ic.py` — PROTOCOL v1 (walk-forward W200/T30/EMB2,
+     per-fold sequential Optuna TPE 25 trials (A-AUC, B-IC), causal rolling tau).
+     Parameterized ONLY via env/argv: `SYM LABELSUB QMIDX NTHREAD` + `SEED CFGIDX
+     BUDGETS SAVE_PF PFTAG N_TRIALS`.
    - `scripts/subs60_build_tb3s_labels.py` — dataset builder (raw CL -> daily npz ->
      combined). Env-parameterized (see invocation table below).
    - Rust bins: `feature_builder` (master `rust_ingest`), `build_samples` +
