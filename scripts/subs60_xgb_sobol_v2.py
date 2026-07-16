@@ -40,6 +40,13 @@ BUDGETS = [int(x) for x in os.environ.get("BUDGETS", "5,10").split(",")]
 SOBOL_PAR = int(os.environ.get("SOBOL_PAR", "6"))
 OUT_SUB = os.environ.get("OUT_SUB", LABELSUB)
 DATA_CACHE = os.environ.get("DATA_CACHE", "")
+# SEARCH_MODE=tpe: component-isolation mode (HD3 rev11 AMEND2) — v1's sequential
+# Optuna TPE search verbatim, everything else v2 (QDM finals, inplace_predict, RAM
+# diet). Separates the search-design effect from the matrix/predict-path effect.
+SEARCH_MODE = os.environ.get("SEARCH_MODE", "sobol")
+if SEARCH_MODE == "tpe":
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
 bk = storage.Client(project=PROJ).bucket(BUCKET)
 
 # --- deterministic Sobol design over the SAME search space as v1's _space() ---
@@ -81,6 +88,16 @@ def subsample(X, y, w=None):
     return X, y, w
 
 
+def _space_tpe(t):
+    return {"max_depth": t.suggest_int("max_depth", 3, 9),
+            "eta": t.suggest_float("eta", 0.01, 0.3, log=True),
+            "subsample": t.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": t.suggest_float("colsample_bytree", 0.5, 1.0),
+            "min_child_weight": t.suggest_float("min_child_weight", 1.0, 100.0, log=True),
+            "reg_lambda": t.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+            "reg_alpha": t.suggest_float("reg_alpha", 1e-3, 5.0, log=True)}
+
+
 def tune_A(Xst, yst, Xv, yv, spw):
     Xst, yst, _ = subsample(Xst, yst)
     dst = xgb.DMatrix(Xst, label=yst); dv = xgb.DMatrix(Xv, label=yv)
@@ -89,6 +106,12 @@ def tune_A(Xst, yst, Xv, yv, spw):
     def ev(hp):
         b = xgb.train(dict(base, **hp), dst, num_boost_round=400, evals=[(dv, "v")], early_stopping_rounds=30, verbose_eval=False)
         return float(b.best_score), int(b.best_iteration)
+    if SEARCH_MODE == "tpe":
+        def obj(t):
+            s, bi = ev(_space_tpe(t))
+            t.set_user_attr("bi", bi); return s
+        st = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=SEED)); st.optimize(obj, n_trials=N_TRIALS)
+        return st.best_params, int(st.best_trial.user_attrs["bi"]), float(st.best_value)
     des = sobol_design(SPACE, N_TRIALS, SEED)
     res = parmap(ev, des, SOBOL_PAR)
     bi = int(np.argmax([r[0] for r in res]))
@@ -108,6 +131,12 @@ def tune_B_ic(Xst, yst, wst, Xv, pdiff_v):
             return -1.0
         ic = float(np.corrcoef(pv, pdiff_v)[0, 1])
         return ic if np.isfinite(ic) else -1.0
+    if SEARCH_MODE == "tpe":
+        def obj(t):
+            hp = _space_tpe(t); hp["num_boost_round"] = t.suggest_int("num_boost_round", 50, 400)
+            return ev(hp)
+        st = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=SEED)); st.optimize(obj, n_trials=N_TRIALS)
+        bp = dict(st.best_params); nr = bp.pop("num_boost_round"); return bp, int(nr), float(st.best_value)
     des = sobol_design(SPACE_B, N_TRIALS, SEED)
     ics = parmap(ev, des, SOBOL_PAR)
     bi = int(np.argmax(ics))
