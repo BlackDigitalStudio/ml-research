@@ -53,7 +53,10 @@ ranks above any single static strategy (user directive 2026-07-11, clarified
    - `perseed_from_pf.py` — recomputes the per-seed json from PERFOLD artifacts
      (deterministic, <1e-7bp vs direct; makes seeds parallelizable).
    - `ens_sym.py` — the DEPLOYED-scoring ensemble cell (mean 4-seed rank score,
-     majority-vote side) + LOFO + jitter sd .02/.05 (the REQUIRED perturbation gate).
+     majority-vote side) + LOFO + jitter sd .02/.05. The BINDING perturbation gate
+     is **sd=0.02 only** (covers measured real live jitter 0.017; user decision
+     2026-07-16, ledger perturbation-gate-redefinition-20260716); sd=0.05 is a
+     reported diagnostic, not a gate.
    - `prep_anch_sym.py` — anchored-semantics dataset intervention (col13:=day-first,
      col44:=0).
    - `bins.sh` — builds all 3 rust binaries into a PERSISTENT dir + optional parity check.
