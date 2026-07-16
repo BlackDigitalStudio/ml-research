@@ -10,15 +10,16 @@ majority side) variants, per symbol. Metrics: EV/tr, trades/day, bp/day (=EV*tpd
 economic total), hit, per-fold, zero-trade-day share; ensemble cells get the REQUIRED
 score-jitter perturbation gate (sd .02/.05 x 100 reps) for BOTH policies.
 No retraining — pure re-analysis of saved fold scores (anchored h150, rev8/s22 artifacts).
-Env: SYMS. Out: print + research_runs/h1_fixedtau/{SYM}_h1.json
+Env: SYMS; H1_SUB / H1_OUT override the artifact/source subdirs (defaults = the
+HD5 rev1 anchored-H1800 cells, byte-preserved). Out: print + {H1_OUT}/{SYM}_h1v2.json
 """
 import io, json, os
 import numpy as np
 from google.cloud import storage
 
 SYMS = os.environ.get("SYMS", "BTC,ETH,DOGE,XRP").split(",")
-SUB = "research_runs/maker_labels_tb3s_h150anch"
-OUT = "research_runs/h1_fixedtau"
+SUB = "research_runs/" + os.environ.get("H1_SUB", "maker_labels_tb3s_h150anch")
+OUT = "research_runs/" + os.environ.get("H1_OUT", "h1_fixedtau")
 KDAYS = 30
 BUDGETS = [5, 10]
 bk = storage.Client(project="project-0998ac51-36ba-445c-bc7").bucket("market-data-0998ac51")
