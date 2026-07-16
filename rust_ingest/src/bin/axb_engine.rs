@@ -471,6 +471,11 @@ fn main() -> Result<()> {
     let sym = std::env::var("SIGNAL_SYM").unwrap_or_else(|_| "dogeusdt".into());
     let btc_sym = "btcusdt".to_string();
     let eth_sym = "ethusdt".to_string();
+    // Self-referential instance (SIGNAL_SYM == btc lead symbol, i.e. the BTC deploy):
+    // subscribe the depth stream ONCE and feed the btc_lead mid series from the same
+    // MirrorBook after each apply — identical semantics to the separate-book branch
+    // (offline builders read the same single stream for both roles).
+    let self_lead = sym == btc_sym;
     let trade_budget: f64 = std::env::var("TRADE_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
     // FUNDING_MODE: "anchor" (default, deployed DOGE/XRP policy: col13 day-frozen,
     // col44=0) | "true" (live markPrice rows -> col13/col44, batch semantics; the
@@ -499,7 +504,11 @@ fn main() -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     {
-        let pub_streams = vec![format!("{sym}@depth@100ms"), format!("{btc_sym}@depth@100ms")];
+        let pub_streams = if self_lead {
+            vec![format!("{sym}@depth@100ms")]
+        } else {
+            vec![format!("{sym}@depth@100ms"), format!("{btc_sym}@depth@100ms")]
+        };
         let mkt_streams = vec![
             format!("{sym}@aggTrade"),
             format!("{sym}@forceOrder"),
@@ -631,6 +640,13 @@ fn main() -> Result<()> {
                 }
                 if !doge.apply(u, &b, &a) {
                     continue;
+                }
+                if self_lead {
+                    let m = doge.l1_mid();
+                    if m > 0.0 {
+                        btc_ts.push(ets_ms * 1_000_000);
+                        btc_mid.push(m);
+                    }
                 }
                 last_book_wall = Instant::now();
                 let tick_ns = ets_ms * 1_000_000;
