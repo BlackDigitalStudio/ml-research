@@ -43,6 +43,10 @@ struct Args {
     open_interest: Option<PathBuf>,
     #[arg(long)]
     indices: PathBuf,
+    /// "anchor" (single-row day-anchor contract) | "true" (stream funding rows;
+    /// col13/col44 batch semantics, HD3 rev10 BTC x true-funding policy).
+    #[arg(long, default_value = "anchor")]
+    funding_mode: String,
 }
 
 fn main() -> Result<()> {
@@ -94,14 +98,19 @@ fn main() -> Result<()> {
     // ---------------- (b) incremental replay ----
     let t1 = Instant::now();
     let mut st = FeatState::new();
+    let funding_true = a.funding_mode == "true";
     if let Some(f) = funding.as_ref() {
         if !f.timestamps.is_empty() {
-            st.anchor_rate = Some(f.funding_rate[0]); // day-anchor single-row contract
+            if funding_true {
+                st.funding_true = true; // rows streamed in the replay loop below
+            } else {
+                st.anchor_rate = Some(f.funding_rate[0]); // day-anchor single-row contract
+            }
         }
     }
     let d_ts = depth.timestamps.as_slice().unwrap();
     // stream pointers (commit contract: events with ts <= tick ts BEFORE the tick)
-    let (mut pt, mut pe, mut pl, mut po) = (0usize, 0usize, 0usize, 0usize);
+    let (mut pt, mut pe, mut pl, mut po, mut pf) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let mut bids = [(0f64, 0f64); DEPTH_LEVELS];
     let mut asks = [(0f64, 0f64); DEPTH_LEVELS];
     for i in 0..n {
@@ -132,6 +141,15 @@ fn main() -> Result<()> {
             while po < ot.len() && ot[po] <= ts {
                 st.push_oi(ot[po], ov[po]);
                 po += 1;
+            }
+        }
+        if funding_true {
+            if let Some(f) = funding.as_ref() {
+                let ft = f.timestamps.as_slice().unwrap();
+                while pf < ft.len() && ft[pf] <= ts {
+                    st.push_funding(ft[pf], f.funding_rate[pf], f.mark_price[pf]);
+                    pf += 1;
+                }
             }
         }
         for k in 0..DEPTH_LEVELS {

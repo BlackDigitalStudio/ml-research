@@ -54,7 +54,7 @@ enum Ev {
     BookSnap { sym: u8, uid: i64, b: Vec<(f64, f64)>, a: Vec<(f64, f64)>, reconcile: bool },
     Trade { eth: bool, ts_ms: i64, px: f64, qty: f64, is_sell: bool },
     Liq { ts_ms: i64, sn: f64, an: f64 },
-    Mark { ets_ms: i64, rate: f64 },
+    Mark { ets_ms: i64, rate: f64, mark: f64 },
     Oi { ts_ms: i64, v: f64 },
 }
 
@@ -439,6 +439,7 @@ async fn ws_task(
                                     let _ = tx.send(Ev::Mark {
                                         ets_ms: d["E"].as_i64().unwrap_or(0),
                                         rate: d["r"].as_str().and_then(|x| x.parse().ok()).unwrap_or(0.0),
+                                        mark: d["p"].as_str().and_then(|x| x.parse().ok()).unwrap_or(0.0),
                                     });
                                 }
                                 _ => {}
@@ -471,6 +472,10 @@ fn main() -> Result<()> {
     let btc_sym = "btcusdt".to_string();
     let eth_sym = "ethusdt".to_string();
     let trade_budget: f64 = std::env::var("TRADE_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
+    // FUNDING_MODE: "anchor" (default, deployed DOGE/XRP policy: col13 day-frozen,
+    // col44=0) | "true" (live markPrice rows -> col13/col44, batch semantics; the
+    // BTC x true-funding policy class, HD3 rev10).
+    let funding_true = std::env::var("FUNDING_MODE").map(|v| v == "true").unwrap_or(false);
     std::fs::create_dir_all(work.join("decisions"))?;
     std::fs::create_dir_all(work.join("features"))?;
 
@@ -548,6 +553,10 @@ fn main() -> Result<()> {
     let mut btc = MirrorBook::new();
     let mut st = FeatState::new();
     st.anchor_rate = anchor_rate;
+    st.funding_true = funding_true;
+    if funding_true {
+        eprintln!("FUNDING_MODE=true: col13/col44 from live markPrice rows");
+    }
     let mut btc_ts: Vec<i64> = Vec::new();
     let mut btc_mid: Vec<f64> = Vec::new();
     // pending stream queues (commit contract: events with ts <= tick ts before the tick)
@@ -593,13 +602,20 @@ fn main() -> Result<()> {
             }
             Ev::Liq { ts_ms, sn, an } => q_liq.push_back((ts_ms, sn, an)),
             Ev::Oi { ts_ms, v } => q_oi.push_back((ts_ms, v)),
-            Ev::Mark { ets_ms, rate } => {
-                let d = day_of_ms(ets_ms);
-                if d != anchor_day {
-                    anchor_day = d.clone();
-                    anchor_rate = Some(rate);
-                    st.anchor_rate = Some(rate);
-                    eprintln!("funding day-anchor {d} = {rate}");
+            Ev::Mark { ets_ms, rate, mark } => {
+                if funding_true {
+                    // TRUE mode: every markPrice row feeds col13/col44 (batch
+                    // at-or-before semantics inside compute64). Day roll clears
+                    // the rows with the rest of the day-anchored state.
+                    st.push_funding(ets_ms, rate, mark);
+                } else {
+                    let d = day_of_ms(ets_ms);
+                    if d != anchor_day {
+                        anchor_day = d.clone();
+                        anchor_rate = Some(rate);
+                        st.anchor_rate = Some(rate);
+                        eprintln!("funding day-anchor {d} = {rate}");
+                    }
                 }
             }
             Ev::Diff { sym: s, u, ets_ms, b, a } => {
@@ -627,6 +643,7 @@ fn main() -> Result<()> {
                     if st.n_ticks() > 0 {
                         st = FeatState::new();
                         st.anchor_rate = anchor_rate;
+                        st.funding_true = funding_true;
                         btc_ts.clear();
                         btc_mid.clear();
                         last_dec_tick = -1;

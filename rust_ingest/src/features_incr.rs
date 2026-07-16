@@ -140,6 +140,14 @@ pub struct FeatState {
 
     // ---- funding day-anchor ----
     pub anchor_rate: Option<f64>,
+
+    // ---- funding TRUE mode (FUNDING_MODE=true): live markPrice rows; col13 =
+    // latest rate at-or-before sample_ts, col44 = basis vs latest mark (batch
+    // fill_funding_features / fill_horizon_features_b semantics) ----
+    pub funding_true: bool,
+    fund_ts: Vec<i64>,
+    fund_rate: Vec<f64>,
+    fund_mark: Vec<f64>,
 }
 
 impl FeatState {
@@ -178,6 +186,17 @@ impl FeatState {
     #[inline]
     pub fn n_oi(&self) -> usize {
         self.oi_ts.len()
+    }
+    #[inline]
+    pub fn n_funding(&self) -> usize {
+        self.fund_ts.len()
+    }
+
+    /// TRUE-funding mode: append a markPrice stream row (ts ms, funding rate, mark px).
+    pub fn push_funding(&mut self, ts: i64, rate: f64, mark: f64) {
+        self.fund_ts.push(ts);
+        self.fund_rate.push(rate);
+        self.fund_mark.push(mark);
     }
     #[inline]
     pub fn bp0_at(&self, idx: usize) -> f64 {
@@ -813,8 +832,22 @@ impl FeatState {
             let rem = sample_ts.rem_euclid(FUNDING_PERIOD_MS);
             f[43] = if rem == 0 { 0.0 } else { ((FUNDING_PERIOD_MS - rem) as f64 / 60_000.0) as f32 };
         }
-        // [44] funding basis: the day-anchor file has mark_price=0 -> guard fails -> 0.
-        // (Batch with the anchor single row: r=1>0, mark=0.0, `mark > 0` false -> 0.)
+        // [44] funding basis.
+        // ANCHOR mode: the day-anchor file has mark_price=0 -> batch guard fails -> 0
+        // (batch with the anchor single row: r=1>0, mark=0.0, `mark > 0` false -> 0).
+        // TRUE mode: batch fill_horizon_features_b [44] — latest mark at-or-before
+        // sample_ts, (mark - mid)/mid * 1e4 when mark>0 && mid>0, else 0.
+        if self.funding_true && !self.fund_ts.is_empty() {
+            let r = searchsorted_right_i64(&self.fund_ts, sample_ts);
+            if r > 0 {
+                let fi_ = (r - 1).min(self.fund_ts.len() - 1);
+                let mark = self.fund_mark[fi_];
+                let m = self.mids[idx];
+                if mark > 0.0 && m > 0.0 {
+                    f[44] = ((mark - m) / m * 10_000.0) as f32;
+                }
+            }
+        }
 
         // ---- fill_horizon_features_c [45..49] ----
         {
@@ -883,8 +916,19 @@ impl FeatState {
             }
         }
 
-        // ---- fill_funding_features [13] — day-anchor single row => rate const ----
-        if let Some(rate) = self.anchor_rate {
+        // ---- fill_funding_features [13] ----
+        // TRUE mode: batch semantics `fi = clip(searchsorted_right(ts)-1, 0, n-1)` —
+        // note the r==0 branch takes row 0 (batch peeks the day's first row for
+        // pre-first-row samples; unreachable live because ends start at idx>=W-1,
+        // ~5s into the day, past the first @1s mark row — harness-verified).
+        // ANCHOR mode: day-anchor single row => rate const.
+        if self.funding_true {
+            if !self.fund_ts.is_empty() {
+                let r = searchsorted_right_i64(&self.fund_ts, sample_ts);
+                let fi_ = if r == 0 { 0 } else { (r - 1).min(self.fund_ts.len() - 1) };
+                f[13] = self.fund_rate[fi_] as f32;
+            }
+        } else if let Some(rate) = self.anchor_rate {
             f[13] = rate as f32;
         }
 
