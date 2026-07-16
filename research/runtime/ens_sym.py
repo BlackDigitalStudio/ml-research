@@ -16,9 +16,12 @@ SYM = sys.argv[1]
 bk = storage.Client(project='project-0998ac51-36ba-445c-bc7').bucket('market-data-0998ac51')
 SUB = 'research_runs/' + os.environ.get('XSYM_SUB', 'maker_labels_tb3s_h150anch')
 KDAYS = 30
+# SEEDS env (default 0-3 = deployed 4-seed scoring, byte-preserved): mean rank over
+# N seeds, majority vote with ties counted at >= N/2 (N=4: >=2, unchanged).
+SEEDS = [int(x) for x in os.environ.get('SEEDS', '0,1,2,3').split(',')]
 
 evs = []
-for s in range(4):
+for s in SEEDS:
     r = json.loads(bk.blob(f'{SUB}/OPTUNA_IC_{SYM}_qm0_SEED{s}.json').download_as_bytes())
     x = r['AxB_t5']
     evs.append(x['ev'])
@@ -26,7 +29,7 @@ for s in range(4):
           f'hit {100*x["hit"]:.1f}% perfold {x["perfold"]}', flush=True)
 evs = np.array(evs)
 print(f'=== {SYM} PER-SEED t5: {evs.mean():+.2f} +- {evs.std(ddof=1):.2f} bp '
-      f'[{"/".join(f"{e:+.1f}" for e in evs)}] {int((evs > 0).sum())}/4 positive ===', flush=True)
+      f'[{"/".join(f"{e:+.1f}" for e in evs)}] {int((evs > 0).sum())}/{len(SEEDS)} positive ===', flush=True)
 
 nf = sum(1 for b in bk.client.list_blobs(bk, prefix=f'{SUB}/PERFOLD_S0_{SYM}_qm0_f')
          if b.name.endswith('.npz'))
@@ -35,12 +38,13 @@ folds = []
 tie_n = 0; tot_n = 0
 for f in range(nf):
     zs = [np.load(io.BytesIO(bk.blob(f'{SUB}/PERFOLD_S{s}_{SYM}_qm0_f{f}.npz').download_as_bytes()))
-          for s in range(4)]
+          for s in SEEDS]
     tr = np.mean([z['axb_tr'].astype(np.float64) for z in zs], 0)
     te = np.mean([z['axb_te'].astype(np.float64) for z in zs], 0)
     votes = np.sum([z['side'].astype(int) for z in zs], 0)
-    side = votes >= 2
-    tie_n += int((votes == 2).sum()); tot_n += len(votes)
+    half = len(SEEDS) / 2.0
+    side = votes >= half
+    tie_n += int((votes == half).sum()); tot_n += len(votes)
     z0 = zs[0]
     folds.append(dict(tr=tr, te=te, day_tr=z0['day_tr'], day_te=z0['day_te'], side=side,
                       fl=z0['fl'], fs=z0['fs'], nl=z0['netl'].astype(np.float64),
@@ -88,5 +92,6 @@ res = dict(sym=SYM, nf=nf, per_seed_ev=[float(e) for e in evs],
            ens_ev=float(tot.mean()), ens_n=int(len(tot)), ens_hit=float((tot > 0).mean()),
            perfold_ev=[float(b.mean()) if len(b) else None for b in base],
            perfold_n=[int(len(b)) for b in base], ties_pct=100 * tie_n / max(tot_n, 1))
-bk.blob(f'{SUB}/ENS_{SYM}_t5.json').upload_from_string(json.dumps(res))
+_tag = '' if SEEDS == [0, 1, 2, 3] else f'_s{len(SEEDS)}'
+bk.blob(f'{SUB}/ENS_{SYM}_t5{_tag}.json').upload_from_string(json.dumps(res))
 print(f'[ENS {SYM} DONE]', flush=True)
