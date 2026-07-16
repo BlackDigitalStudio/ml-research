@@ -67,10 +67,15 @@ def causal(p, tgt=5.0, jit=0.0, rng=None):
         return np.array([])
     sd_ = p['side'][sel]; net = np.where(sd_, p['nl'][sel], p['ns'][sel])
     fc = np.where(sd_, p['fl'][sel], p['fs'][sel])
-    ex = fc & np.isfinite(net); return net[ex]
+    ex = fc & np.isfinite(net)
+    if rng is not None and jit > 0:
+        return net[ex]
+    return net[ex], p['day_te'][sel][ex]
 
 
-base = [causal(p) for p in folds]
+pairs = [causal(p) for p in folds]
+base = [n for n, _ in pairs]
+base_days = np.concatenate([d for _, d in pairs]) if pairs else np.array([])
 tot = np.concatenate(base)
 print(f'=== {SYM} ENSEMBLE year t5: EV {tot.mean():+.2f}bp ({len(tot)}tr, '
       f'hit {100*(tot>0).mean():.1f}%) ===', flush=True)
@@ -88,7 +93,32 @@ for sd_j in (0.02, 0.05):
     r = np.array(r)
     print(f'  jitter sd={sd_j}: p10/p50/p90 = {np.nanquantile(r,.1):+.2f}/{np.nanquantile(r,.5):+.2f}/'
           f'{np.nanquantile(r,.9):+.2f} bp | P(EV>0)={100*np.nanmean(r>0):.0f}%', flush=True)
-res = dict(sym=SYM, nf=nf, per_seed_ev=[float(e) for e in evs],
+# day-block bootstrap (OPS-GATES rev2 binding battery): L=7 blocks, 1000 reps over
+# the ordered test-day sequence; CI90 on EV/tr + bpd, P(EV>0).
+all_days = sorted(set(int(d) for p in folds for d in np.unique(p['day_te'])))
+span = len(all_days)
+by_day = {int(d): [] for d in all_days}
+for n_, d_ in zip(np.concatenate(base), base_days):
+    by_day[int(d_)].append(float(n_))
+L = 7
+rngb = np.random.default_rng(1)
+b_ev, b_bpd = [], []
+for rep in range(1000):
+    picked = []
+    while len(picked) < span:
+        i0 = rngb.integers(0, max(span - L, 1))
+        picked.extend(all_days[i0:i0 + L])
+    picked = picked[:span]
+    tr_ = [x for d_ in picked for x in by_day[d_]]
+    if tr_:
+        b_ev.append(np.mean(tr_)); b_bpd.append(np.sum(tr_) / span)
+b_ev = np.array(b_ev); b_bpd = np.array(b_bpd)
+boot = dict(ev_p5=float(np.quantile(b_ev, .05)), ev_p50=float(np.quantile(b_ev, .5)),
+            ev_p95=float(np.quantile(b_ev, .95)), Ppos=float(100 * np.mean(b_ev > 0)),
+            bpd_p5=float(np.quantile(b_bpd, .05)), bpd_p95=float(np.quantile(b_bpd, .95)))
+print(f"  BOOT(day-block L={L}): EV CI90 [{boot['ev_p5']:+.2f}, {boot['ev_p95']:+.2f}] "
+      f"P(EV>0)={boot['Ppos']:.0f}% | bpd CI90 [{boot['bpd_p5']:+.2f}, {boot['bpd_p95']:+.2f}]", flush=True)
+res = dict(sym=SYM, nf=nf, per_seed_ev=[float(e) for e in evs], boot=boot,
            ens_ev=float(tot.mean()), ens_n=int(len(tot)), ens_hit=float((tot > 0).mean()),
            perfold_ev=[float(b.mean()) if len(b) else None for b in base],
            perfold_n=[int(len(b)) for b in base], ties_pct=100 * tie_n / max(tot_n, 1))
