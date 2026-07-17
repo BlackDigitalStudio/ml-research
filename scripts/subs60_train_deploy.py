@@ -89,7 +89,17 @@ m = json.loads(str(d["meta"])); ndays = int(m["n_days"])
 F = d["F"].astype(np.float64); day = d["day"].astype(int); rH = d[RHKEY].astype(np.float64)
 netl = d["pnl_long"][CFGIDX, QMIDX, :].astype(np.float64) * 100.0; nets = d["pnl_short"][CFGIDX, QMIDX, :].astype(np.float64) * 100.0
 fl = d["fill_long"].astype(bool)[QMIDX]; fs = d["fill_short"].astype(bool)[QMIDX]
-feat_names = [str(x) for x in d["feat_names"]]; nfeat = F.shape[1]
+feat_names = [str(x) for x in d["feat_names"]]
+# DROP_COLS (rev18 no-ToD bundles): drop columns BEFORE norm/fit; keep-list saved to
+# the bundle (keep.npy + meta) so the live engine slices its f71 identically.
+_drop = os.environ.get("DROP_COLS", "")
+KEEP = list(range(F.shape[1]))
+if _drop:
+    dc = sorted(int(x) for x in _drop.split(","))
+    KEEP = [i for i in range(F.shape[1]) if i not in dc]
+    F = F[:, KEEP]; feat_names = [feat_names[i] for i in KEEP]
+    print(f"*** DROPPED cols {dc} -> F now {F.shape[1]} cols ***", flush=True)
+nfeat = F.shape[1]
 # blanket causal vol-norm + SAVE the state (live rolls day_mean/day_var forward)
 day_mean = np.zeros((ndays, nfeat)); day_var = np.zeros((ndays, nfeat))
 for dd in range(ndays):
@@ -141,7 +151,10 @@ nb = io.BytesIO(); np.savez_compressed(nb, day_mean=day_mean.astype(np.float32),
                                        gstd=gstd.astype(np.float32), sA=sA, sBg=sBg, sBf=sBf,
                                        axb_seed=axb_sc[seedm], noa_seed=noa_sc[seedm])
 bk.blob(f"{OUT}/refs.npz").upload_from_string(nb.getvalue())
+kb = io.BytesIO(); np.save(kb, np.array(KEEP, dtype=np.int64))
+bk.blob(f"{OUT}/keep.npy").upload_from_string(kb.getvalue())
 meta = {"symbol": SYM, "labels": LABELSUB, "cfgidx": CFGIDX, "qmidx": QMIDX, "horizon_s": HORIZON_S, "config": "AxB (t5 argmax)",
+        "keep_cols": KEEP, "dropped_cols": (_drop or None),
         "KNORM": KNORM, "KDAYS": KDAYS, "NF_RATE": NF_RATE, "GATE_PCT": GATE_PCT, "vol_thr_p95_rH30": thr,
         "hpA": hpA, "biA": biA, "valAUC_A": aucA, "hpB": hpB, "biB": biB, "valIC_B": icB,
         "feat_names": feat_names, "ndays": ndays, "n_train": int(len(F)),
