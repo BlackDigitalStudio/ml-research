@@ -261,8 +261,10 @@ struct Seed {
 }
 
 fn load_seeds(boot: &PathBuf) -> Result<Vec<Seed>> {
+    // v4: dynamic seed count — load A{s}.json while present (4 for DOGE/XRP/BTC, 8 for ETH)
     let mut out = Vec::new();
-    for s in 0..4 {
+    let mut s = 0usize;
+    while boot.join(format!("A{s}.json")).exists() {
         let mut a = Gbt::load_json(&boot.join(format!("A{s}.json")))?;
         let mut bg = Gbt::load_json(&boot.join(format!("Bg{s}.json")))?;
         let ba: Array1<f32> = read_npy(boot.join(format!("base_A{s}.npy")))?;
@@ -274,7 +276,9 @@ fn load_seeds(boot: &PathBuf) -> Result<Vec<Seed>> {
         let s_a: Array1<f64> = read_npy(boot.join(format!("sA{s}.npy")))?;
         let s_bg: Array1<f64> = read_npy(boot.join(format!("sBg{s}.npy")))?;
         out.push(Seed { a, bg, mu: mu.to_vec(), sd: sd.to_vec(), s_a: s_a.to_vec(), s_bg: s_bg.to_vec() });
+        s += 1;
     }
+    anyhow::ensure!(!out.is_empty(), "no seed bundles in boot dir");
     Ok(out)
 }
 
@@ -486,6 +490,29 @@ fn main() -> Result<()> {
 
     let seeds = load_seeds(&boot)?;
     eprintln!("engine: {} seeds loaded, MODE={mode}", seeds.len());
+    // v4: feature keep-list (bundle trained with DROP_COLS -> boot writes keep.npy;
+    // absent = identity 71). mu/sd/model indices are in KEEP-space by construction.
+    let keep: Vec<usize> = if boot.join("keep.npy").exists() {
+        let k: ndarray::Array1<i64> = read_npy(boot.join("keep.npy"))?;
+        k.iter().map(|&x| x as usize).collect()
+    } else {
+        (0..71).collect()
+    };
+    eprintln!("feature keep-list: {} of 71", keep.len());
+    // v4: HARMONY filter (ETH safety form): skip execution when a MIDDLE fraction of
+    // seeds (2..=N-2) clear their own FROZEN per-seed taus (boot seed_taus.npy from
+    // the recorder per-seed score distributions; backtest = fold-frozen analog).
+    let harmony = std::env::var("HARMONY").map(|v| v == "1").unwrap_or(false);
+    let seed_taus: Option<Vec<f64>> = if boot.join("seed_taus.npy").exists() {
+        let t: ndarray::Array1<f64> = read_npy(boot.join("seed_taus.npy"))?;
+        Some(t.to_vec())
+    } else {
+        None
+    };
+    if harmony {
+        anyhow::ensure!(seed_taus.is_some(), "HARMONY=1 requires boot/seed_taus.npy");
+        eprintln!("HARMONY filter ON: skip when 2..={} seeds above frozen per-seed taus", seeds.len() - 2);
+    }
     // funding anchor from boot (mid-day restart); day rolls update it from the stream
     let anchor_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(boot.join("anchor.json")).unwrap_or_else(|_| "{}".into()))
@@ -762,30 +789,40 @@ fn main() -> Result<()> {
                 for c in 0..71 {
                     x71[c] = row[c] as f32;
                 }
-                // score
-                let mut fn_row = [0f32; 71];
+                // score (v4: keep-sliced features, N seeds, per-seed consensus count)
+                let nk = keep.len();
+                let mut fn_row: Vec<f32> = vec![0f32; nk];
                 let mut sc = 0f64;
                 let mut pa_sum = 0f64;
                 let mut pb_sum = 0f64;
-                for sd_ in &seeds {
-                    for c in 0..71 {
-                        fn_row[c] = ((x71[c] as f64 - sd_.mu[c]) / sd_.sd[c]) as f32;
+                let mut cons = 0usize;
+                for (si, sd_) in seeds.iter().enumerate() {
+                    for (j, &c) in keep.iter().enumerate() {
+                        fn_row[j] = ((x71[c] as f64 - sd_.mu[j]) / sd_.sd[j]) as f32;
                     }
                     let pa = sd_.a.predict_prob(&fn_row);
                     let pb = sd_.bg.predict_prob(&fn_row);
-                    sc += cdf(&sd_.s_a, pa as f64) * cdf(&sd_.s_bg, (pb - 0.5f32).abs() as f64);
+                    let ps = cdf(&sd_.s_a, pa as f64) * cdf(&sd_.s_bg, (pb - 0.5f32).abs() as f64);
+                    sc += ps;
+                    if let Some(ts_) = &seed_taus {
+                        if ps >= ts_[si] {
+                            cons += 1;
+                        }
+                    }
                     pa_sum += pa as f64;
                     pb_sum += pb as f64;
                 }
-                sc /= 4.0;
-                let pa_m = pa_sum / 4.0;
-                let pb_m = pb_sum / 4.0;
+                let nseeds_f = seeds.len() as f64;
+                sc /= nseeds_f;
+                let pa_m = pa_sum / nseeds_f;
+                let pb_m = pb_sum / nseeds_f;
+                let harmony_block = harmony && cons >= 2 && cons <= seeds.len().saturating_sub(2);
                 let side_long = pb_m >= 0.5;
                 let taus = tau.observe(&grid_day, sc);
                 let takes: Vec<bool> = taus.iter().map(|&t| sc >= t).collect();
                 let mut executed = false;
                 let ti = BUDGETS.iter().position(|&b| b == trade_budget).unwrap_or(0);
-                if live && takes[ti] {
+                if live && takes[ti] && !harmony_block {
                     executed = exec.trade(side_long, sc);
                 }
                 let lat_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -797,7 +834,7 @@ fn main() -> Result<()> {
                     "book_ts_us": st.ts[idx] * 1000,
                     "grid_ts_us": g_eff / 1000,
                     "bid": st_bp0(&st, idx), "ask": st_ap0(&st, idx),
-                    "pA": (pa_m * 1e6).round() / 1e6, "pBg": (pb_m * 1e6).round() / 1e6,
+                    "pA": (pa_m * 1e6).round() / 1e6, "pBg": (pb_m * 1e6).round() / 1e6, "cons": cons, "hblock": harmony_block,
                     "score": (sc * 1e6).round() / 1e6,
                     "side": if side_long { "long" } else { "short" },
                     "tau": {"5": r6(taus[0]), "10": r6(taus[1]), "20": r6(taus[2]), "40": r6(taus[3])},
