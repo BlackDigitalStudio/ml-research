@@ -270,6 +270,19 @@ def run_fold(fi, trn, tst):
     axb_te = cdf_map(pA_te, sA) * cdf_map(np.abs(pBg_te - 0.5), sBg)
     noa_tr = np.searchsorted(sBf, np.abs(pBf_tr - 0.5), "right") / len(sBf); noa_te = cdf_map(np.abs(pBf_te - 0.5), sBf)
     print(f"  fold{fi}: A AUC={aucA:.3f} | B IC(val)={icB:+.4f} (d{hpB['max_depth']},nr{biB})", flush=True)
+    # MODEL_DUMP (default ON, user directive 2026-07-16 save-models-always): per-fold
+    # boosters + chosen HP. Output-additive only; non-perturbation proven by the rev16
+    # capture-rerun bit-parity vs rev14 PERFOLD (S0f2, S3f5 BITEXACT).
+    if os.environ.get("MODEL_DUMP", "1") == "1":
+        import tempfile
+        tag = os.environ.get("PFTAG", "")
+        for nm, booster in (("A", A), ("Bg", Bg), ("Bf", Bf)):
+            tmp = tempfile.mktemp(suffix=".json")
+            booster.save_model(tmp)
+            bk.blob(f"research_runs/{OUT_SUB}/MODELS{tag}_{SYM}_f{fi}_{nm}.json").upload_from_filename(tmp)
+            os.remove(tmp)
+        bk.blob(f"research_runs/{OUT_SUB}/MODELS{tag}_{SYM}_f{fi}_hp.json").upload_from_string(
+            json.dumps(dict(hpA=hpA, biA=int(biA), aucA=float(aucA), hpB=hpB, biB=int(biB), icB=float(icB)), default=float))
     return (axb_tr, axb_te, noa_tr, noa_te, day[tri], day[tei], pBg_te >= 0.5, pBf_te >= 0.5, fl[tei], fs[tei], netl[tei], nets[tei])
 
 

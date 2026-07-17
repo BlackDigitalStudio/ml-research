@@ -13,8 +13,9 @@ ranks above any single static strategy (user directive 2026-07-11, clarified
 
 1. **FROZEN PROTOCOL (measurement)** — byte-identified by git, never copy-edited:
    - **`scripts/subs60_xgb_sobol_v2.py` — PROTOCOL v2, THE DEFAULT for new tiers**
-     (adopted 2026-07-16, user decision; ledger xgb-sobol-v2-BRIDGE + AMEND2, md5
-     a751ec3fef8ff32302fbf80af9be6481). Same measurement semantics as v1; search =
+     (adopted 2026-07-16; ledger xgb-sobol-v2-BRIDGE + AMEND2; **v2.1 md5
+     2a435f32e2517479e0232260c85aad1a** — adds MODEL_DUMP=1 default: per-fold
+     boosters+HP saved always, non-perturbation bit-proven in rev16). Same measurement semantics as v1; search =
      deterministic seeded Sobol (25 pts, same ranges), QuantileDMatrix finals +
      inplace_predict (isolation-proven RESULT-IDENTICAL to v1's matrix path),
      ~7.5GB RSS/job, x2.4-2.7 faster/job; FOLD_PAR=6 bit-equal to sequential.
