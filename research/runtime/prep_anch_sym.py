@@ -19,13 +19,18 @@ bk = storage.Client(project=PROJ).bucket(BUCKET)
 d = dict(np.load(io.BytesIO(bk.blob(SRC).download_as_bytes()), allow_pickle=True))
 F = d["F"]; day = d["day"].astype(int)
 print("F", F.shape, F.dtype, "| days", day.min(), "..", day.max(), flush=True)
-for dd in np.unique(day):
-    mk = day == dd
-    F[mk, 13] = F[np.where(mk)[0][0], 13]
+# ANCH_MODE: "anchor" (default, byte-preserved) = col13 day-frozen + col44:=0;
+# "hybrid" (HD3 rev17 H2) = col13 kept LIVE, only col44:=0 (basis is the suspected
+# noise, the live rate the suspected signal).
+MODE = os.environ.get("ANCH_MODE", "anchor")
+if MODE == "anchor":
+    for dd in np.unique(day):
+        mk = day == dd
+        F[mk, 13] = F[np.where(mk)[0][0], 13]
 nz44 = float((F[:, 44] != 0).mean())
 F[:, 44] = 0.0
 d["F"] = F
-print(f"anchored: {len(np.unique(day))} days | col44 was nonzero {100*nz44:.1f}% -> 0", flush=True)
+print(f"{MODE}: {len(np.unique(day))} days | col44 was nonzero {100*nz44:.1f}% -> 0", flush=True)
 buf = io.BytesIO()
 np.savez_compressed(buf, **d)
 bk.blob(DST).upload_from_string(buf.getvalue())
