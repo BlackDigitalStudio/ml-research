@@ -475,6 +475,10 @@ fn main() -> Result<()> {
     let sym = std::env::var("SIGNAL_SYM").unwrap_or_else(|_| "dogeusdt".into());
     let btc_sym = "btcusdt".to_string();
     let eth_sym = "ethusdt".to_string();
+    // Self-referential ETH instance (SIGNAL_SYM == eth trades symbol): the single
+    // ethusdt aggTrade stream must feed BOTH the signal trade queue and the eth
+    // queue (the dataset used ETH's own trades in both roles).
+    let self_eth = sym == eth_sym;
     // Self-referential instance (SIGNAL_SYM == btc lead symbol, i.e. the BTC deploy):
     // subscribe the depth stream ONCE and feed the btc_lead mid series from the same
     // MirrorBook after each apply — identical semantics to the separate-book branch
@@ -536,12 +540,16 @@ fn main() -> Result<()> {
         } else {
             vec![format!("{sym}@depth@100ms"), format!("{btc_sym}@depth@100ms")]
         };
-        let mkt_streams = vec![
-            format!("{sym}@aggTrade"),
-            format!("{sym}@forceOrder"),
-            format!("{sym}@markPrice@1s"),
-            format!("{eth_sym}@aggTrade"),
-        ];
+        let mkt_streams = if self_eth {
+            vec![format!("{sym}@aggTrade"), format!("{sym}@forceOrder"), format!("{sym}@markPrice@1s")]
+        } else {
+            vec![
+                format!("{sym}@aggTrade"),
+                format!("{sym}@forceOrder"),
+                format!("{sym}@markPrice@1s"),
+                format!("{eth_sym}@aggTrade"),
+            ]
+        };
         let (t1, t2, t3, t4) = (tx.clone(), tx.clone(), tx.clone(), tx.clone());
         let (s1, s2) = (sym.clone(), sym.clone());
         let (b1, b2) = (btc_sym.clone(), btc_sym.clone());
@@ -630,7 +638,11 @@ fn main() -> Result<()> {
                 }
             }
             Ev::Trade { eth, ts_ms, px, qty, is_sell } => {
-                if eth {
+                if self_eth {
+                    // single stream feeds both roles (dataset parity)
+                    q_tr.push_back((ts_ms, px, qty, is_sell));
+                    q_eth.push_back((ts_ms, px, qty, is_sell));
+                } else if eth {
                     q_eth.push_back((ts_ms, px, qty, is_sell));
                 } else {
                     q_tr.push_back((ts_ms, px, qty, is_sell));
