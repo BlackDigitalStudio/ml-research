@@ -120,7 +120,10 @@ def prep_anch(sym):
         return True
     with heavy_lock:
         log(f"{sym}: anch prep start")
-        rc = run(["/usr/bin/python3", f"{XD}/prep_anch_sym.py", sym], {}, f"{XD}/prep_{sym}.log")
+        # pass the campaign subdirs explicitly — prep_anch_sym's own defaults point at
+        # the rev8 h150/h150anch dirs and would silently rewrite them (2026-07-18 catch)
+        rc = run(["/usr/bin/python3", f"{XD}/prep_anch_sym.py", sym],
+                 {"ANCH_SRC_SUB": SUB_H, "ANCH_DST_SUB": SUB_A}, f"{XD}/prep_{sym}.log")
     log(f"{sym}: anch prep rc={rc}")
     return rc == 0
 
