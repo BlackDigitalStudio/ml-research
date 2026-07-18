@@ -15,6 +15,11 @@ import time
 HOME = "/home/delmi"; XD = os.environ.get("XSYM_XD", f"{HOME}/xsym")
 GB = "gs://market-data-0998ac51/research_runs"
 SUB_A = os.environ.get("XSYM_SUB", "maker_labels_tb3s_h150anch")  # children read XSYM_SUB too
+# XSYM_OUT_SUB: artifact subdir when it differs from the dataset subdir (e.g. DROP_COLS
+# ablation campaigns writing to {dataset}_v2notod). Skip markers, perseed and ens_sym
+# all point at the ARTIFACT dir; the trainer receives it as OUT_SUB. Default = SUB_A
+# (byte-preserves rev8 behavior: artifacts co-located with the dataset).
+OUT_A = os.environ.get("XSYM_OUT_SUB", SUB_A)
 JOBS = [(p.split(":")[0], int(p.split(":")[1]))
         for p in os.environ.get("XSYM_JOBS", "").split(",") if p]
 NTHREAD = os.environ.get("XSYM_NTHREAD", "2")
@@ -60,7 +65,7 @@ def gcs_exists(path):
 
 def job(sym, s):
     global n_running
-    if gcs_exists(f"{GB}/{SUB_A}/OPTUNA_IC_{sym}_qm0_SEED{s}.json"):
+    if gcs_exists(f"{GB}/{OUT_A}/OPTUNA_IC_{sym}_qm0_SEED{s}.json"):
         log(f"{sym} seed{s}: done marker exists, skip"); return
     while True:
         with run_lock:
@@ -69,7 +74,8 @@ def job(sym, s):
         time.sleep(30)
     try:
         log(f"{sym} seed{s}: TRAIN start")
-        env = {"SEED": str(s), "CFGIDX": "1", "BUDGETS": "5", "SAVE_PF": "1", "PFTAG": f"_S{s}"}
+        env = {"SEED": str(s), "CFGIDX": "1", "BUDGETS": "5", "SAVE_PF": "1", "PFTAG": f"_S{s}",
+               "OUT_SUB": OUT_A}
         rc = run(["/usr/bin/python3", f"{XD}/{TRAINER}", sym, SUB_A, "0", NTHREAD],
                  env, f"{XD}/train_{sym}_s{s}.log")
         if rc != 0:
@@ -78,8 +84,8 @@ def job(sym, s):
                      env, f"{XD}/train_{sym}_s{s}.log")
         if rc != 0:
             log(f"{sym} seed{s}: FAILED rc={rc}"); return
-        rc = run(["/usr/bin/python3", f"{XD}/perseed_from_pf.py", sym, str(s)], {},
-                 f"{XD}/train_{sym}_s{s}.log")
+        rc = run(["/usr/bin/python3", f"{XD}/perseed_from_pf.py", sym, str(s)],
+                 {"XSYM_SUB": OUT_A}, f"{XD}/train_{sym}_s{s}.log")
         log(f"{sym} seed{s}: DONE (perseed rc={rc})")
     finally:
         with run_lock:
@@ -98,14 +104,15 @@ def main():
     for t in ths:
         t.join()
     for sym in sorted(set(s for s, _ in JOBS)):
-        if all(gcs_exists(f"{GB}/{SUB_A}/OPTUNA_IC_{sym}_qm0_SEED{k}.json") for k in range(4)):
-            rc = run(["/usr/bin/python3", f"{XD}/ens_sym.py", sym], {}, f"{XD}/ens_{sym}.log")
+        if all(gcs_exists(f"{GB}/{OUT_A}/OPTUNA_IC_{sym}_qm0_SEED{k}.json") for k in range(4)):
+            rc = run(["/usr/bin/python3", f"{XD}/ens_sym.py", sym], {"XSYM_SUB": OUT_A},
+                     f"{XD}/ens_{sym}.log")
             log(f"{sym}: ENS done rc={rc}")
         else:
             log(f"{sym}: ENS skipped (not all 4 seeds present)")
     log("xsym v2 ALL DONE")
     subprocess.run(["gsutil", "-q", "cp", f"{XD}/orchestrator2.log",
-                    f"{GB}/{SUB_A}/xsym32_orchestrator2_log.txt"])
+                    f"{GB}/{OUT_A}/xsym32_orchestrator2_log.txt"])
 
 
 if __name__ == "__main__":

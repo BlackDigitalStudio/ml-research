@@ -45,6 +45,9 @@ ranks above any single static strategy (user directive 2026-07-11, clarified
    - `orchestrate2.py` — seed-parallel job runner: independent (symbol, seed) jobs,
      `XSYM_JOBS="BNB:1,BTC:3,..."`, `XSYM_NTHREAD`, slot pool via `SLOTS` file
      (live-adjustable). Skip/done marker = `OPTUNA_IC_{SYM}_qm0_SEED{s}.json` in GCS.
+     `XSYM_OUT_SUB` = artifact subdir when it differs from the dataset subdir
+     (DROP_COLS ablations etc.): markers/perseed/ens point there, trainer gets
+     `OUT_SUB`; default co-locates with the dataset (rev8 behavior).
    - `orchestrate.py` (v1) — build->combine->anch->train chains per symbol; still the
      entry point when datasets must be BUILT first. Seeds sequential (superseded by
      v2 for training; use v1 for builds, v2 for training). `XSYM_BUILD_SHARDS=K`
