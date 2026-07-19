@@ -27,6 +27,7 @@ v2.1, 4 сида, t5, батареи OPS-GATES rev2.
   меньше деплой-класса (+12..+16).
 - Артефакты: `maker_labels_tb3s_h150d{,anch}` BNB/LTC/SOL + `_v2notod/` (36 SEED json,
   216 PERFOLD, 576 model-дампов, 9 ENS, rev19_logs.tgz). VM xsym-32 stopped 2026-07-18.
+- rev20 (BNB deep-dive, джиттер отменён юзером): сиды 4-7 draw-FAIL (магнитуда +2.51 была дро-чувствительна; 8-seed DYN +2.09), пул-сид-гейт -2.37 FAIL (per-seed отрицателен — эдж чисто ансамблевый); рабочая форма BNB = КОНСЕНСУС (монотонно: >=7/8 +5.91 bpd+9.79 P90 0 negmo; 8/8 +10.05 P94), ETH-флор переносится отрицательно; harmony подтверждён в обе стороны; потолок ~+1.5%/мес @0.5 — резервная ячейка, капитал не предложен (ledger bnb_levers-20260719, s31).
 - Открытые ходы (решение юзера): rev14/15-рычаги на BNB-notod (8 сидов, tau-floor, FIXQ),
   hold-sweep, либо остановить расширение на 4 задеплоенных символах.
 Related: [[xsym-cross-symbol-run]], [[btc-eth-honest-rebuild]], [[scope-bound-claims]].
