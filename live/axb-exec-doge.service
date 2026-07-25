@@ -11,8 +11,9 @@ Environment=HOME=/home/delmi
 Environment=MODE=live
 Environment=SYMK=DOGE
 Environment=EXEC_SYM=DOGEUSDC
-Environment=TRADE_BUDGET=5
+Environment=TRADE_BUDGET=10
 Environment=SIZE_FRAC=0.5
+Environment=MAX_CONC=1
 Environment=WORKDIR=/home/delmi/axb_h150
 Environment=SHADOW_GCS=research_runs/axb_shadow_h150/DOGE
 WorkingDirectory=/home/delmi/axb_h150

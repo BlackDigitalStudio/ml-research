@@ -3,13 +3,26 @@
 
 Owns everything that talks money: the battle-tested maker trade lifecycle
 (GTX entry at touch / hold from fill / pegged maker exit / catastrophic-only
-backstops) copied verbatim from live/axb_live.py, its own DOGEUSDC bookTicker
-WS feed, and the hourly GCS upload of the engine's decision logs.
+backstops) copied verbatim from live/axb_live.py, its own bookTicker WS feed,
+and the hourly GCS upload of the engine's decision logs.
+
+v3 (measured-policy parity, 2026-07-26): the single-position `busy` flag is
+replaced by a slot pool of MAX_CONC concurrent independent trades. Every
+validation cell (year walk-forward, recorder-EV deploy gates) scores EVERY
+above-tau 3s-grid decision as an independent trade with its own 150s hold —
+overlapping freely. The old busy-lock silently dropped every signal that
+arrived while one trade ran (measured live DOGE FIXQ t10: 85.6% of budget
+signals dropped; lock-sim on the gate window keeps ~4% of measured bpd).
+Slot semantics: same-side signals stack up to MAX_CONC positions, each trade
+sized to a FIXED per-trade notional and exited by ITS OWN quantity
+(reduce-only); an opposite-side signal while any trade is open is skipped
+(one-way position mode; measured opposite-side overlap: DOGE 4.3%, XRP 0%).
+MAX_CONC=1 preserves the legacy single-position behavior and legacy sizing.
 
 Interface: Unix socket WORKDIR/exec.sock; one JSON line per command
 {"side":"long"|"short","score":x} -> reply {"executed":true|false}\n.
-Guards (busy / day-loss halt / day-trade halt / stale touch) are inside
-Executor.maybe_trade, exactly as before.
+Guards (slots / day-loss halt / day-trade halt / stale touch) are inside
+Executor.maybe_trade.
 """
 from __future__ import annotations
 
@@ -37,15 +50,20 @@ SHADOW_GCS = os.environ.get("SHADOW_GCS", f"research_runs/axb_shadow_h150/{SYMK}
 MODE = os.environ.get("MODE", "shadow")
 TRADE_BUDGET = float(os.environ.get("TRADE_BUDGET", "5"))
 SIZE_FRAC = float(os.environ.get("SIZE_FRAC", "1.0"))
-LEVERAGE = 2
+LEVERAGE = int(os.environ.get("LEVERAGE", "2"))
+NOTIONAL_MULT = float(os.environ.get("NOTIONAL_MULT", "1.0"))
+# Concurrency of the measured policy: every above-tau decision is its own trade.
+# 1 = legacy single-position busy-lock (and legacy avail-based sizing).
+MAX_CONC = int(os.environ.get("MAX_CONC", "1"))
 ENTRY_WIN_S = float(os.environ.get("ENTRY_WIN_S", "60.0"))
 HOLD_S = float(os.environ.get("HOLD_S", "150.0"))
-PX_DEC = {"DOGEUSDC": 5, "BTCUSDC": 1, "XRPUSDC": 4}.get(EXEC_SYM, 5)
-QTY_DEC = {"DOGEUSDC": 0, "BTCUSDC": 3, "XRPUSDC": 1}.get(EXEC_SYM, 0)
+PX_DEC = {"DOGEUSDC": 5, "BTCUSDC": 1, "XRPUSDC": 4, "ETHUSDC": 2}.get(EXEC_SYM, 5)
+QTY_DEC = {"DOGEUSDC": 0, "BTCUSDC": 3, "XRPUSDC": 1, "ETHUSDC": 3}.get(EXEC_SYM, 0)
+MIN_NOTIONAL = {"ETHUSDC": 20.0}.get(EXEC_SYM, 5.0)
 EXIT_MAX_S = float(os.environ.get("EXIT_MAX_S", "86400"))
 HARD_LOSS_BP = float(os.environ.get("HARD_LOSS_BP", "300"))
 DAY_LOSS_HALT = 0.05
-DAY_TRADES_HALT = 40
+DAY_TRADES_HALT = int(os.environ.get("DAY_TRADES_HALT", "40"))
 REST_BASE = "https://fapi.binance.com"
 WS_BASE = "wss://fstream.binance.com"
 
@@ -99,13 +117,17 @@ def _err(r) -> str | None:
 
 
 class Executor:
-    """One trade at a time: GTX entry at touch -> hold -> pegged reduce-only maker exit.
-    Verbatim trade lifecycle from live/axb_live.py (first-trade execution parity
-    verified against the offline simulator 2026-07-08)."""
+    """Slot pool of independent trades (measured-policy parity): GTX entry at
+    touch -> hold -> pegged reduce-only maker exit, each trade exiting its OWN
+    filled quantity. Same-side trades stack up to MAX_CONC; opposite-side
+    signals are skipped while any trade is open (one-way position mode).
+    Trade lifecycle verbatim from live/axb_live.py (first-trade execution
+    parity verified against the offline simulator 2026-07-08)."""
 
     def __init__(self, rest: Rest) -> None:
         self.rest = rest
-        self.busy = False
+        self.active: list[dict] = []
+        self._mu = threading.Lock()
         self.halted = ""
         self.day = ""
         self.day_pnl = 0.0
@@ -140,13 +162,19 @@ class Executor:
             f.write(json.dumps(rec) + "\n")
         log.info("TRADE %s", json.dumps(rec))
 
-    def _avail_usdc(self) -> float:
+    def _balance_row(self) -> dict:
         r = self.rest.call("GET", "/fapi/v2/balance")
         if isinstance(r, list):
             for b in r:
                 if b["asset"] == "USDC":
-                    return float(b["availableBalance"])
-        return 0.0
+                    return b
+        return {}
+
+    def _avail_usdc(self) -> float:
+        return float(self._balance_row().get("availableBalance", 0) or 0)
+
+    def _wallet_usdc(self) -> float:
+        return float(self._balance_row().get("balance", 0) or 0)
 
     def _order(self, **p) -> dict:
         return self.rest.call("POST", "/fapi/v1/order", p)
@@ -184,33 +212,54 @@ class Executor:
         r = self.rest.call("POST", "/fapi/v1/leverage", {"symbol": EXEC_SYM, "leverage": LEVERAGE})
         log.info("executor ready: leverage resp=%s", r if _err(r) else r.get("leverage"))
 
-    def run_trade(self, decision_ts: float, side_long: bool, score: float) -> None:
-        try:
-            self._trade(decision_ts, side_long, score)
-        except Exception:
-            log.exception("trade lifecycle crashed — emergency flatten")
-            try:
-                self.rest.call("DELETE", "/fapi/v1/allOpenOrders", {"symbol": EXEC_SYM})
-                amt = self._position_amt()
-                if amt != 0:
-                    self._market_close("SELL" if amt > 0 else "BUY", abs(amt))
-                    self._tlog({"ev": "crash_flatten", "amt": amt})
-            except Exception:
-                log.exception("emergency flatten failed")
-        finally:
-            self.busy = False
+    def _qty_step(self) -> float:
+        return 10 ** -QTY_DEC
 
-    def _trade(self, decision_ts: float, side_long: bool, score: float) -> None:
+    def _floor_qty(self, q: float) -> float:
+        step = 10 ** QTY_DEC
+        return float(np.floor(max(q, 0.0) * step)) / step
+
+    def run_trade(self, slot: dict, decision_ts: float, side_long: bool, score: float) -> None:
+        try:
+            self._trade(slot, decision_ts, side_long, score)
+        except Exception:
+            log.exception("trade lifecycle crashed — emergency close own quantity")
+            try:
+                for oid in slot.get("oids", []):
+                    try:
+                        self._cancel(oid)
+                    except Exception:
+                        pass
+                rem = self._floor_qty(slot.get("filled", 0.0) - slot.get("exited", 0.0))
+                net = abs(self._position_amt())
+                q = self._floor_qty(min(rem, net))
+                if q > 0:
+                    self._market_close("SELL" if side_long else "BUY", q)
+                    self._tlog({"ev": "crash_flatten", "qty": q})
+            except Exception:
+                log.exception("emergency close failed")
+        finally:
+            with self._mu:
+                if slot in self.active:
+                    self.active.remove(slot)
+
+    def _trade(self, slot: dict, decision_ts: float, side_long: bool, score: float) -> None:
         entry_side = "BUY" if side_long else "SELL"
         exit_side = "SELL" if side_long else "BUY"
         avail = self._avail_usdc()
-        if self.day_bal0 <= 0:
-            self.day_bal0 = max(avail, 1e-9)
+        with self._mu:
+            if self.day_bal0 <= 0:
+                self.day_bal0 = max(avail, 1e-9)
         px = self.usdc_bid if side_long else self.usdc_ask
-        raw = avail * SIZE_FRAC / px * (1 - 1e-3)
-        step = 10 ** QTY_DEC
-        qty = float(np.floor(raw * step)) / step
-        if qty * px < 5.0:
+        if MAX_CONC > 1:
+            # fixed per-trade notional (equal-weight trades, as the validation
+            # cells assume), capped by the margin actually available
+            per_notional = self._wallet_usdc() * SIZE_FRAC * NOTIONAL_MULT / MAX_CONC
+            raw = min(per_notional, max(avail, 0.0) * LEVERAGE) / px * (1 - 1e-3)
+        else:
+            raw = avail * SIZE_FRAC * NOTIONAL_MULT / px * (1 - 1e-3)
+        qty = self._floor_qty(raw)
+        if qty * px < MIN_NOTIONAL:
             self._tlog({"ev": "skip_small", "avail": avail, "qty": qty})
             return
         r = self._place_gtx(entry_side, qty, px, reduce_only=False)
@@ -221,8 +270,11 @@ class Executor:
                 self._tlog({"ev": "entry_reject", "err": _err(r) or r.get("status"), "px": px})
                 return
         oid = int(r["orderId"])
+        slot.setdefault("oids", []).append(oid)
+        with self._mu:
+            conc = len(self.active)
         self._tlog({"ev": "entry_placed", "oid": oid, "side": entry_side, "qty": qty,
-                    "px": px, "score": score})
+                    "px": px, "score": score, "conc": conc})
         filled = 0.0
         entry_px = px
         status = "NEW"
@@ -246,14 +298,28 @@ class Executor:
         if filled == 0:
             self._tlog({"ev": "entry_miss", "oid": oid})
             return
+        slot["filled"] = filled
+        slot["exited"] = 0.0
         fill_ts = time.time()
         self._tlog({"ev": "entry_fill", "oid": oid, "filled": filled, "avg_px": entry_px})
         time.sleep(max(0.0, fill_ts + HOLD_S - time.time()))
         t_exit0 = time.time()
         exit_oid = 0
-        last_oid = 0
-        exit_px = 0.0
+        exit_px_q = 0.0     # notional-weighted exit price accumulator
+        exited = 0.0        # own quantity already exited
+        cur_px = 0.0        # price of the resting exit order
         backstop = ""
+
+        def retire(o: dict) -> None:
+            """Fold a finished/canceled exit order's fills into the accumulators."""
+            nonlocal exited, exit_px_q
+            q = float(o.get("executedQty", 0) or 0)
+            p_ = float(o.get("avgPrice") or 0) or cur_px
+            if q > 0:
+                exited += q
+                exit_px_q += q * p_
+                slot["exited"] = exited
+
         while True:
             now = time.time()
             mid = (self.usdc_bid + self.usdc_ask) / 2
@@ -265,64 +331,98 @@ class Executor:
             if backstop:
                 if exit_oid:
                     self._cancel(exit_oid)
-                amt = self._position_amt()
-                if amt != 0:
-                    self._market_close(exit_side, abs(amt))
+                    o = self._get_order(exit_oid)
+                    if not _err(o):
+                        retire(o)
+                rem = self._floor_qty(min(filled - exited, abs(self._position_amt())))
+                if rem > 0:
+                    self._market_close(exit_side, rem)
                 break
             want = self.usdc_ask if side_long else self.usdc_bid
             if exit_oid:
                 o = self._get_order(exit_oid)
                 st = o.get("status", "")
                 if st == "FILLED":
-                    exit_px = float(o["avgPrice"])
+                    retire(o)
+                    exit_oid = 0
                     break
-                adverse = (want < exit_px - 1e-9) if side_long else (want > exit_px + 1e-9)
+                adverse = (want < cur_px - 1e-9) if side_long else (want > cur_px + 1e-9)
                 if adverse and st in ("NEW", "PARTIALLY_FILLED"):
                     self._cancel(exit_oid)
-                    last_oid = exit_oid
+                    o = self._get_order(exit_oid)
+                    if not _err(o):
+                        retire(o)
                     exit_oid = 0
             if not exit_oid:
-                amt = abs(self._position_amt())
-                if amt == 0:
-                    o = self._get_order(last_oid) if last_oid else {}
-                    exit_px = float(o.get("avgPrice") or want) if not _err(o) else want
+                rem = self._floor_qty(filled - exited)
+                if rem <= 0:
                     break
-                r = self._place_gtx(exit_side, amt, want, reduce_only=True)
+                net = abs(self._position_amt())
+                if net < self._qty_step() / 2:
+                    # position ran out externally (backstop/liquidation elsewhere):
+                    # mark the residual at touch, as before
+                    exit_px_q += rem * want
+                    exited += rem
+                    slot["exited"] = exited
+                    break
+                place = self._floor_qty(min(rem, net))
+                r = self._place_gtx(exit_side, place, want, reduce_only=True)
                 if not _err(r) and r.get("status") != "EXPIRED":
                     exit_oid = int(r["orderId"])
-                    exit_px = want
+                    slot.setdefault("oids", []).append(exit_oid)
+                    cur_px = want
             time.sleep(0.7)
         if backstop:
             time.sleep(1.0)
             inc = self.rest.call("GET", "/fapi/v1/userTrades",
                                  {"symbol": EXEC_SYM, "startTime": int(t_exit0 * 1000)})
-            exit_px = (float(inc[-1]["price"]) if isinstance(inc, list) and inc else
-                       (self.usdc_bid if side_long else self.usdc_ask))
+            mkt_px = (float(inc[-1]["price"]) if isinstance(inc, list) and inc else
+                      (self.usdc_bid if side_long else self.usdc_ask))
+            rem = filled - exited
+            if rem > 0:
+                exit_px_q += rem * mkt_px
+                exited += rem
+                slot["exited"] = exited
+        exit_px = exit_px_q / max(exited, 1e-12) if exited > 0 else entry_px
         pnl_bp = ((exit_px - entry_px) / entry_px if side_long else (entry_px - exit_px) / entry_px) * 1e4
         pnl_usd = pnl_bp / 1e4 * entry_px * filled
         if backstop:
             pnl_usd -= 4e-4 * exit_px * filled
-        self.day_pnl += pnl_usd
-        self.day_trades += 1
+        with self._mu:
+            self.day_pnl += pnl_usd
+            self.day_trades += 1
+            day_pnl, day_trades = self.day_pnl, self.day_trades
         self._tlog({"ev": "closed", "side": "long" if side_long else "short", "qty": filled,
                     "entry_px": entry_px, "exit_px": exit_px, "pnl_bp": round(pnl_bp, 2),
                     "pnl_usd": round(pnl_usd, 5), "backstop": backstop,
                     "exit_chase_s": round(time.time() - t_exit0, 1),
-                    "day_pnl": round(self.day_pnl, 5), "day_trades": self.day_trades})
-        if self.day_pnl < -DAY_LOSS_HALT * self.day_bal0:
+                    "day_pnl": round(day_pnl, 5), "day_trades": day_trades})
+        if day_pnl < -DAY_LOSS_HALT * self.day_bal0:
             self.halted = "day_loss"
-            self._tlog({"ev": "halt", "why": "day_loss", "day_pnl": self.day_pnl})
-        if self.day_trades >= DAY_TRADES_HALT:
+            self._tlog({"ev": "halt", "why": "day_loss", "day_pnl": day_pnl})
+        if day_trades >= DAY_TRADES_HALT:
             self.halted = "day_trades"
-            self._tlog({"ev": "halt", "why": "day_trades", "n": self.day_trades})
+            self._tlog({"ev": "halt", "why": "day_trades", "n": day_trades})
 
     def maybe_trade(self, side_long: bool, score: float) -> bool:
         self._roll_day()
-        if self.busy or self.halted or not self.touch_ok():
+        if self.halted or not self.touch_ok():
             return False
-        self.busy = True
+        with self._mu:
+            if len(self.active) >= MAX_CONC:
+                return False
+            opp = any(t["side_long"] != side_long for t in self.active)
+            if not opp:
+                slot = {"side_long": side_long}
+                self.active.append(slot)
+        if opp:
+            # one-way position mode: an opposite-side trade would net against
+            # the open ones and break per-trade reduce-only exits — skip it
+            self._tlog({"ev": "skip_opposite", "side": "long" if side_long else "short",
+                        "score": score})
+            return False
         decision_ts = time.time()
-        threading.Thread(target=self.run_trade, args=(decision_ts, side_long, score),
+        threading.Thread(target=self.run_trade, args=(slot, decision_ts, side_long, score),
                          daemon=True).start()
         return True
 
@@ -372,6 +472,11 @@ async def uploader() -> None:
             ddir = f"{WORK}/decisions"
             for fn in sorted(os.listdir(ddir)):
                 mkt.blob(f"{SHADOW_GCS}/decisions/{fn}").upload_from_filename(f"{ddir}/{fn}")
+            # engine feature-capture files (bit-exact replay inputs)
+            fdir = f"{WORK}/features"
+            if os.path.isdir(fdir):
+                for fn in sorted(os.listdir(fdir)):
+                    mkt.blob(f"{SHADOW_GCS}/features/{fn}").upload_from_filename(f"{fdir}/{fn}")
             log.info("decisions uploaded")
         except Exception as ex:
             log.warning("decision upload failed: %s", ex)
@@ -385,8 +490,8 @@ async def main() -> None:
     if MODE == "live":
         EXEC = Executor(Rest())
         await asyncio.to_thread(EXEC.startup_recover)
-        log.info("MODE=live: exec %s budget=t%d size_frac=%.2f entry=%.0fs hold=%.0fs",
-                 EXEC_SYM, int(TRADE_BUDGET), SIZE_FRAC, ENTRY_WIN_S, HOLD_S)
+        log.info("MODE=live: exec %s budget=t%d size_frac=%.2f mult=%.2f conc=%d entry=%.0fs hold=%.0fs",
+                 EXEC_SYM, int(TRADE_BUDGET), SIZE_FRAC, NOTIONAL_MULT, MAX_CONC, ENTRY_WIN_S, HOLD_S)
     else:
         log.info("MODE=shadow: commands acknowledged but not executed")
     server = await asyncio.start_unix_server(handle_cmd, path=sock)

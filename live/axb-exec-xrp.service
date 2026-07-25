@@ -13,6 +13,7 @@ Environment=SYMK=XRP
 Environment=EXEC_SYM=XRPUSDC
 Environment=TRADE_BUDGET=5
 Environment=SIZE_FRAC=0.5
+Environment=MAX_CONC=1
 Environment=WORKDIR=/home/delmi/axb_h150
 WorkingDirectory=/home/delmi/axb_h150
 ExecStart=/usr/bin/python3 /home/delmi/axb_exec.py

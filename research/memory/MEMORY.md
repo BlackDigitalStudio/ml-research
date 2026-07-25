@@ -1,5 +1,7 @@
 # Memory index
 
+- [Exec policy lock divergence](exec-policy-lock-divergence.md) — 2026-07-26: прод-exec = одна позиция за раз, а ВСЕ валидационные числа считали каждый сигнал независимой перекрывающейся сделкой; live держит ~4% (DOGE)/23% (XRP) посчитанного bpd; exec v3 (слот-пул MAX_CONC) написан+оттестирован, деплой ждёт решения по M/капиталу
+
 - [Research home = ml-research](research-home-ml-research.md) — репо переименован scalper-bot→ml-research и остаётся домом исследований (история/ветки несущие); trading_algorithm = витрина деплоя; канонический стор памяти = research/memory/ в репо
 - [Research runtime infra](research-runtime-infra.md) — research/runtime/ in-repo = канонические раннеры+KNOWN_PITFALLS; расширять, не переписывать; скорость исследований важнее отдельной стратегии
 - [Scope-bound claims](scope-bound-claims.md) — READ FIRST for any quantitative recall: every number is a measured cell (symbol×year×execution×features×protocol), not a law; noA conclusions ≠ deploy constraints; single walk-forward draws ≠ point estimates
