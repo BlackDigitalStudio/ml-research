@@ -14,9 +14,9 @@ Environment=EXEC_SYM=DOGEUSDC
 Environment=TRADE_BUDGET=10
 Environment=WORKDIR=/home/delmi/axb_h150
 Environment=SIZE_FRAC=1.0
-Environment=MAX_CONC=8
-Environment=NOTIONAL_MULT=2.2
-Environment=LEVERAGE=3
+Environment=MAX_CONC=15
+Environment=NOTIONAL_MULT=4.5
+Environment=LEVERAGE=8
 Environment=DAY_TRADES_HALT=120
 Environment=SHADOW_GCS=research_runs/axb_shadow_h150/DOGE
 WorkingDirectory=/home/delmi/axb_h150
