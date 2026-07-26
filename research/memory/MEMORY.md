@@ -1,5 +1,6 @@
 # Memory index
 
+- [Live deposit is an instrument](live-deposit-is-an-instrument.md) — ДИРЕКТИВА 2026-07-26: прода и дохода нет, депозит ~20 USDC = измерительный инструмент; критерий выбора параметров = информация на единицу риска, не ROI; операционный риск = потеря потока данных (кошелёк <17.40 → minNotional → инстанс молчит)
 - [Exec policy lock divergence](exec-policy-lock-divergence.md) — 2026-07-26: прод-exec = одна позиция за раз, а ВСЕ валидационные числа считали каждый сигнал независимой перекрывающейся сделкой; live держит ~4% (DOGE)/23% (XRP) посчитанного bpd; exec v3 (слот-пул MAX_CONC) написан+оттестирован, деплой ждёт решения по M/капиталу
 
 - [Research home = ml-research](research-home-ml-research.md) — репо переименован scalper-bot→ml-research и остаётся домом исследований (история/ветки несущие); trading_algorithm = витрина деплоя; канонический стор памяти = research/memory/ в репо
