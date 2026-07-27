@@ -73,6 +73,14 @@ struct Args {
     /// Skip writing X_lob.npy (3×20×W per sample) — big and unused by the maker pipeline.
     #[arg(long)]
     skip_xlob: bool,
+    /// ADDITIVE (OPS-EXEC rev16): also write flow_lvl_paths.npy [ns, h, 2] =
+    /// [taker SELL volume at price <= entry_long, taker BUY volume at price >= entry_short]
+    /// per forward tick — i.e. the volume that actually traded THROUGH our resting level.
+    /// `flow_paths.npy` (price-agnostic) cannot express this, which is why the maker-entry
+    /// model had to fall back on an unconditional gap-through fill. Prices are read in a
+    /// SEPARATE pass so the frozen aggregation path stays byte-identical when this is off.
+    #[arg(long)]
+    emit_level_flow: bool,
 }
 
 /// Compact per-row slice of depth kept in RAM across batches: top-1 prices,
@@ -378,6 +386,81 @@ fn main() -> Result<()> {
         );
     }
 
+    // === Pass 2b (opt-in, OPS-EXEC rev16): price-resolved trades → CSR by tick ===
+    // Separate scan on purpose: pass 2a above is the frozen aggregation and is not
+    // touched, so a run without --emit-level-flow stays byte-identical.
+    let mut lvl_off: Vec<u32> = Vec::new();
+    let mut lvl_px: Vec<f32> = Vec::new();
+    let mut lvl_q: Vec<f32> = Vec::new();
+    let mut lvl_sell: Vec<bool> = Vec::new();
+    if a.emit_level_flow {
+        let trades_path = a.trades.as_ref()
+            .context("--emit-level-flow requires --trades")?;
+        let t_lvl = Instant::now();
+        let mut ticks: Vec<u32> = Vec::new();
+        let file = File::open(trades_path)
+            .with_context(|| format!("open {:?}", trades_path))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let nested_tr = builder.schema().index_of("quantity").is_ok();
+        let reader = builder.build()?;
+        for b in reader {
+            let b = b?;
+            let sc = b.schema();
+            let ts = b.column(sc.index_of("timestamp")?).as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| anyhow!("trades ts not Int64"))?;
+            let px = b.column(sc.index_of("price").context("trades missing price")?)
+                .as_any().downcast_ref::<Float64Array>()
+                .ok_or_else(|| anyhow!("trades price not Float64"))?;
+            let (qty, is_sell): (&Float64Array, Vec<bool>) = if nested_tr {
+                let q = b.column(sc.index_of("quantity")?).as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or_else(|| anyhow!("trades quantity not Float64"))?;
+                let sdl = b.column(sc.index_of("is_buyer_maker")?).as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .ok_or_else(|| anyhow!("trades is_buyer_maker not Bool"))?;
+                (q, (0..b.num_rows()).map(|i| sdl.value(i)).collect())
+            } else {
+                let q = b.column(sc.index_of("amount")?).as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or_else(|| anyhow!("trades amount not Float64"))?;
+                let side_arr = arrow::compute::cast(
+                    b.column(sc.index_of("side")?), &arrow::datatypes::DataType::Utf8)
+                    .map_err(|e| anyhow!("trades.side cast to Utf8: {e}"))?;
+                let sd = side_arr.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| anyhow!("trades.side not Utf8 after cast"))?;
+                (q, (0..b.num_rows()).map(|i| sd.value(i) == "sell").collect())
+            };
+            for i in 0..b.num_rows() {
+                // same ts normalisation as pass 2a: NESTED ms, FLAT ns -> ms
+                let t = if nested_tr { ts.value(i) } else { ts.value(i) / 1_000_000 };
+                let r = depth_ts.partition_point(|probe| *probe <= t);
+                let idx = if r == 0 { 0 } else { (r - 1).min(n - 1) };
+                ticks.push(idx as u32);
+                lvl_px.push(px.value(i) as f32);
+                lvl_q.push(qty.value(i) as f32);
+                lvl_sell.push(is_sell[i]);
+            }
+        }
+        // ticks are non-decreasing (trades are ts-ordered, depth_ts is sorted) -> the
+        // parallel arrays are already grouped by tick; verify instead of sorting.
+        anyhow::ensure!(
+            ticks.windows(2).all(|p| p[0] <= p[1]),
+            "trades are not ts-ordered; level-flow CSR would be wrong"
+        );
+        lvl_off = vec![0u32; n + 1];
+        for &t in &ticks {
+            lvl_off[t as usize + 1] += 1;
+        }
+        for i in 0..n {
+            lvl_off[i + 1] += lvl_off[i];
+        }
+        eprintln!(
+            "build_samples: level-flow pass — {} priced trades in {:.2}s",
+            lvl_px.len(), t_lvl.elapsed().as_secs_f64()
+        );
+    }
+
     // === Preallocate output arrays (small) + mmap .npy outputs for big ones ===
     let mut entry_long = Array1::<f64>::zeros(ns);
     let mut entry_short = Array1::<f64>::zeros(ns);
@@ -412,6 +495,15 @@ fn main() -> Result<()> {
     let mut ts_paths_writer = NpyRowStream::<i64>::create(
         a.out_dir.join("ts_paths.npy"), &[ns, h as usize],
     )?;
+    // flow_lvl_paths[i, t] = [sell vol at px <= entry_long[i], buy vol at px >= entry_short[i]]
+    // — the price-resolved counterpart of flow_paths (OPS-EXEC rev16). Opt-in.
+    let mut flow_lvl_writer = if a.emit_level_flow {
+        Some(NpyRowStream::<f32>::create(
+            a.out_dir.join("flow_lvl_paths.npy"), &[ns, h as usize, 2],
+        )?)
+    } else {
+        None
+    };
     let mut entry_book = Array2::<f64>::zeros((ns, 2));
     // entry_q[i] = [bid_qty0, ask_qty0] at entry — the top-1 resting size a
     // maker order must clear (queue-ahead) when it joins the near side.
@@ -478,6 +570,10 @@ fn main() -> Result<()> {
                 &mut flow_paths_writer,
                 &mut ts_paths_writer,
                 x_lob_writer.as_mut(),
+                flow_lvl_writer.as_mut().map(|wtr| (
+                    wtr,
+                    LevelTrades { off: &lvl_off, px: &lvl_px, q: &lvl_q, sell: &lvl_sell },
+                )),
             )?;
             next_sample_i += 1;
         }
@@ -537,8 +633,20 @@ fn main() -> Result<()> {
     if let Some(wtr) = x_lob_writer {
         wtr.finish()?;
     }
+    if let Some(wtr) = flow_lvl_writer {
+        wtr.finish()?;
+    }
     eprintln!("build_samples: all outputs written ({} samples)", ns);
     Ok(())
+}
+
+/// Price-resolved trades in CSR-by-tick form (OPS-EXEC rev16). `off` has n+1 entries;
+/// trades of tick r occupy `off[r]..off[r+1]` of the parallel px/q/sell arrays.
+struct LevelTrades<'a> {
+    off: &'a [u32],
+    px: &'a [f32],
+    q: &'a [f32],
+    sell: &'a [bool],
 }
 
 fn emit_sample(
@@ -564,6 +672,7 @@ fn emit_sample(
     flow_paths_writer: &mut NpyRowStream<f32>,
     ts_paths_writer: &mut NpyRowStream<i64>,
     x_lob_writer: Option<&mut NpyRowStream<f32>>,
+    level_flow: Option<(&mut NpyRowStream<f32>, LevelTrades)>,
 ) -> Result<()> {
     let end = s + w - 1;
 
@@ -628,6 +737,36 @@ fn emit_sample(
     book_paths_writer.write_row(&book_path_row)?;
     flow_paths_writer.write_row(&flow_path_row)?;
     ts_paths_writer.write_row(&ts_path_row)?;
+
+    // Price-resolved flow at THIS sample's entry levels (OPS-EXEC rev16).
+    if let Some((wtr, lt)) = level_flow {
+        let long_lvl = entry_long[i];
+        let short_lvl = entry_short[i];
+        let eps_l = long_lvl * 1e-7;
+        let eps_s = short_lvl * 1e-7;
+        let mut row = vec![0f32; h * 2];
+        for k in 0..h {
+            let r = end + 1 + k;
+            let (a0, b0) = (lt.off[r] as usize, lt.off[r + 1] as usize);
+            let mut sell_thru = 0f32;
+            let mut buy_thru = 0f32;
+            for j in a0..b0 {
+                let p = lt.px[j] as f64;
+                if lt.sell[j] {
+                    // taker SELL trading at or below our resting BUY level hits us
+                    if p <= long_lvl + eps_l {
+                        sell_thru += lt.q[j];
+                    }
+                } else if p >= short_lvl - eps_s {
+                    // taker BUY trading at or above our resting SELL level hits us
+                    buy_thru += lt.q[j];
+                }
+            }
+            row[k * 2] = sell_thru;
+            row[k * 2 + 1] = buy_thru;
+        }
+        wtr.write_row(&row)?;
+    }
 
     // X_lob[i] = (3, 20, w) f32. Channel 0/1: bid/ask qtys per level per tick.
     // Channel 2 row 0/1: tick_buy/sell_vol at each tick. Rest zero.

@@ -93,12 +93,16 @@ struct Args {
     /// PEGGED-EXIT queue = exit_queue_mult × entry_q(close-touch). ALWAYS-LAST => >=1 (full depth).
     #[arg(long, default_value_t = 1.0)]
     exit_queue_mult: f64,
-    /// STRICT entry fill (OPS-EXEC rev15): a strict gap past our level no longer fills
-    /// unconditionally — it only zeroes the queue ahead (the market orders at our level
-    /// are gone, so we are alone at the touch) and STILL requires opposing taker flow to
-    /// hit us. OFF by default: every historical cell stays byte-reproducible.
+    /// STRICT entry fill (OPS-EXEC rev16): pure queue model on PRICE-RESOLVED flow —
+    /// cumulative taker volume that traded THROUGH our level clears the queue ahead, and
+    /// nothing else fills us. Removes the library's unconditional gap-through branch.
+    /// REQUIRES --level-flow-paths. OFF by default: historical cells stay byte-reproducible.
     #[arg(long, default_value_t = false)]
     strict_entry_fill: bool,
+    /// flow_lvl_paths.npy from build_samples --emit-level-flow: [ns, h, 2] =
+    /// [sell volume at price <= entry_long, buy volume at price >= entry_short] per tick.
+    #[arg(long)]
+    level_flow_paths: Option<PathBuf>,
 
     // ─── TIME-BASED windows (opt-in). Event-driven books (Cryptolake) have variable
     //     tick density, so tick-count windows are NOT wall-clock. With --ts-paths +
@@ -403,87 +407,49 @@ fn compute_metrics(
     )
 }
 
-/// STRICT maker entry (OPS-EXEC rev15, `--strict-entry-fill`). Same contract as
-/// `live_sim::simulate_maker_entry`, one semantic change:
+/// STRICT maker entry (OPS-EXEC rev16, `--strict-entry-fill` + `--level-flow-paths`).
 ///
-/// the library version treats a strict gap past our level as an UNCONDITIONAL fill
-/// (`if b.bid < level_px - eps { return FILLED }`) — no flow required, queue ignored.
-/// That collapses two physically different cases: the resting size at our level was
-/// TRADED through (we fill only if the flow exceeded the queue ahead of us) versus it
-/// was CANCELLED (we are merely alone at the top of book, unfilled). Measured on the
-/// live DOGEUSDC anchor, 3/3 phantom entry fills came through that branch.
+/// The library `live_sim::simulate_maker_entry` treats a strict gap past our level as an
+/// UNCONDITIONAL fill (`if b.bid < level_px - eps { return FILLED }`) — no flow required,
+/// queue ignored. That collapses two physically different cases: the resting size at our
+/// level was TRADED through (we fill only if the flow exceeded the queue ahead of us)
+/// versus it was CANCELLED (we are merely alone at the top of book, unfilled). Measured
+/// on the live DOGEUSDC anchor, 3/3 phantom entry fills came through that branch.
 ///
-/// Strict semantics: a gap past our level means the market's orders at our level are
-/// gone, so the queue ahead becomes 0 and we are alone at the touch — but a fill still
-/// requires opposing taker flow in that tick. Everything else (always-last queue via
-/// q0 = queue_mult × depth, the at-level consumption branch, the wait branch when the
-/// touch is on the wrong side of us) is unchanged, so this is strictly MORE
-/// conservative: any sample the strict version fills, the library version also fills.
+/// The blocker was that `FlowL1` is PRICE-AGNOSTIC (total taker volume per tick), so
+/// "flow arrived" could not be narrowed to "flow arrived at or through OUR level" — an
+/// intermediate fix that only demanded *some* flow in the gap tick was measured and
+/// REJECTED (rev15: it removed nothing on the USDT book and produced a false negative on
+/// a real USDC fill). With price-resolved flow (`build_samples --emit-level-flow`) the
+/// model collapses to the textbook queue rule and needs no book branches at all:
 ///
-/// ⚠ MEASURED VERDICT (OPS-EXEC rev15, 6 real live events, both venues): this flag does
-/// NOT fix the phantom fills and MUST NOT be adopted as the correction. On the USDT book
-/// the sim actually runs on, all three phantom entries still fill (the gap tick carries
-/// plenty of aggressive sell volume, so `gap-through` merely becomes `gap+flow`), and on
-/// the USDC book it turns one REAL live fill (2026-07-23 12:46) into a miss = a false
-/// negative. Root cause of the residual error: `FlowL1` is PRICE-AGNOSTIC (total taker
-/// volume per tick), so "flow arrived" cannot be restricted to "flow arrived at or
-/// through OUR level". A correct entry model needs price-resolved flow emitted by
-/// `build_samples` — the same workstream as rebuilding the fill layer on the DOGEUSDC
-/// book. Kept off-by-default and documented so the next attempt starts from the measured
-/// result instead of re-deriving it.
-fn simulate_maker_entry_strict(
+///   queue = queue_mult × depth-at-our-level;  each tick: queue -= volume traded THROUGH
+///   our level;  fill when queue <= 0;  otherwise MISS.
+///
+/// Validated against the six real live events on the venue we trade (DOGEUSDC): 6/6 —
+/// all three live entry misses miss, all three live fills fill (rev16). On the USDT book
+/// the phantom fills survive, which is the correct answer: that venue really does carry
+/// the flow, so the residual error there is the VENUE, not the model.
+fn simulate_maker_entry_level(
     direction: SimDirection,
     level_px: f64,
     q0: f64,
-    book_path: &[BookL1],
-    flow_path: &[FlowL1],
+    level_flow: &[(f64, f64)],
     window: usize,
 ) -> Option<(usize, f64)> {
     if level_px <= 0.0 {
         return None;
     }
-    let eps = level_px * 1e-7;
     let mut queue = q0.max(0.0);
-    let n = book_path.len().min(flow_path.len()).min(window);
+    let n = level_flow.len().min(window);
     for k in 0..n {
-        let b = book_path[k];
-        let f = flow_path[k];
-        match direction {
-            SimDirection::Long => {
-                if b.bid <= 0.0 {
-                    continue;
-                }
-                if b.bid < level_px - eps {
-                    // market's level is gone -> we are alone at the touch, queue cleared,
-                    // but an aggressive SELL still has to arrive to fill us.
-                    queue = 0.0;
-                    if f.sell_vol > 0.0 {
-                        return Some((k, level_px));
-                    }
-                } else if b.bid <= level_px + eps {
-                    queue -= f.sell_vol;
-                    if queue <= 0.0 {
-                        return Some((k, level_px));
-                    }
-                }
-                // else best bid above our level => we wait (no consumption).
-            }
-            SimDirection::Short => {
-                if b.ask <= 0.0 {
-                    continue;
-                }
-                if b.ask > level_px + eps {
-                    queue = 0.0;
-                    if f.buy_vol > 0.0 {
-                        return Some((k, level_px));
-                    }
-                } else if b.ask >= level_px - eps {
-                    queue -= f.buy_vol;
-                    if queue <= 0.0 {
-                        return Some((k, level_px));
-                    }
-                }
-            }
+        let v = match direction {
+            SimDirection::Long => level_flow[k].0,  // sells at price <= our bid level
+            SimDirection::Short => level_flow[k].1, // buys at price >= our ask level
+        };
+        queue -= v;
+        if queue <= 0.0 {
+            return Some((k, level_px));
         }
     }
     None
@@ -576,6 +542,14 @@ fn main() -> Result<()> {
         Some(p) => Some(read_npy(p).context("flow_paths")?),
         None => None,
     };
+    let level_flow_paths: Option<Array3<f32>> = match &a.level_flow_paths {
+        Some(p) => Some(read_npy(p).context("level_flow_paths")?),
+        None => None,
+    };
+    anyhow::ensure!(
+        !a.strict_entry_fill || level_flow_paths.is_some(),
+        "--strict-entry-fill requires --level-flow-paths (build_samples --emit-level-flow)"
+    );
     let entry_q_arr: Option<Array2<f64>> = match &a.entry_q {
         Some(p) => Some(read_npy(p).context("entry_q")?),
         None => None,
@@ -697,13 +671,23 @@ fn main() -> Result<()> {
                     } else {
                         a.entry_window_ticks.max(0) as usize
                     };
-                    let entry_fn = if a.strict_entry_fill {
-                        simulate_maker_entry_strict
+                    let (fl_e, fs_e) = if a.strict_entry_fill {
+                        // price-resolved queue model (rev16): volume that traded THROUGH
+                        // our level is the only thing that fills us.
+                        let lf = level_flow_paths.as_ref().unwrap().index_axis(ndarray::Axis(0), i);
+                        let lvlv: Vec<(f64, f64)> = (0..h)
+                            .map(|t| (lf[[t, 0]] as f64, lf[[t, 1]] as f64))
+                            .collect();
+                        (
+                            simulate_maker_entry_level(SimDirection::Long, lvl_l, q_l, &lvlv, win),
+                            simulate_maker_entry_level(SimDirection::Short, lvl_s, q_s, &lvlv, win),
+                        )
                     } else {
-                        simulate_maker_entry
+                        (
+                            simulate_maker_entry(SimDirection::Long, lvl_l, q_l, &path, &flowv, win),
+                            simulate_maker_entry(SimDirection::Short, lvl_s, q_s, &path, &flowv, win),
+                        )
                     };
-                    let fl_e = entry_fn(SimDirection::Long, lvl_l, q_l, &path, &flowv, win);
-                    let fs_e = entry_fn(SimDirection::Short, lvl_s, q_s, &path, &flowv, win);
                     // pegged exit, ALWAYS LAST: queue = full close-touch depth × exit_queue_mult.
                     // long closes SELL on ask -> ask depth entry_q[1]; short closes BUY on bid -> bid depth entry_q[0].
                     let qex_l = entry_q_arr.as_ref().map(|q| q[[i, 1]]).unwrap_or(0.0) * a.exit_queue_mult;
