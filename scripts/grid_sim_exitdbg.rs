@@ -93,6 +93,12 @@ struct Args {
     /// PEGGED-EXIT queue = exit_queue_mult × entry_q(close-touch). ALWAYS-LAST => >=1 (full depth).
     #[arg(long, default_value_t = 1.0)]
     exit_queue_mult: f64,
+    /// STRICT entry fill (OPS-EXEC rev15): a strict gap past our level no longer fills
+    /// unconditionally — it only zeroes the queue ahead (the market orders at our level
+    /// are gone, so we are alone at the touch) and STILL requires opposing taker flow to
+    /// hit us. OFF by default: every historical cell stays byte-reproducible.
+    #[arg(long, default_value_t = false)]
+    strict_entry_fill: bool,
 
     // ─── TIME-BASED windows (opt-in). Event-driven books (Cryptolake) have variable
     //     tick density, so tick-count windows are NOT wall-clock. With --ts-paths +
@@ -397,6 +403,92 @@ fn compute_metrics(
     )
 }
 
+/// STRICT maker entry (OPS-EXEC rev15, `--strict-entry-fill`). Same contract as
+/// `live_sim::simulate_maker_entry`, one semantic change:
+///
+/// the library version treats a strict gap past our level as an UNCONDITIONAL fill
+/// (`if b.bid < level_px - eps { return FILLED }`) — no flow required, queue ignored.
+/// That collapses two physically different cases: the resting size at our level was
+/// TRADED through (we fill only if the flow exceeded the queue ahead of us) versus it
+/// was CANCELLED (we are merely alone at the top of book, unfilled). Measured on the
+/// live DOGEUSDC anchor, 3/3 phantom entry fills came through that branch.
+///
+/// Strict semantics: a gap past our level means the market's orders at our level are
+/// gone, so the queue ahead becomes 0 and we are alone at the touch — but a fill still
+/// requires opposing taker flow in that tick. Everything else (always-last queue via
+/// q0 = queue_mult × depth, the at-level consumption branch, the wait branch when the
+/// touch is on the wrong side of us) is unchanged, so this is strictly MORE
+/// conservative: any sample the strict version fills, the library version also fills.
+///
+/// ⚠ MEASURED VERDICT (OPS-EXEC rev15, 6 real live events, both venues): this flag does
+/// NOT fix the phantom fills and MUST NOT be adopted as the correction. On the USDT book
+/// the sim actually runs on, all three phantom entries still fill (the gap tick carries
+/// plenty of aggressive sell volume, so `gap-through` merely becomes `gap+flow`), and on
+/// the USDC book it turns one REAL live fill (2026-07-23 12:46) into a miss = a false
+/// negative. Root cause of the residual error: `FlowL1` is PRICE-AGNOSTIC (total taker
+/// volume per tick), so "flow arrived" cannot be restricted to "flow arrived at or
+/// through OUR level". A correct entry model needs price-resolved flow emitted by
+/// `build_samples` — the same workstream as rebuilding the fill layer on the DOGEUSDC
+/// book. Kept off-by-default and documented so the next attempt starts from the measured
+/// result instead of re-deriving it.
+fn simulate_maker_entry_strict(
+    direction: SimDirection,
+    level_px: f64,
+    q0: f64,
+    book_path: &[BookL1],
+    flow_path: &[FlowL1],
+    window: usize,
+) -> Option<(usize, f64)> {
+    if level_px <= 0.0 {
+        return None;
+    }
+    let eps = level_px * 1e-7;
+    let mut queue = q0.max(0.0);
+    let n = book_path.len().min(flow_path.len()).min(window);
+    for k in 0..n {
+        let b = book_path[k];
+        let f = flow_path[k];
+        match direction {
+            SimDirection::Long => {
+                if b.bid <= 0.0 {
+                    continue;
+                }
+                if b.bid < level_px - eps {
+                    // market's level is gone -> we are alone at the touch, queue cleared,
+                    // but an aggressive SELL still has to arrive to fill us.
+                    queue = 0.0;
+                    if f.sell_vol > 0.0 {
+                        return Some((k, level_px));
+                    }
+                } else if b.bid <= level_px + eps {
+                    queue -= f.sell_vol;
+                    if queue <= 0.0 {
+                        return Some((k, level_px));
+                    }
+                }
+                // else best bid above our level => we wait (no consumption).
+            }
+            SimDirection::Short => {
+                if b.ask <= 0.0 {
+                    continue;
+                }
+                if b.ask > level_px + eps {
+                    queue = 0.0;
+                    if f.buy_vol > 0.0 {
+                        return Some((k, level_px));
+                    }
+                } else if b.ask >= level_px - eps {
+                    queue -= f.buy_vol;
+                    if queue <= 0.0 {
+                        return Some((k, level_px));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// PEGGED maker exit (no taker). Rest a close-limit pegged to the touch (Long closes SELL on the ask,
 /// Short closes BUY on the bid), ALWAYS LAST in queue. On an adverse touch move (price runs away) we
 /// re-quote to the new touch and reset the queue (back of the new line). Fill (maker, 0 fee) when
@@ -605,8 +697,13 @@ fn main() -> Result<()> {
                     } else {
                         a.entry_window_ticks.max(0) as usize
                     };
-                    let fl_e = simulate_maker_entry(SimDirection::Long, lvl_l, q_l, &path, &flowv, win);
-                    let fs_e = simulate_maker_entry(SimDirection::Short, lvl_s, q_s, &path, &flowv, win);
+                    let entry_fn = if a.strict_entry_fill {
+                        simulate_maker_entry_strict
+                    } else {
+                        simulate_maker_entry
+                    };
+                    let fl_e = entry_fn(SimDirection::Long, lvl_l, q_l, &path, &flowv, win);
+                    let fs_e = entry_fn(SimDirection::Short, lvl_s, q_s, &path, &flowv, win);
                     // pegged exit, ALWAYS LAST: queue = full close-touch depth × exit_queue_mult.
                     // long closes SELL on ask -> ask depth entry_q[1]; short closes BUY on bid -> bid depth entry_q[0].
                     let qex_l = entry_q_arr.as_ref().map(|q| q[[i, 1]]).unwrap_or(0.0) * a.exit_queue_mult;
