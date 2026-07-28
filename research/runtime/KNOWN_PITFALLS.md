@@ -68,6 +68,24 @@
   (3-day warmup, deployment-like) gave +14.78bp all-LOO-positive. Use the maximum
   stream-complete window, never a bare "last N days".
 
+## Maker fill model
+- **The default entry-fill model OVER-FILLS: every maker cell dated before 2026-07-26 is
+  an UPPER BOUND, not an estimate.** `live_sim::simulate_maker_entry` fills unconditionally
+  the moment the touch gaps past our level (`if b.bid < level_px - eps { return FILLED }`)
+  — no flow, no queue. Measured on the live DOGEUSDC anchor: 3/3 phantom entry fills came
+  through that branch, and on a full day the model fills 0.72 vs 0.42 for the correct rule.
+  Fix is opt-in: `build_samples --emit-level-flow` + `grid_sim_exitdbg --strict-entry-fill
+  --level-flow-paths ...` (README §Entry-fill model). Defaults unchanged, so old artifacts
+  stay byte-reproducible — which also means **you get the broken model unless you pass the
+  flags**.
+- `flow_paths.npy` is PRICE-AGNOSTIC (total taker volume per tick). Any fill logic that
+  needs "volume that traded through OUR level" must use `flow_lvl_paths.npy`; a patch that
+  only requires *some* flow in the gap tick was measured and rejected (OPS-EXEC rev15).
+- Fills happen on the USDC venue, features/scores on USDT — do NOT "fix" the signal side
+  to USDC. Only the fill layer is venue-wrong. Recorder carries DOGEUSDC depth+aggTrade
+  (both needed) since 2026-06-01 / -06-28 respectively, so this is measurable without
+  buying data.
+
 ## xgboost / determinism
 - Results depend on nthread (hist accumulation order): same seed + same nthread =
   reproducible; changing nthread changes low bits -> a (symbol,seed) job must run

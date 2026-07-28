@@ -21,6 +21,8 @@ first-class asset of this project, ranked above any single strategy
      `scripts/build_samples_husdc.rs`, `scripts/grid_sim_exitdbg.rs` overlaid).
      Built by `bins.sh`. Proven bit-exact vs July-2026 artifacts (ledger
      tb3s-20260710_h150anch_year_xsym_PREREG_AMEND1).
+     **The bin sources carry an OPT-IN entry-fill correction — see §"Entry-fill
+     model" below BEFORE running any maker-EV measurement.**
    Changing ANY of these requires: preregistered amendment + one-cell byte-parity
    run old-vs-new BEFORE production (this ritual caught the H_TICKS=1500-vs-1800
    error and validated the binary rebuild — keep it).
@@ -63,6 +65,56 @@ SEED={s} CFGIDX=1 BUDGETS=5 SAVE_PF=1 PFTAG=_S{s} \
 python3 subs60_xgb_optuna_ic.py {SYM} maker_labels_tb3s_h150anch 0 {NTHREAD}
 # then: python3 perseed_from_pf.py {SYM} {s}
 ```
+
+## Entry-fill model — READ BEFORE ANY MAKER-EV NUMBER (added 2026-07-26, OPS-EXEC rev15-16)
+
+**Every maker cell in this repo dated before 2026-07-26 was produced by a fill model
+that OVER-FILLS entries. Those numbers are upper bounds, not estimates.**
+
+The library entry (`live_sim::simulate_maker_entry`, husdc-rev1) fills a resting order
+unconditionally as soon as the touch gaps past our level:
+`if b.bid < level_px - eps { return FILLED }` — no flow required, queue ignored. That
+collapses "the level was traded through" (fill only if flow exceeded the queue ahead)
+with "the level was cancelled" (we are alone at the top of book, unfilled). The queue
+model itself is honest — `--queue-mult 1.0` / `--exit-queue-mult 1.0` = always last —
+the gap branch simply bypasses it.
+
+Why it could not be fixed in place: `flow_paths.npy` is **price-agnostic** (total taker
+volume per tick), so the model cannot ask "did volume trade THROUGH our level". An
+intermediate patch that only demanded *some* flow in the gap tick was measured and
+REJECTED (rev15: removed nothing on the USDT book, produced a false negative on a real
+USDC fill).
+
+**The correction (opt-in, both flags OFF by default — every historical cell stays
+byte-reproducible):**
+
+```
+build_samples ... --emit-level-flow        # writes flow_lvl_paths.npy [ns,h,2] =
+                                           # [sell vol at px <= entry_long,
+                                           #  buy  vol at px >= entry_short] per tick
+                                           # (prices read in a SEPARATE pass; the frozen
+                                           #  aggregation path is untouched)
+grid_sim_exitdbg ... --strict-entry-fill --level-flow-paths <dir>/flow_lvl_paths.npy
+                                           # textbook queue rule: queue -= volume traded
+                                           # through our level; fill at <=0; else MISS.
+                                           # errors out if --level-flow-paths is missing
+```
+
+**Validation status (do not re-derive this):**
+- reference model vs the six real live DOGEUSDC events: **6/6** (all 3 live entry misses
+  miss, all 3 live fills fill); the frozen model scores 3 phantom fills there;
+- compiles, binaries rebuilt, run end-to-end on a full day (DOGEUSDC 2026-07-23, 2833
+  samples, deploy protocol): frozen long/short fill **0.720 / 0.742** vs strict
+  **0.419 / 0.435**, and the surviving fills are worse (netl −1.78 → −3.82bp) —
+  the invented fills were the favourable ones (adverse-selection signature);
+- **NOT measured:** effect on τ-selected cells, on the USDT book that produced every
+  historical cell, and at year scale. No cell may be re-priced before that run.
+
+**Venue note:** the fill layer and the signal layer are different questions. Features and
+scores are computed on the USDT book in both sim and live — that is correct and must not
+change. Only FILLS happen on USDC. The recorder has DOGEUSDC `depth_snapshot` + `agg_trade`
+(both streams needed), so the fill-realism correction can be measured on data we already
+own — it does NOT require buying history.
 
 ## Sizing (measured 2026-07-10, 371d/9-10M-row dataset)
 - Training job: **13-14 GB RSS**, ~2.2h at nthread=4, ~2.7h at 3, ~3.5h at 2.
