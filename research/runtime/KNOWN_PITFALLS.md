@@ -33,6 +33,14 @@
   `gcloud storage` locally; gsutil works on the VMs.
 
 ## Protocol / data
+- **H_TICKS IS PER-SYMBOL AND MUST BE MEASURED, NEVER ASSUMED** (2026-07-30). Verified by
+  exact ts match against the parent dailies on two sampled days each:
+  **DOGE 1500** (the DOGE-dedicated builder), **XRP 1800** (cross-symbol h150),
+  **BTC 5100, ETH 5100** (the h150d dense rebuild). Getting it wrong shifts the decision
+  grid, so the rebuilt rows do not line up with the dataset and nothing joins — the
+  strict-fill runner's ts gate caught exactly this on its first DOGE smoke. To recover it
+  for a dataset with unknown provenance: rebuild the 3s grid from the raw book and find
+  the H whose `ends` filter reproduces the stored `ts` array element-for-element.
 - **H_TICKS=1800 is the cross-symbol tb3s/h150 build parameter** (recovered from
   journald unit tb3sym). The DOGE-dedicated `subs60_tb3s_h150_build.py` uses H=1500 —
   NOT the cross-symbol protocol. At H=1800, dense books (~9 ticks/s: BTC/ETH) get only
@@ -67,6 +75,15 @@
   10-day window gave XRP +0.11bp; the same days under the full 13-day window
   (3-day warmup, deployment-like) gave +14.78bp all-LOO-positive. Use the maximum
   stream-complete window, never a bare "last N days".
+
+## Parallel day-runners
+- **A `w{i % NWORK}` workdir scheme is NOT worker-isolation.** The index is the TASK
+  index, not the executing thread, so as soon as one day runs long, a later task reuses a
+  directory that is still in use and the two race on the downloaded parquet and the
+  build_samples outputs (observed 2026-07-30: `BS-fail: Parquet argument error: end of
+  file` and a missing `entry_q.npy`). Use a PER-ITEM workdir and delete it at the end.
+  The parity gates caught every affected day, which is the reason to have gates that
+  compare against a stored reference rather than only checking for a non-zero exit.
 
 ## Maker fill model
 - **The default entry-fill model OVER-FILLS: every maker cell dated before 2026-07-26 is

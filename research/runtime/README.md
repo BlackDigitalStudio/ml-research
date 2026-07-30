@@ -42,6 +42,22 @@ first-class asset of this project, ranked above any single strategy
      col44:=0).
    - `bins.sh` — builds all 3 rust binaries into a PERSISTENT dir + optional parity check.
    - `vm_provision.sh` — creates a GCP VM CORRECTLY (scopes, deps, swap).
+   - `strictfill_year.py` — re-labels a year dataset under the STRICT entry-fill model on
+     the SAME book (OPS-FILLYEAR rev1). Rebuilds paths per day with
+     `--emit-level-flow`, runs grid_sim twice (frozen = parity gate, strict = the cell),
+     reuses features from the parent dailies so the row join is exact. Three gates; the
+     combine refuses to run on a set with missing or parity-failed days.
+   - `strictfill_cells.py` — re-accounts published cells from existing PERFOLD scores
+     under both label sets in one pass (no retraining). `PF_LABELS` says which set the
+     PERFOLD artifacts themselves carry.
+   - `strictfill_dataset.py` — published features x strict labels -> a trainable npz
+     (cell A2 input); asserts row alignment instead of assuming it.
+   - `strictfill_economics.py`, `economics_v1.py`, `economics_3sym.py` — the 4.1 economics
+     methodology. **These lived only on the VM until 2026-07-30**; the published
+     ECONOMICS_4sym numbers were not regenerable from the repo.
+   - `ensemble_anatomy.py` / `model_anatomy.py` — why the seed-ensemble beats one seed
+     (score vs selection agreement, 2x2 ranking-vs-side attribution, k-seed curve) and
+     what differs between the boosters (HP landscape, tree anatomy, importance).
    - `KNOWN_PITFALLS.md` — **read it; every entry cost hours once.**
 
 ## Canonical invocation (h150 cross-symbol year cell, HD3 rev8)
