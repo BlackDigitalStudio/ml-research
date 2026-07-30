@@ -140,16 +140,26 @@ SEL = {"fixq": sel_fixq, "dyn": sel_dyn}[POLICY]
 
 
 def harmony_mask(p, k):
-    """SAFETY form: keep only decisions every seed would also have taken on its OWN
-    frozen tau (per-seed agreement), and on which the seeds agree on the side."""
-    m = np.ones(len(p["te"]), bool)
+    """ETH SAFETY form, transcribed from the deployed engine (axb_engine.rs v4):
+
+        cons = number of seeds whose OWN score clears its OWN frozen per-seed tau
+        harmony_block = (2 <= cons <= NSEED-2)      -> keep only cons<=1 or cons>=NSEED-1
+
+    It rejects the MIDDLE - the decisions the seed population is split on - and keeps the
+    ones it is in harmony about, in either direction. The engine reads its per-seed taus
+    from seed_taus.npy (recorder per-seed distributions); its own comment says the
+    backtest analog is the FOLD-FROZEN tau, i.e. the per-seed FIXQ threshold, which is
+    what is used here regardless of the ensemble policy (the engine freezes these taus
+    even when the ensemble threshold is dynamic).
+
+    RECONSTRUCTION, not the published cell: this rule at K=5 gives EV +17.06 / n=295
+    against the published +16.84 / 299 - within 1.3% on both, the residual being the
+    tau-source convention. The producing script exists on no host we still have.
+    """
+    cons = np.zeros(len(p["te"]), int)
     for s in range(NSEED):
-        te_s, tr_s = p["seed_te"][s], p["seed_tr"][s]
-        sel = np.zeros(len(te_s), bool)
-        sel[SEL(p, te_s, tr_s, k)] = True
-        m &= sel
-        m &= (p["seed_side"][s] == p["side"])
-    return m
+        cons += (p["seed_te"][s] >= fixq_tau(p["seed_tr"][s], p["day_tr"], k)).astype(int)
+    return ~((cons >= 2) & (cons <= NSEED - 2))
 
 
 def take(p, sel, lab):
