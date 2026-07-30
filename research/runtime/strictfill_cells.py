@@ -43,6 +43,10 @@ K = float(os.environ.get("K", "5"))
 POLICY = os.environ.get("POLICY", "fixq")
 CFGIDX = int(os.environ.get("CFGIDX", "1"))
 HARMONY = os.environ.get("HARMONY", "0") == "1"
+# which label set the PERFOLD artifacts themselves carry - "frozen" for the published
+# cells, "strict" for a cell A2 run whose trainer already saw the honest labels. Gate 2
+# compares against this set, so it stays a real check in both directions.
+PF_LABELS = os.environ.get("PF_LABELS", "frozen")
 OUT = os.environ.get("OUT", f"research_runs/strictfill_cells/{SYM}_{POLICY}_t{int(K)}.json")
 KDAYS = 30
 
@@ -82,14 +86,14 @@ for f in range(nf):
     if len(idx) != len(day_te) or not np.array_equal(day_all[idx], day_te):
         raise SystemExit(f"JOIN GATE 1 FAILED fold{f}: reconstructed index does not match day_te "
                          f"({len(idx)} vs {len(day_te)})")
-    fz = LAB["frozen"]
+    fz = LAB[PF_LABELS]
     g2 = (np.array_equal(fz["fl"][idx], z0["fl"].astype(bool))
           and np.array_equal(fz["fs"][idx], z0["fs"].astype(bool))
           and np.allclose(fz["nl"][idx], z0["netl"].astype(np.float64), rtol=0, atol=2e-3, equal_nan=True)
           and np.allclose(fz["ns"][idx], z0["nets"].astype(np.float64), rtol=0, atol=2e-3, equal_nan=True))
     if not g2:
         d = np.abs(fz["nl"][idx] - z0["netl"].astype(np.float64))
-        raise SystemExit(f"JOIN GATE 2 FAILED fold{f}: frozen labels != PERFOLD labels "
+        raise SystemExit(f"JOIN GATE 2 FAILED fold{f}: {PF_LABELS} labels != PERFOLD labels "
                          f"(max|dnetl|={np.nanmax(d):.6f}, fill mismatch "
                          f"{(fz['fl'][idx] != z0['fl'].astype(bool)).sum()})")
     p = dict(day_tr=z0["day_tr"].astype(int), day_te=day_te, idx=idx,
