@@ -232,10 +232,14 @@ res["fill_rate_selected"] = {}
 sel_n = sum(len(s) for s in ens_sel)
 res["fill_rate_selected"] = {"frozen": ef["n"] / max(sel_n, 1), "strict": es["n"] / max(sel_n, 1),
                              "selected": sel_n}
+# The strict/frozen ratio only means "% of the published cell" when the scores ARE the
+# published ones. On a cell A2 run (PF_LABELS=strict) the frozen column is the A2 models
+# re-scored on frozen labels, not the published cell - saying otherwise misreads the run.
+_ref = "the published cell" if PF_LABELS == "frozen" else "this run's own frozen-label twin (NOT the published cell)"
 log(f"[SUMMARY {SYM} {POLICY} t{int(K)}] selected {sel_n} | filled frozen {ef['n']} "
     f"({100*ef['n']/max(sel_n,1):.1f}%) strict {es['n']} ({100*es['n']/max(sel_n,1):.1f}%) | "
     f"EV {ef['ev']:+.2f} -> {es['ev']:+.2f} | bpd {ef['bpd']:+.2f} -> {es['bpd']:+.2f} "
-    f"= {100*res['ratio_bpd']:.0f}% of the published cell")
+    f"= {100*res['ratio_bpd']:.0f}% of {_ref}")
 
 bk.blob(OUT).upload_from_string(json.dumps(res, default=float))
 log(f"[saved] gs://{BUCKET}/{OUT}")
