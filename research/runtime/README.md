@@ -55,6 +55,11 @@ first-class asset of this project, ranked above any single strategy
    - `strictfill_economics.py`, `economics_v1.py`, `economics_3sym.py` — the 4.1 economics
      methodology. **These lived only on the VM until 2026-07-30**; the published
      ECONOMICS_4sym numbers were not regenerable from the repo.
+   - `score_ev_curve.py` — the score -> EV/tr surface from PERFOLD alone (no retraining):
+     marginal EV by score band + the selectivity curve in TWO frames, per-fold and pooled.
+     The gap between the frames is the cross-fold incomparability of the rank-CDF score and
+     is large (ETH: pooled −4.42 vs per-fold +10.74 at the deployed trade count) — use the
+     per-fold frame for anything compared against a cell.
    - `ensemble_anatomy.py` / `model_anatomy.py` — why the seed-ensemble beats one seed
      (score vs selection agreement, 2x2 ranking-vs-side attribution, k-seed curve) and
      what differs between the boosters (HP landscape, tree anatomy, importance).
