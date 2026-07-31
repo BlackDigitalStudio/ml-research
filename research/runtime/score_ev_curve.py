@@ -53,13 +53,24 @@ import numpy as np
 PF = sys.argv[1]
 OUT = sys.argv[2]
 
-# cell_ev / cell_n are the published figures, carried only to place the deployed
+# cell_ev / cell_n are the published figures, carried only to place the traded
 # operating point on the curve — they are not recomputed here.
+#
+# ETH is the SAFETY form, which is what engine v4 ran live (HARMONY=1): the overlay
+# blocks a decision when 2..N-2 of the seeds clear their OWN frozen per-seed tau, i.e.
+# it deletes the middle of the seed-consensus distribution. That set is NOT a prefix of
+# the score ranking, so the ETH point is not required to sit on a top-q curve at all.
+# The growth form (same scores, no overlay) is carried as `alt` for contrast.
 SYMS = {
-    "DOGE": dict(nseed=4, policy="fixq", K=10, cell_ev=10.513, cell_n=1204, tot_days=169),
-    "XRP":  dict(nseed=4, policy="fixq", K=5,  cell_ev=21.314, cell_n=401,  tot_days=163),
-    "BTC":  dict(nseed=4, policy="dyn",  K=5,  cell_ev=12.268, cell_n=449,  tot_days=168),
-    "ETH":  dict(nseed=8, policy="dyn",  K=5,  cell_ev=15.788, cell_n=430,  tot_days=159),
+    "DOGE": dict(nseed=4, policy="fixq", K=10, cell_ev=10.513, cell_n=1204, tot_days=169,
+                 form="FIXQ t10"),
+    "XRP":  dict(nseed=4, policy="fixq", K=5,  cell_ev=21.314, cell_n=401,  tot_days=163,
+                 form="FIXQ t5"),
+    "BTC":  dict(nseed=4, policy="dyn",  K=5,  cell_ev=12.268, cell_n=449,  tot_days=168,
+                 form="DYN t5"),
+    "ETH":  dict(nseed=8, policy="dyn",  K=5,  cell_ev=17.065, cell_n=295,  tot_days=159,
+                 form="DYN t5 + HARMONY", harmony=True,
+                 alt=dict(name="growth, no HARMONY", ev=15.788, n=430)),
 }
 
 # marginal bands: coarse over the bulk, geometric refinement in the top 1% — the
@@ -135,6 +146,68 @@ def curves(sc, net, fill, fold):
         spearman=spear, pearson=pear)
 
 
+def harmony_diag(sym, cfg):
+    """What the HARMONY overlay does to the population and to the traded set.
+
+    Transcribed from research/runtime/strictfill_cells.py (which in turn transcribes
+    axb_engine.rs v4): cons = seeds clearing their own FIXQ tau; block 2 <= cons <= N-2.
+    Reproducing the published cell here is the check that the mask is the right one.
+    """
+    nseed = cfg["nseed"]; K = float(cfg["K"]); KDAYS = 30
+    nf = len(glob.glob(os.path.join(PF, f"PERFOLD_S0_{sym}_qm0_f*.npz")))
+
+    def fixq_tau(tr, day_tr):
+        trd = sorted(set(day_tr.tolist()))[-KDAYS:]
+        s = tr[np.isin(day_tr, trd)]
+        if not len(s):
+            return float("inf")
+        wpd = len(s) / max(len(trd), 1)
+        return float(np.quantile(s, max(0.0, 1.0 - K / max(wpd, 1.0))))
+
+    def sel_dyn(day_te, day_tr, te, tr):
+        days = sorted(set(day_te.tolist())); wpd = len(te) / max(len(days), 1)
+        q = max(0.0, 1.0 - K / max(wpd, 1.0)); trd = sorted(set(day_tr.tolist()))
+        buf = list(tr[np.isin(day_tr, trd[-KDAYS:])]); cap = max(int(KDAYS * wpd), 1); sel = []
+        for d in days:
+            i = np.where(day_te == d)[0]
+            tau = float(np.quantile(buf, q)) if buf else 0.0
+            sel.extend(i[te[i] >= tau].tolist()); buf.extend(te[i].tolist()); buf = buf[-cap:]
+        return np.array(sel, dtype=int)
+
+    grow, safe, kept_u, kept_y = [], [], [], []
+    n_filled = n_kept = 0
+    for f in range(nf):
+        zs = [np.load(os.path.join(PF, f"PERFOLD_S{s}_{sym}_qm0_f{f}.npz")) for s in range(nseed)]
+        z0 = zs[0]
+        te = np.mean([z["axb_te"].astype(np.float64) for z in zs], 0)
+        tr = np.mean([z["axb_tr"].astype(np.float64) for z in zs], 0)
+        side = np.sum([z["side"].astype(int) for z in zs], 0) >= int(np.ceil(nseed / 2))
+        day_tr = z0["day_tr"].astype(int); day_te = z0["day_te"].astype(int)
+        net = np.where(side, z0["netl"].astype(np.float64), z0["nets"].astype(np.float64))
+        fc = np.where(side, z0["fl"].astype(bool), z0["fs"].astype(bool)) & np.isfinite(net)
+        cons = np.zeros(len(te), int)
+        for s in range(nseed):
+            cons += (zs[s]["axb_te"].astype(np.float64)
+                     >= fixq_tau(zs[s]["axb_tr"].astype(np.float64), day_tr)).astype(int)
+        hm = ~((cons >= 2) & (cons <= nseed - 2))
+        sel = sel_dyn(day_te, day_tr, te, tr)
+        grow.append(net[sel][fc[sel]]); safe.append(net[sel[hm[sel]]][fc[sel[hm[sel]]]])
+        ok = hm & fc
+        n_filled += int(fc.sum()); n_kept += int(ok.sum())
+        r = np.argsort(np.argsort(-te[ok], kind="stable"), kind="stable")
+        kept_u.append(r / max(ok.sum(), 1)); kept_y.append(net[ok])
+        for z in zs:
+            z.close()
+    g = np.concatenate(grow); sa = np.concatenate(safe)
+    u = np.concatenate(kept_u); y = np.concatenate(kept_y)
+    o = np.argsort(u, kind="stable"); yy = y[o]; c = np.cumsum(yy)
+    k = min(len(sa), len(yy))
+    return dict(growth=dict(ev=float(g.mean()), n=int(len(g)), hit=float((g > 0).mean())),
+                safety=dict(ev=float(sa.mean()), n=int(len(sa)), hit=float((sa > 0).mean())),
+                filled=n_filled, filled_kept=n_kept, removed=n_filled - n_kept,
+                topq_within_harmony=dict(k=int(k), ev=float(c[k - 1] / k)))
+
+
 res = {}
 for sym, cfg in SYMS.items():
     sc, net, fill, fold, nf = load_symbol(sym, cfg)
@@ -148,8 +221,16 @@ for sym, cfg in SYMS.items():
                     deployed=dict(q=dep_q, ev=cfg["cell_ev"], n=cfg["cell_n"]))
     print(f"{sym}: folds={nf} filled={stats['n_filled']:,} EV(all)={stats['ev_all']:+.3f}bp "
           f"hit={100*stats['hit_all']:.2f}% spearman={stats['spearman']:+.4f} || at q={100*dep_q:.4f}%: "
-          f"per-fold {near['ev']:+.2f} | pooled {nearP['ev']:+.2f} | deployed cell {cfg['cell_ev']:+.2f}",
-          flush=True)
+          f"per-fold {near['ev']:+.2f} | pooled {nearP['ev']:+.2f} | traded cell {cfg['cell_ev']:+.2f} "
+          f"({cfg['form']})", flush=True)
+    if cfg.get("harmony"):
+        h = harmony_diag(sym, cfg)
+        res[sym]["harmony"] = h
+        print(f"  HARMONY: growth {h['growth']['ev']:+.3f}/{h['growth']['n']} -> safety "
+              f"{h['safety']['ev']:+.3f}/{h['safety']['n']} (published +15.788/430 -> +17.065/295); "
+              f"overlay removes {h['removed']:,} of {h['filled']:,} filled rows "
+              f"({100*h['removed']/h['filled']:.3f}%); top-q inside the harmony-kept set at n="
+              f"{h['topq_within_harmony']['k']}: {h['topq_within_harmony']['ev']:+.2f}", flush=True)
 
 json.dump(res, open(OUT, "w"))
 print(f"[saved] {OUT}")
