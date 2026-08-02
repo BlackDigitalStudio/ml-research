@@ -42,6 +42,12 @@ SUBVAL_D = 30; N_TRIALS = int(os.environ.get("N_TRIALS", "25")); TUNE_SUB = 2000
 CFGIDX, RHKEY = int(os.environ.get("CFGIDX", "1")), "rH30"
 BUDGETS = [int(x) for x in os.environ.get("BUDGETS", "5,10").split(",")]
 bk = storage.Client(project=PROJ).bucket(BUCKET)
+# OPT-IN (OBJSEL rev2, default OFF -> the search path is untouched): supply the per-fold
+# hyperparameters instead of searching, so an arm can be refit to deployed semantics
+# under a CHOSEN trial. Gated on the incumbent HP reproducing the stored PERFOLD.
+HP_FIX = os.environ.get("HP_FIX", "")
+HPFIX = json.loads(bk.blob(HP_FIX).download_as_bytes() if HP_FIX.startswith("research_runs/")
+                   else open(HP_FIX, encoding="utf-8").read()) if HP_FIX else None
 
 # --- capture layer (output-only; see header) ---------------------------------
 OUT_SUB = os.environ.get("OUT_SUB", "") or LABELSUB
@@ -222,7 +228,11 @@ def run_fold(fi, trn, tst):
     sub = trn & np.isin(day, list(tr_days[:-(SUBVAL_D + EMB)])); val = trn & np.isin(day, list(sv))
     thr = float(np.quantile(np.abs(rH[trn]), 1 - NF_RATE)); yA = (np.abs(rH) >= thr).astype(int)
     spwA = float((yA[sub] == 0).sum() / max((yA[sub] == 1).sum(), 1))
-    hpA, biA, aucA = tune_A(Fn[sub], yA[sub], Fn[val], yA[val], spwA, fi)
+    fx = HPFIX.get(f"f{fi}") if HPFIX else None
+    if fx is None:
+        hpA, biA, aucA = tune_A(Fn[sub], yA[sub], Fn[val], yA[val], spwA, fi)
+    else:
+        hpA, biA, aucA = dict(fx["hpA"]), int(fx["biA"]), float("nan")
     spwAf = float((yA[trn] == 0).sum() / max((yA[trn] == 1).sum(), 1))
     A = fith(hpA, biA, Fn[trn], yA[trn], spw=spwAf)
     oof = oof_pA(Fn, yA, trn, day, hpA, biA); valid = trn & np.isfinite(oof)
@@ -231,7 +241,10 @@ def run_fold(fi, trn, tst):
     wq = np.where(both, np.abs(netl - nets), np.where(fl, np.abs(netl), np.where(fs, np.abs(nets), 0.0)))
     wcl = lambda mk: np.clip(wq[mk], 0, np.quantile(wq[mk][wq[mk] > 0], 0.99) if (wq[mk] > 0).any() else 1.0)
     sb = sub & (fl | fs); vb = val & both   # IC target on both-filled sub-val
-    hpB, biB, icB = tune_B_ic(Fn[sb], yB[sb], wcl(sb), Fn[vb], (netl[vb] - nets[vb]), fi)
+    if fx is None:
+        hpB, biB, icB = tune_B_ic(Fn[sb], yB[sb], wcl(sb), Fn[vb], (netl[vb] - nets[vb]), fi)
+    else:
+        hpB, biB, icB = dict(fx["hpB"]), int(fx["biB"]), float("nan")
     gfull = trn & (fl | fs); ggate = gate & (fl | fs)
     Bf = fith(hpB, biB, Fn[gfull], yB[gfull], w=wcl(gfull)); Bg = fith(hpB, biB, Fn[ggate], yB[ggate], w=wcl(ggate))
     tri = np.where(trn)[0]; tei = np.where(tst)[0]
