@@ -103,6 +103,24 @@
   (both needed) since 2026-06-01 / -06-28 respectively, so this is measurable without
   buying data.
 
+## parity gates
+- **Never compare artifacts with `np.array_equal` — it reports NaN != NaN** (2026-08-02,
+  OBJSEL rev2). `netl`/`nets` carry NaN on unfilled windows, so a byte-identical PERFOLD
+  came back as DIFFERING on exactly those two keys while the same output printed
+  `ndiff=0`. That is a FALSE tier failure, and it is one line away from being reported as
+  a real one. Compare `x.tobytes() == y.tobytes()` instead: that IS the bit-exactness
+  test, it is NaN-correct (identical payloads compare equal), and a genuine numeric
+  difference still shows. `np.array_equal(..., equal_nan=True)` also works but is weaker —
+  it will not catch a differing NaN payload. Cross-check: 9 of the 11 PERFOLD keys pass
+  under either rule, so a gate that happens to skip the float arrays looks fine.
+- When a fixed-hyperparameter (`HP_FIX`) or other search-skipping opt-in is added, the
+  gate that matters is running it with the INCUMBENT's own values and demanding the
+  stored artifact back bit-exactly. The trivial gate (flag off == unchanged) proves
+  nothing about the RNG stream, the fit order or the trial-loop side effects.
+- Two separately certified changes are not the same object as their composition. `v1cap`
+  was certified against `v1`, and `HP_FIX` against `v1`; `v1cap + HP_FIX` still needed its
+  own gate (it passed, 66/66 keys, 6/6 folds).
+
 ## xgboost / determinism
 - Results depend on nthread (hist accumulation order): same seed + same nthread =
   reproducible; changing nthread changes low bits -> a (symbol,seed) job must run
