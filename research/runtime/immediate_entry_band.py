@@ -24,8 +24,17 @@ pays all of them on BOTH legs. So the output is a GROSS move and a BREAK-EVEN CO
 a net EV. The deployed +10.513bp is a NET maker number; the two are not comparable until a
 cost is assumed, and this script refuses to assume one.
 
-SECOND SCOPE LIMIT: the archive's longest forward return is 60s, the deployed hold is 150s.
-This prices an immediate entry held up to 60s only.
+HORIZON, and it is the whole comparison (user correction 2026-08-05): the deployed cell
+holds 150s FROM THE FILL, so pricing an immediate entry at 60s FROM THE DECISION compares
+two different objects. The archive's longest leg is 60s, so the 150s move is CHAINED over
+ts -- r150(i) = rH60(i) + rH60(j60) + rH30(j120), with j60/j120 the decision rows nearest
+ts_i+60s / ts_i+120s (same day, within HOP_TOL). The joins leave a small unmeasured gap
+whose move is mean-zero. Two guards, because the first pass got both wrong:
+  * CHAIN GATE - chained rH30(i)+rH30(j30) must reproduce the DIRECT rH60(i).
+  * PAIRED COMPARISON - r150 coverage FALLS WITH THE SCORE (0.92 in the bulk, 0.46 on the
+    deployed set at +-5s), so an unpaired mean over covered rows is a biased subsample.
+    Every immediate-vs-maker number is therefore computed on the SAME rows, and HOP_TOL is
+    swept so the coverage/noise trade-off is visible instead of assumed.
 
 GATES (all three must pass or the script exits):
   1. JOIN - the day-reconstructed archive index equals PERFOLD's day_te (verbatim from
@@ -188,6 +197,59 @@ for lo, hi in BANDS:
     log(f"{f'{lo}-{hi}':>13} | " + " | ".join(
         f"{row[t].get('n',0):>9,} {row[t].get('ev',0):>+8.3f}" for t, _ in POPS)
         + f" | {row['all'].get('ev',0):>+8.3f}")
+
+# ------------------------------------------------- THE 150s PAIRED COMPARISON (the answer)
+TS = z["ts"].astype(np.int64)
+if not np.all(np.diff(TS) >= 0):
+    raise SystemExit("archive ts is not sorted -- the hop construction assumes it is")
+NS = 1_000_000_000
+
+
+def hop(sec, tol):
+    tgt = TS + int(sec * NS)
+    j = np.clip(np.searchsorted(TS, tgt, "left"), 0, len(TS) - 1)
+    return j, (np.abs(TS[j] - tgt) <= tol * NS) & (day_all[j] == day_all)
+
+
+j30, ok30 = hop(30, 5)
+g = ok30 & np.isfinite(RH[30]) & np.isfinite(RH[30][j30]) & np.isfinite(RH[60])
+ch = RH[30][g] + RH[30][j30][g]; di = RH[60][g]
+log(f"\n[CHAIN GATE] chained(30+30) vs direct rH60 on n={int(g.sum()):,}: means {ch.mean():+.4f} / "
+    f"{di.mean():+.4f}, corr {np.corrcoef(ch, di)[0, 1]:.4f}, sd(diff) {(ch-di).std():.3f}bp")
+if abs(ch.mean() - di.mean()) > 0.05 or np.corrcoef(ch, di)[0, 1] < 0.95:
+    raise SystemExit("CHAIN GATE FAILED: the leg composition does not reproduce the direct leg")
+
+mk_ok = fil & np.isfinite(net)
+res["paired150"] = []
+log(f"\n=== {SYM} IMMEDIATE (gross mid, 150s from the decision) vs MAKER (net, 150s from the "
+    f"fill), PAIRED on identical rows")
+for tol in (5, 15, 30, 60):
+    j60, ok60 = hop(60, tol); j120, ok120 = hop(120, tol)
+    r150 = RH[60] + RH[60][j60] + RH[30][j120]
+    v = (ok60 & ok120 & np.isfinite(r150))[idx]
+    fwd150 = np.where(side, r150[idx], -r150[idx])
+    log(f"--- hop tolerance +-{tol}s")
+    log(f"{'band':>12} {'cov':>6} {'n paired':>9} | {'immediate':>10} {'hit':>6} | "
+        f"{'maker':>8} {'hit':>6} | {'diff':>8} {'se':>6}")
+    for lo, hi in BANDS + [("DEP", "DEP")]:
+        if lo == "DEP":
+            bm = dep; lab = f"FIXQ t{BUDGET:.0f}"
+        else:
+            bm = (pct >= lo) & (pct < hi) if hi < 100 else (pct >= lo)
+            lab = f"{lo}-{hi}"
+        p = bm & v & mk_ok
+        if p.sum() < 30:
+            continue
+        a = fwd150[p]; b = net[p]; d = a - b
+        rec = dict(tol=tol, band=lab, cov=float(v[bm].mean()), n=int(p.sum()),
+                   immediate=float(a.mean()), maker=float(b.mean()), diff=float(d.mean()),
+                   se=float(d.std(ddof=1) / np.sqrt(len(d))),
+                   band_per_day=float(bm.sum() / ndays),
+                   maker_trades_per_day=float((bm & mk_ok).sum() / ndays))
+        res["paired150"].append(rec)
+        log(f"{lab:>12} {rec['cov']:>6.3f} {rec['n']:>9,} | {a.mean():>+10.3f} "
+            f"{100*(a>0).mean():>6.2f} | {b.mean():>+8.3f} {100*(b>0).mean():>6.2f} | "
+            f"{d.mean():>+8.3f} {rec['se']:>6.3f}")
 
 out = f"{LOCAL_DIR}/IMMEDIATE_{SYM}.json"
 with open(out, "w") as fh:
