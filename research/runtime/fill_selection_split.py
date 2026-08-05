@@ -53,7 +53,21 @@ else:
     nf = sum(1 for b in bk.client.list_blobs(bk, prefix=f"{SCORE_SUB}/PERFOLD_S0_{SYM}_qm0_f")
              if b.name.endswith(".npz"))
 
-PCT, SIDE, FL, FS, NL, NS = [], [], [], [], [], []
+KDAYS = 30                                     # strictfill_cells.py, verbatim
+BUDGET = float(os.environ.get("BUDGET", "10"))  # deployed DOGE selectivity = FIXQ t10
+
+
+def fixq_tau(tr, day_tr, k):
+    """FROZEN validation quantile at k trades/day. Transcribed from strictfill_cells.py."""
+    trd = sorted(set(day_tr.tolist()))[-KDAYS:]
+    s = tr[np.isin(day_tr, trd)]
+    if not len(s):
+        return float("inf")
+    wpd = len(s) / max(len(trd), 1)
+    return float(np.quantile(s, max(0.0, 1.0 - k / max(wpd, 1.0))))
+
+
+PCT, SIDE, FL, FS, NL, NS, DEP = [], [], [], [], [], [], []
 for f in range(nf):
     zs = [load(s, f) for s in range(NSEED)]
     z0 = zs[0]
@@ -64,8 +78,15 @@ for f in range(nf):
     SIDE.append(np.sum([x["side"].astype(int) for x in zs], 0) >= int(np.ceil(NSEED / 2)))
     FL.append(z0["fl"].astype(bool)); FS.append(z0["fs"].astype(bool))
     NL.append(z0["netl"].astype(np.float64)); NS.append(z0["nets"].astype(np.float64))
+    # THE DEPLOYED SELECTION, not a top-q proxy: the frozen-quantile threshold is computed
+    # per fold from that fold's TRAIN scores and applied to its test scores, exactly as
+    # sel_fixq does. A flat top-q over the same rows is a DIFFERENT set (FIXQ redistributes
+    # trades across days instead of taking a fixed prefix - HD5 rev1), so any statement
+    # about the traded cell has to be made on this mask.
+    tr_ = np.mean([x["axb_tr"].astype(np.float64) for x in zs], 0)
+    DEP.append(te >= fixq_tau(tr_, z0["day_tr"].astype(int), BUDGET))
 
-pct = np.concatenate(PCT); side = np.concatenate(SIDE)
+pct = np.concatenate(PCT); side = np.concatenate(SIDE); dep = np.concatenate(DEP)
 fl = np.concatenate(FL); fs = np.concatenate(FS)
 netl = np.concatenate(NL); nets = np.concatenate(NS)
 
@@ -108,6 +129,25 @@ for lo, hi, t, a, b, w, ident in rows:
     log(f"{lo:>6}-{hi:<7} {t['n']:>9} {t['ev']:>+8.3f} | {a.get('n',0):>9} {a.get('ev',0):>+8.3f} "
         f"{a.get('hit',0):>6.2f} {100*w:>5.1f}% | {b.get('n',0):>9} {b.get('ev',0):>+8.3f} "
         f"{b.get('hit',0):>6.2f} | {ident:>+7.3f}")
+
+# ------------------------------------------------------------------ THE DEPLOYED CELL
+# Same split, but on the set the live instance actually trades (FIXQ t10 for DOGE), with
+# the published cell as the gate. The counterfactual re-weights the cell's OWN conditional
+# EVs to the bulk's adverse-fill share: it answers "how much of the traded EV is avoiding
+# the one-sided fill" WITHOUT assuming the two populations are interchangeable.
+dm = dep & fil_ours & fin
+t = cell(dm); a = cell(dm & ~fil_other); b = cell(dm & fil_other)
+w_bulk = (fil_ours & fin & ~fil_other).sum() / max((fil_ours & fin).sum(), 1)
+w = a["n"] / t["n"]
+cf = w_bulk * a["ev"] + (1 - w_bulk) * b["ev"]
+res["deployed"] = dict(budget=BUDGET, selected=int(dep.sum()), all=t, alone=a, both=b,
+                       w_alone=float(w), w_alone_bulk=float(w_bulk), ev_at_bulk_share=float(cf))
+log(f"\n=== {SYM}  THE DEPLOYED CELL (FIXQ t{BUDGET:.0f}, the live selection rule)")
+log(f"  selected {int(dep.sum())} -> filled n={t['n']}  EV {t['ev']:+.3f}bp  hit {t['hit']:.2f}%"
+    f"   [gate: the published DOGE FIXQ t10 cell is +10.513bp / n=1204]")
+log(f"  ALONE n={a['n']:>5} ({100*w:.1f}%) EV {a['ev']:+.3f} | BOTH n={b['n']:>5} EV {b['ev']:+.3f}")
+log(f"  counterfactual at the bulk's ALONE share ({100*w_bulk:.1f}%): {cf:+.3f}bp "
+    f"-> {t['ev']-cf:+.3f}bp of the cell is one-sided-fill avoidance")
 
 if LOCAL_DIR:
     with open(f"{LOCAL_DIR}/FILLSPLIT_{SYM}.json", "w") as fh:
