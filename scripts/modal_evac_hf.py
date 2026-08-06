@@ -30,8 +30,11 @@ import subprocess
 
 import modal
 
+# hf_hub >=0.27: 0.26.2's upload_large_folder dies with UnboundLocalError in
+# read_upload_metadata on the stale snapshot_download .cache the hydrated
+# volumes carry (measured on ws06 /cache/hd2); the stale dirs are also rm'd.
 IMG = (modal.Image.debian_slim(python_version="3.11")
-       .pip_install("huggingface_hub[hf_transfer]==0.26.2", "modal==1.4.3"))
+       .pip_install("huggingface_hub[hf_transfer]>=0.34,<1", "modal==1.4.3"))
 VOL = modal.Volume.from_name("hd2-cache")
 MNT = "/cache"
 app = modal.App("ml-research-evac-hf")
@@ -60,17 +63,37 @@ def _du(path):
     return round(t / 2**30, 2)
 
 
+def _retry(fn, tries=8, wait=330):
+    """Ride out HF's 1000-req/5-min account quota (measured 429 when two
+    pushers run concurrently). upload_large_folder is resumable, so simply
+    re-calling after the window continues where it stopped."""
+    import time
+    from huggingface_hub.errors import HfHubHTTPError
+    for i in range(tries):
+        try:
+            return fn()
+        except HfHubHTTPError as e:
+            if i == tries - 1 or "429" not in str(e):
+                raise
+            print(f"HF_429_BACKOFF try={i} wait={wait}s")
+            time.sleep(wait)
+
+
 def _push_large(api, ds, src):
-    api.create_repo(ds, repo_type="dataset", private=False, exist_ok=True)
-    api.upload_large_folder(repo_id=ds, repo_type="dataset", folder_path=src,
-                            ignore_patterns=IGNORE, num_workers=8)
+    _retry(lambda: api.create_repo(ds, repo_type="dataset", private=False,
+                                   exist_ok=True))
+    _retry(lambda: api.upload_large_folder(
+        repo_id=ds, repo_type="dataset", folder_path=src,
+        ignore_patterns=IGNORE, num_workers=8))
     return {"ds": ds, "gib": _du(src)}
 
 
 def _push_results(api, ws, src):
-    api.create_repo(DS_RES, repo_type="dataset", private=False, exist_ok=True)
-    api.upload_folder(repo_id=DS_RES, repo_type="dataset", folder_path=src,
-                      path_in_repo=ws, ignore_patterns=IGNORE)
+    _retry(lambda: api.create_repo(DS_RES, repo_type="dataset", private=False,
+                                   exist_ok=True))
+    _retry(lambda: api.upload_folder(repo_id=DS_RES, repo_type="dataset",
+                                     folder_path=src, path_in_repo=ws,
+                                     ignore_patterns=IGNORE))
     return {"ds": f"{DS_RES}/{ws}", "gib": _du(src)}
 
 
