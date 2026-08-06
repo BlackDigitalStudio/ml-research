@@ -210,6 +210,38 @@ def train_v1_fn(seed: int):
     return f"v1 seed{seed} trained"
 
 
+NOOI_SUB = "maker_labels_tb3s_h150anch_v2_nooi"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_nooi_fn(seed: int):
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", "DOGE", "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": str(seed), "CFGIDX": "1", "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{seed}", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": "59,60", "OUT_SUB": NOOI_SUB})
+    vol.commit()
+    return f"nooi seed{seed} trained"
+
+
+@app.local_entrypoint()
+def train_nooi():
+    for r in train_nooi_fn.map([0, 1, 2, 3], return_exceptions=True):
+        print(r, flush=True)
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
+def finish_nooi_fn():
+    ex = {"XSYM_SUB": NOOI_SUB}
+    for s in (0, 1, 2, 3):
+        _run([sys.executable, "/repo/runtime/perseed_from_pf.py", "DOGE", str(s)], extra=ex)
+    out = _run([sys.executable, "/repo/runtime/ens_sym.py", "DOGE"], extra=ex)
+    for tgt in ("1", "2", "3", "5", "10"):
+        out += _run([sys.executable, "/repo/runtime/bybit_repl/bybit_t10.py", "DOGE"],
+                    extra=dict(ex, TGT=tgt))
+    vol.commit()
+    return out
+
+
 @app.local_entrypoint()
 def train_v1():
     print(v1_prep.remote())
