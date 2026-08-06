@@ -38,6 +38,7 @@ image = (
         ". $HOME/.cargo/env && cd /build/husdc/rust_ingest && cargo build --release --bin build_samples"
         " --bin grid_sim_exitdbg && cp target/release/build_samples target/release/grid_sim_exitdbg /usr/local/bin/",
     )
+    .pip_install("optuna")  # v1 protocol dependency (appended layer — keeps cargo layers cached)
     .add_local_dir(os.path.join(REPO, "scripts"), "/repo/scripts")
     .add_local_dir(os.path.join(REPO, "research", "runtime"), "/repo/runtime")
 )
@@ -179,6 +180,52 @@ def finish_fn():
     out = _run([sys.executable, "/repo/runtime/ens_sym.py", "DOGE"])
     out += _run([sys.executable, "/repo/runtime/bybit_repl/bybit_t10.py", "DOGE"], extra={"TGT": "10"})
     out += _run([sys.executable, "/repo/runtime/bybit_repl/bybit_t10.py", "DOGE"], extra={"TGT": "5"})
+    vol.commit()
+    return out
+
+
+V1SUB = "maker_labels_tb3s_h150anch_v1"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=2048, timeout=1800)
+def v1_prep():
+    import shutil
+    src = "/vol/gcs/market-data-0998ac51/research_runs/maker_labels_tb3s_h150anch/DOGE.npz"
+    dst_dir = f"/vol/gcs/market-data-0998ac51/research_runs/{V1SUB}"
+    os.makedirs(dst_dir, exist_ok=True)
+    dst = f"{dst_dir}/DOGE.npz"
+    if not os.path.exists(dst):
+        shutil.copyfile(src, dst + ".tmp")
+        os.replace(dst + ".tmp", dst)
+    vol.commit()
+    return f"v1 dataset prefix ready ({os.path.getsize(dst)/1e6:.0f} MB)"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=5, memory=18432, timeout=6 * 3600)
+def train_v1_fn(seed: int):
+    _run([sys.executable, "/repo/scripts/subs60_xgb_optuna_ic.py", "DOGE", V1SUB, "0", "5"],
+         extra={"SEED": str(seed), "CFGIDX": "1", "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{seed}", "FOLD_PAR": "1"})
+    vol.commit()
+    return f"v1 seed{seed} trained"
+
+
+@app.local_entrypoint()
+def train_v1():
+    print(v1_prep.remote())
+    for r in train_v1_fn.map([0, 1, 2, 3], return_exceptions=True):
+        print(r, flush=True)
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
+def finish_v1_fn():
+    ex = {"XSYM_SUB": V1SUB}
+    for s in (0, 1, 2, 3):
+        _run([sys.executable, "/repo/runtime/perseed_from_pf.py", "DOGE", str(s)], extra=ex)
+    out = _run([sys.executable, "/repo/runtime/ens_sym.py", "DOGE"], extra=ex)
+    for tgt in ("1", "2", "3", "5", "10", "20"):
+        out += _run([sys.executable, "/repo/runtime/bybit_repl/bybit_t10.py", "DOGE"],
+                    extra=dict(ex, TGT=tgt))
     vol.commit()
     return out
 
