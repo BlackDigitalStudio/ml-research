@@ -24,6 +24,14 @@ SYM = sys.argv[1] if len(sys.argv) > 1 else "DOGE"
 SUB = "research_runs/" + os.environ.get("XSYM_SUB", "maker_labels_tb3s_h150anch")
 TGTS = [float(x) for x in os.environ.get("TGTS", "1.25,2.5,5").split(",")]
 SEEDS = [int(x) for x in os.environ.get("SEEDS", "0,1,2,3").split(",")]
+# MEMBERS: cross-prefix member list "sub:seed,sub:seed,..." (overrides SUB/SEEDS) —
+# lets one union mix protocols (v1+v2), since all prefixes share the same dataset,
+# folds, days and labels (only the models differ).
+_MEMBERS = os.environ.get("MEMBERS", "")
+if _MEMBERS:
+    MEMBERS = [(("research_runs/" + p.split(":")[0]), int(p.split(":")[1])) for p in _MEMBERS.split(",")]
+else:
+    MEMBERS = [(SUB, s) for s in SEEDS]
 KDAYS = 30
 bk = storage.Client(project="x").bucket("market-data-0998ac51")
 
@@ -42,10 +50,14 @@ def select(z, tgt):
     return set(sel)
 
 
-nf = sum(1 for b in bk.client.list_blobs(bk, prefix=f"{SUB}/PERFOLD_S0_{SYM}_qm0_f") if b.name.endswith(".npz"))
-Z = {s: [np.load(io.BytesIO(bk.blob(f"{SUB}/PERFOLD_S{s}_{SYM}_qm0_f{f}.npz").download_as_bytes()))
-         for f in range(nf)] for s in SEEDS}
-print(f"{SUB.split('/')[-1]} {SYM}: folds={nf} | union-of-seeds policy (no jitter, standing directive)", flush=True)
+_sub0 = MEMBERS[0][0]
+nf = sum(1 for b in bk.client.list_blobs(bk, prefix=f"{_sub0}/PERFOLD_S{MEMBERS[0][1]}_{SYM}_qm0_f")
+         if b.name.endswith(".npz"))
+Z = {m: [np.load(io.BytesIO(bk.blob(f"{m[0]}/PERFOLD_S{m[1]}_{SYM}_qm0_f{f}.npz").download_as_bytes()))
+         for f in range(nf)] for m in MEMBERS}
+SEEDS = MEMBERS  # downstream indexing is by member key
+print(f"{len(MEMBERS)} members {[(m[0].split('/')[-1], m[1]) for m in MEMBERS]} {SYM}: folds={nf} | "
+      f"union policy (no jitter, standing directive)", flush=True)
 
 out = {"nf": nf, "seeds": SEEDS}
 for tgt in TGTS:
@@ -121,6 +133,6 @@ for tgt in TGTS:
                                       ev_p95=float(np.quantile(b_ev, .95)), Ppos=float(100 * np.mean(b_ev > 0)),
                                       bpd_p5=float(np.quantile(b_bpd, .05)), bpd_p95=float(np.quantile(b_bpd, .95))))
 
-_tag = "" if SEEDS == [0, 1, 2, 3] else f"_s{len(SEEDS)}"
+_tag = os.environ.get("UTAG", "" if [m[1] for m in MEMBERS] == [0, 1, 2, 3] and not _MEMBERS else f"_s{len(MEMBERS)}")
 bk.blob(f"{SUB}/HBV1_UNION_{SYM}{_tag}.json").upload_from_string(json.dumps(out, default=float))
 print("\n[saved HBV1_UNION]", flush=True)

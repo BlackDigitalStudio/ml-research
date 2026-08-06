@@ -280,9 +280,14 @@ def corr_fn(sub: str = "maker_labels_tb3s_h150anch"):
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
-def union_fn(sub: str = "maker_labels_tb3s_h150anch", seeds: str = "0,1,2,3", tgts: str = "1.25,2.5,5"):
-    return _run([sys.executable, "/repo/runtime/bybit_repl/union_policy.py", "DOGE"],
-                extra={"XSYM_SUB": sub, "SEEDS": seeds, "TGTS": tgts})
+def union_fn(sub: str = "maker_labels_tb3s_h150anch", seeds: str = "0,1,2,3", tgts: str = "1.25,2.5,5",
+             members: str = "", utag: str = ""):
+    extra = {"XSYM_SUB": sub, "SEEDS": seeds, "TGTS": tgts}
+    if members:
+        extra["MEMBERS"] = members
+    if utag:
+        extra["UTAG"] = utag
+    return _run([sys.executable, "/repo/runtime/bybit_repl/union_policy.py", "DOGE"], extra=extra)
 
 
 V1NOOI_SUB = "maker_labels_tb3s_h150anch_v1_nooi"
