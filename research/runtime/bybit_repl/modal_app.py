@@ -183,6 +183,17 @@ def finish_fn():
     return out
 
 
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=1800)
+def tsurf_fn(tgt: str):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/bybit_t10.py", "DOGE"], extra={"TGT": tgt})
+
+
+@app.local_entrypoint()
+def tsurf():
+    for r in tsurf_fn.map(["1", "2", "3", "20"], return_exceptions=True):
+        print(r, flush=True)
+
+
 @app.local_entrypoint()
 def stage(name: str = "probe"):
     if name == "probe":
