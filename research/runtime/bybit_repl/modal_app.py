@@ -104,7 +104,7 @@ def aux():
     return "aux done"
 
 
-@app.function(image=image, volumes={"/vol": vol}, cpu=4, memory=12288, timeout=5400,
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=9216, timeout=5400,
               retries=modal.Retries(max_retries=2), max_containers=40)
 def day_fn(day: str):
     done = f"/vol/gcs/market-data-0998ac51/research_runs/maker_labels_tb3s_h150/daily/DOGE_{day}.npz"
@@ -177,6 +177,8 @@ def finish_fn():
     for s in (0, 1, 2, 3):
         _run([sys.executable, "/repo/runtime/perseed_from_pf.py", "DOGE", str(s)])
     out = _run([sys.executable, "/repo/runtime/ens_sym.py", "DOGE"])
+    out += _run([sys.executable, "/repo/runtime/bybit_repl/bybit_t10.py", "DOGE"], extra={"TGT": "10"})
+    out += _run([sys.executable, "/repo/runtime/bybit_repl/bybit_t10.py", "DOGE"], extra={"TGT": "5"})
     vol.commit()
     return out
 
