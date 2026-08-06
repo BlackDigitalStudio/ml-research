@@ -93,6 +93,16 @@ struct Args {
     /// PEGGED-EXIT queue = exit_queue_mult × entry_q(close-touch). ALWAYS-LAST => >=1 (full depth).
     #[arg(long, default_value_t = 1.0)]
     exit_queue_mult: f64,
+    /// STRICT entry fill (OPS-EXEC rev16): pure queue model on PRICE-RESOLVED flow —
+    /// cumulative taker volume that traded THROUGH our level clears the queue ahead, and
+    /// nothing else fills us. Removes the library's unconditional gap-through branch.
+    /// REQUIRES --level-flow-paths. OFF by default: historical cells stay byte-reproducible.
+    #[arg(long, default_value_t = false)]
+    strict_entry_fill: bool,
+    /// flow_lvl_paths.npy from build_samples --emit-level-flow: [ns, h, 2] =
+    /// [sell volume at price <= entry_long, buy volume at price >= entry_short] per tick.
+    #[arg(long)]
+    level_flow_paths: Option<PathBuf>,
 
     // ─── TIME-BASED windows (opt-in). Event-driven books (Cryptolake) have variable
     //     tick density, so tick-count windows are NOT wall-clock. With --ts-paths +
@@ -397,6 +407,54 @@ fn compute_metrics(
     )
 }
 
+/// STRICT maker entry (OPS-EXEC rev16, `--strict-entry-fill` + `--level-flow-paths`).
+///
+/// The library `live_sim::simulate_maker_entry` treats a strict gap past our level as an
+/// UNCONDITIONAL fill (`if b.bid < level_px - eps { return FILLED }`) — no flow required,
+/// queue ignored. That collapses two physically different cases: the resting size at our
+/// level was TRADED through (we fill only if the flow exceeded the queue ahead of us)
+/// versus it was CANCELLED (we are merely alone at the top of book, unfilled). Measured
+/// on the live DOGEUSDC anchor, 3/3 phantom entry fills came through that branch.
+///
+/// The blocker was that `FlowL1` is PRICE-AGNOSTIC (total taker volume per tick), so
+/// "flow arrived" could not be narrowed to "flow arrived at or through OUR level" — an
+/// intermediate fix that only demanded *some* flow in the gap tick was measured and
+/// REJECTED (rev15: it removed nothing on the USDT book and produced a false negative on
+/// a real USDC fill). With price-resolved flow (`build_samples --emit-level-flow`) the
+/// model collapses to the textbook queue rule and needs no book branches at all:
+///
+///   queue = queue_mult × depth-at-our-level;  each tick: queue -= volume traded THROUGH
+///   our level;  fill when queue <= 0;  otherwise MISS.
+///
+/// Validated against the six real live events on the venue we trade (DOGEUSDC): 6/6 —
+/// all three live entry misses miss, all three live fills fill (rev16). On the USDT book
+/// the phantom fills survive, which is the correct answer: that venue really does carry
+/// the flow, so the residual error there is the VENUE, not the model.
+fn simulate_maker_entry_level(
+    direction: SimDirection,
+    level_px: f64,
+    q0: f64,
+    level_flow: &[(f64, f64)],
+    window: usize,
+) -> Option<(usize, f64)> {
+    if level_px <= 0.0 {
+        return None;
+    }
+    let mut queue = q0.max(0.0);
+    let n = level_flow.len().min(window);
+    for k in 0..n {
+        let v = match direction {
+            SimDirection::Long => level_flow[k].0,  // sells at price <= our bid level
+            SimDirection::Short => level_flow[k].1, // buys at price >= our ask level
+        };
+        queue -= v;
+        if queue <= 0.0 {
+            return Some((k, level_px));
+        }
+    }
+    None
+}
+
 /// PEGGED maker exit (no taker). Rest a close-limit pegged to the touch (Long closes SELL on the ask,
 /// Short closes BUY on the bid), ALWAYS LAST in queue. On an adverse touch move (price runs away) we
 /// re-quote to the new touch and reset the queue (back of the new line). Fill (maker, 0 fee) when
@@ -484,6 +542,14 @@ fn main() -> Result<()> {
         Some(p) => Some(read_npy(p).context("flow_paths")?),
         None => None,
     };
+    let level_flow_paths: Option<Array3<f32>> = match &a.level_flow_paths {
+        Some(p) => Some(read_npy(p).context("level_flow_paths")?),
+        None => None,
+    };
+    anyhow::ensure!(
+        !a.strict_entry_fill || level_flow_paths.is_some(),
+        "--strict-entry-fill requires --level-flow-paths (build_samples --emit-level-flow)"
+    );
     let entry_q_arr: Option<Array2<f64>> = match &a.entry_q {
         Some(p) => Some(read_npy(p).context("entry_q")?),
         None => None,
@@ -605,8 +671,23 @@ fn main() -> Result<()> {
                     } else {
                         a.entry_window_ticks.max(0) as usize
                     };
-                    let fl_e = simulate_maker_entry(SimDirection::Long, lvl_l, q_l, &path, &flowv, win);
-                    let fs_e = simulate_maker_entry(SimDirection::Short, lvl_s, q_s, &path, &flowv, win);
+                    let (fl_e, fs_e) = if a.strict_entry_fill {
+                        // price-resolved queue model (rev16): volume that traded THROUGH
+                        // our level is the only thing that fills us.
+                        let lf = level_flow_paths.as_ref().unwrap().index_axis(ndarray::Axis(0), i);
+                        let lvlv: Vec<(f64, f64)> = (0..h)
+                            .map(|t| (lf[[t, 0]] as f64, lf[[t, 1]] as f64))
+                            .collect();
+                        (
+                            simulate_maker_entry_level(SimDirection::Long, lvl_l, q_l, &lvlv, win),
+                            simulate_maker_entry_level(SimDirection::Short, lvl_s, q_s, &lvlv, win),
+                        )
+                    } else {
+                        (
+                            simulate_maker_entry(SimDirection::Long, lvl_l, q_l, &path, &flowv, win),
+                            simulate_maker_entry(SimDirection::Short, lvl_s, q_s, &path, &flowv, win),
+                        )
+                    };
                     // pegged exit, ALWAYS LAST: queue = full close-touch depth × exit_queue_mult.
                     // long closes SELL on ask -> ask depth entry_q[1]; short closes BUY on bid -> bid depth entry_q[0].
                     let qex_l = entry_q_arr.as_ref().map(|q| q[[i, 1]]).unwrap_or(0.0) * a.exit_queue_mult;

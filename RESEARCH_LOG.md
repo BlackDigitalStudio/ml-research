@@ -1340,3 +1340,155 @@ takes/day from independent-WS jitter); averaging 4 seeds is what stabilizes the 
 - Next: WS capture layer (engine records its own consumed stream; daily replay must equal
   the decision log bit-for-bit) — removes the last measurement/live gap; twin-engine
   session-jitter quantification; per-trade live-vs-sim execution ledger as trades accrue.
+
+## 23. 2026-07-11 — HD3 rev8: cross-symbol year surface of the anchored h150 policy (7 symbols)
+
+**Question (exploratory):** on which symbols does the DEPLOYED anchored-h150 policy class
+(60s entry / 150s hold from fill / pegged never-taker chase / anchored funding / causal t5 /
+4-seed ensemble) yield year-scale alpha, how large, and how seed/selection-stable?
+Protocol byte-frozen = rev7; new datasets (BNB/LTC/SOL/XRP/LINK) built at the recovered
+cross-symbol parameter **H_TICKS=1800** (FULLFEAT; bit-exact pipeline reproduction proven
+before launch); BTC/ETH label files reused from s21 builds; anchored intervention
+col13:=day-first, col44:=0. Ledger `tb3s-20260710_h150anch_year_xsym` (+ 2 preregistered
+amendments).
+
+**The surface** (t5, bp/trade; per-seed = 4 seeds mean±sd; ENS = deployed mean-rank scoring,
+majority-vote side; jitter = P(EV>0) under score perturbation, 100 reps):
+
+| sym | per-seed EV [seeds] | ENS EV (n, hit) | LOFO min | jitter sd.02 / sd.05 |
+|---|---|---|---|---|
+| DOGE (ref, s22) | +8.14±2.55 [7.0/12.5/6.0/7.1] 4/4 | **+13.35** (563, 65.2%) | +10.85 | P100% / **P100%** |
+| **XRP** | **+10.97±3.50** [10.6/11.4/6.0/15.9] 4/4 | **+12.68** (504, 58.5%) | +8.36 | P100% / P41% |
+| BTC | +6.20±2.76 [4.5/6.9/10.4/3.0] 4/4 | +3.83 (574, 54.9%) | +1.11 | P56% / P0% |
+| ETH | +4.86±3.83 [-0.7/7.1/3.5/9.5] 3/4 | +7.36 (419, 55.6%) | +3.34 | P23% / P4% |
+| SOL | -2.59±4.37 | -5.05 (773) | — | P0% / P0% |
+| BNB | -4.24±0.57 0/4 | -3.00 (775) | — | P0% / P0% |
+| LTC | -8.77±4.29 0/4 | -10.77 (611) | — | P0% / P0% |
+| LINK | degenerate: 246d/2 folds, causal t5 selects 0-3 trades/seed | — | — | — |
+
+**Conditions that drive the surface (the deliverable):**
+1. The policy class carries year alpha on a **minority of symbols**; argmax = XRP at
+   DOGE-magnitude. Positive cells are thin-book alts (DOGE 1.4-2.3/s, XRP ~1.9/s).
+2. **Ensemble stabilization is NOT universal**: DOGE amplifies (+8.1→+13.4) and is
+   jitter-proof at sd.05; XRP amplifies (+11.0→+12.7) but survives only sd.02; BTC
+   ensemble DEGRADES the per-seed mean (+6.2→+3.8) and is selection-fragile. The
+   load-bearing DOGE finding (s22) does not transfer for free.
+3. Sign does not reduce to book density: LTC/BNB (~1.3-1.4/s) and SOL (~2.3/s) are
+   negative at densities similar to the positives. Symbol identity matters beyond density.
+4. BTC/ETH cells carry the **H_TICKS=1800 caveat** (~200s forward path at ~9 ticks/s →
+   chase run-out marked at touch more often) — not execution-comparable to thin-book cells.
+5. Fold structure: XRP concentrated in folds 1-3, BTC in fold3; LTC negative broadly
+   (5/6 folds); months near zero remain normal for this class (s22).
+
+**Secondary deploy-gate annotation** (confirmatory question only): XRP = conditional
+candidate — passes seed-gate (mean−sd = +7.47) and ens jitter at sd.02 (P100), fails sd.05
+(P41); next step per prereg = rev6-style recorder-EV cross-check with that flag. BTC fails
+the required perturbation gate despite seed-gate pass. ETH marginal. Others fail. No
+capital action taken.
+
+**Ops (research-throughput line):** campaign ran on 2 VMs (n2-highmem-8 → n2-highmem-32 in
+the 32-vCPU delmiron27 project), 28 seed-runs ≈ 200 core-h ≈ $15, ~19h wall first-launch →
+last-ensemble incl. three debugged incidents (OOM cgroup kill; /tmp binary wipe → partial
+datasets caught+guarded; GCE default read-only scopes). Seed-parallel orchestrator v2
+(`research/runtime/orchestrate2.py`, per-seed jsons recomputed from PERFOLD — <1e-7bp vs
+direct) did 15 seed-runs in 5.7h. Next-run projection with baked image + full parallelism:
+~3h end-to-end. All run knowledge captured in `research/runtime/KNOWN_PITFALLS.md`.
+
+## 24. 2026-07-12 — HD4 rev1: 10s-направление предсказуемо model-free на всех 4 символах; BTC — сильнейший (dir10 screen)
+
+**Program**: BTC/ETH expansion, user hypothesis 2 (продление h150-холда 10s-квантами по
+сигналу направления в t=fill+150s). Rev1 = stage-1 exploratory screen: predictability of
+the NEXT-10s mid direction from the deployed algorithm's own feature signals, **no ML, no
+fitting** (prereg `dir10-20260712_cl_screen`; script `scripts/subs60_dir10_screen.py`).
+Cell: CL year (2025-05-09..2026-06-02), tb3s 3s decision grid (maker_labels_tb3s_h150
+dailies, F71), forward mid log-ret at H∈{5,10,15,20,30,60}s (realized horizon ∈[H−2,H],
+no future-side slack), daily rank-IC / dir-hit / signed capture at |signal| cuts
+q∈{0,.5,.9,.99}; COMP = preregistered fixed-sign rank composite
+[0,1,12,26,27,28,62,63,64,65,66].
+
+**The surface (headline, H=10s, mean daily rank-IC over the year):**
+
+| sym | COMP ric@10s | argmax feature ric@10s | hit@q90 | capture @q90 / @q99 (bp/10s) | months ric>0 |
+|---|---|---|---|---|---|
+| **BTC** | **+0.239** | OBI_L1/microprice **+0.266** | **0.666** | +0.73 / +0.85 | 14/14 (+0.13..+0.33) |
+| ETH | +0.146 | OBI_L1/imb_L5 +0.169 | 0.62 | +0.76 / +0.87 | 13/13 |
+| XRP | +0.143 | microprice +0.189 | 0.576 | +0.80 / +0.93 | 13/13 |
+| DOGE | +0.119 | microprice/OBI_L1 +0.171 | 0.561 | +0.86 / +0.95 | 13/13 |
+
+Conditions that drive the surface:
+1. **Argmax = мгновенная форма книги** (OBI_L1/microprice ≈ rank-дубликаты, imb_L5,
+   OBI_L10/L20). OFI-семейство (1–5s суммы) — самое стабильное по дням (BTC imb_d5
+   t=+141), но capture ниже (~+0.3–0.4bp). Кросс-АКТИВНЫЙ суб-минутный лид жив, но
+   второго порядка (eth_r5→BTC ric +0.106, t+72; btc_r* нигде не в топ-12).
+2. **Порядок символов ИНВЕРТИРОВАН относительно h150 maker-EV**: BTC (слабейший в year
+   maker-EV) — сильнейший по 10s-направлению; плотная книга делает book-shape
+   информативнее. Сигнал для продления холда есть именно там, где базовая политика
+   слабее всего.
+3. **Decay**: rank-IC ~половинится 5s→15s (BTC COMP +0.30→+0.20); кумулятивный capture
+   слабо растёт с H при падающем hit — 10s-квант около колена кривой.
+4. **Монотонность по силе сигнала** на всех символах/горизонтах (COMP@10s q0→q99:
+   +0.28→+0.77..0.84bp) — «уверенность» для гейта продления существует.
+
+**Что это НЕ измеряет (stage 2, отдельный prereg):** capture = валовый mid-ход за
+горизонт, не EV продления (нет стоимости перестановки pegged-exit / adverse selection);
+ячейки безусловные — не conditioned на «150s внутри заполненной h150-позиции»;
+кросс-БИРЖЕВЫЕ колонки в CL структурно мертвы → rev на данных рекордера следом.
+Coverage r10: BTC/ETH ~0.99, DOGE/XRP 0.77–0.81 (свойство ячейки: разреженная книга +
+правило [H−2,H]). Artifacts: `research_runs/h2_dir10/` (daily {ts,mid,bid0,ask0,R,RV} —
+переиспользуемы для stage-2 сима; per-day stat tensors; code). VM dir10-1, ~35 мин, <$1.
+
+**s24 addendum (tail-selectivity, user question)**: top-K/день cut (K=5 ≈ деплойные
+0.017%): захват НАСЫЩАЕТСЯ в хвосте — 1%→0.02% добавляет лишь ~10–25% (BTC imb_L5@10s
++0.84→+1.02bp hit 0.72; DOGE OBI_L1 +0.93→+1.14bp; ETH/XRP COMP ~+1.0/+1.35bp), в
+отличие от обученного скора, где хвост несёт всё. Осторожно: f32 top3_asym в экстремальном
+хвосте DOGE/XRP ИНВЕРТИРУЕТСЯ (реверсия) — монотонность хвоста проверять посигнально;
+book-shape и COMP монотонны на всех 4. Ledger `dir10-20260712_cl_screen_tailamend`.
+
+**s24 addendum-2 (chained 10s holds, user rule)**: цепочечное правило работает model-free,
+но его рабочая форма — **порог продолжения мягче порога входа** (вход q90/q99, продолжение
+|S|>q50 того же знака): длина цепи 1.3–1.75 окон, P(≥2) 0.20–0.42, продление добавляет
++0.16..+0.28bp/эпизод к +0.65..+0.97bp первого окна (~+20–35%), added>0 в 95–100% дней
+(q90-вход). Строгое продолжение (q_cont=q_entry) убивает цепи (len→1.0, added→0).
+Пошаговый захват положителен на шагах 2–4 на всех символах (BTC +0.76/+0.48/+0.44/+0.37);
+выходы: ~60% flip / ~35% weak. BTC/ETH добавляют больше DOGE/XRP — согласуется с порядком
+предиктивности. Ledger `dir10-20260712_cl_chain`.
+
+**s24 addendum-3 (квант удержания 30s/60s vs 10s)**: тотал bp/эпизод ПЛОСКИЙ по квантам
+(~+1.0–1.26 при 10/30/60s), длительность растёт 3–6×, bp/сек падает 0.07–0.09 → 0.012–
+0.017, стабильность added по дням деградирует (BTC d+ 0.97→0.78, ETH 0.86→0.64). Добыча
+сигнала ~1bp реализуется в первые ~10–30 секунд; 10s-квант — argmax по времени и
+стабильности (согласуется с decay rank-IC 5→15s). Мягкое продолжение работает на всех
+квантах; строгое убивает цепи везде. Ledger `dir10-20260712_cl_chain_h3060`.
+
+## 25. 2026-07-12 — HD5 rev1: статичный порог селективности (гипотеза 1) — поверхность
+
+**Вопрос**: захардкоженный порог уверенности вместо динамического causal tau (правило
+юзера: среднее пост-фактум топ-K скоров по дням валидационного окна). Ре-анализ PERFOLD
+(anchored h150, 4 seeds × 6 folds, ens-скоринг), базлайн = динамический tau на тех же
+артефактах (воспроизведён точно). Ledger `h1fixedtau-20260712_cl_year` (+FIXQ-амендмент).
+
+**Буквальная форма правила сломана шкалой скора**: тестовые AxB-скоры клипаются в 1.0
+(rank-CDF относительно train-окна), порог «среднее топ-K» ≈0.998 пропускает 32–60
+сделок/день; EV/tr → BTC −0.67 / ETH −1.72 / XRP −1.83 / DOGE +1.33.
+
+**FIXQ-форма (замороженный квантиль валидации под K/день, без дневной адаптации) — честный
+тест «статичный vs адаптивный»**. Главный механизм: статичный порог НЕ уменьшает число
+сделок, а **перераспределяет их во времени** — 69–86% дней без сделок, торговля
+концентрируется в ~15–30% дней по ~15–20/день (высокоскорные режимы):
+
+| cell | FIXQ EV/tr (bpd) | DYN EV/tr (bpd) | FIXQ jitter .02/.05 |
+|---|---|---|---|
+| DOGE t5 | **+17.07** (+55.7) | +13.35 (+44.5) | p50 +7.46 **P100** / +2.92 **P100** |
+| DOGE t10 | **+10.51** (+74.9) | +8.42 (+61.5) | P100 / P100 |
+| XRP t5 | +21.31 (+52.4) | +12.68 (+39.2) | p50 +3.64 P100 / **P7** (DYN P41) |
+| BTC t5 | +2.25 (+5.1) | +3.83 (+13.1) | P66 / P0 |
+| ETH t5 | +5.08 (+7.7) | +7.36 (+19.4) | P5 / P1 |
+
+Чтение: на тонких книгах (DOGE/XRP) уровень скора несёт режимную информацию — концентрация
+в высокоскорные режимы и есть alpha (вспоминаемый юзером эффект «EV/tr сильно растёт»
+подтверждён); на BTC/ETH уровень скора не переносится между режимами, статичная планка
+просто пропускает хорошие месяцы. **Гипотеза 1 не чинит BTC/ETH** (цели расширения).
+Secondary deploy-примечание: DOGE FIXQ t5/t10 — единственная ячейка, бьющая деплой-политику
+по базовому EV при полном прохождении jitter-батареи; кандидат на recorder cross-check,
+капитальных действий нет. Caveats: FIXQ рекалибруется на границе фолда (месячно);
+occupancy-профиль (86% пустых дней) для портфеля не оценён.

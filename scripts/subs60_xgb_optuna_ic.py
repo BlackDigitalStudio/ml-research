@@ -22,7 +22,14 @@ W, T, EMB = 200, 30, 2; NF_RATE = 0.05; GATE_PCT = 5.0; KDAYS = 30; KNORM = 20
 SUBVAL_D = 30; N_TRIALS = int(os.environ.get("N_TRIALS", "25")); TUNE_SUB = 200000; SEED = int(os.environ.get("SEED", "0"))
 CFGIDX, RHKEY = int(os.environ.get("CFGIDX", "1")), "rH30"
 BUDGETS = [int(x) for x in os.environ.get("BUDGETS", "5,10").split(",")]
+# OPT-IN (OBJSEL rev2, default OFF -> the search path below is untouched): supply the
+# per-fold hyperparameters instead of searching for them, so an arm can be refit to
+# deployed semantics under a CHOSEN trial. Spec = {"f0": {"hpA","biA","hpB","biB"}, ...}.
+# Adoption is gated on the incumbent's own HP reproducing the stored PERFOLD bit-exactly.
+HP_FIX = os.environ.get("HP_FIX", "")
 bk = storage.Client(project=PROJ).bucket(BUCKET)
+HPFIX = json.loads(bk.blob(HP_FIX).download_as_bytes() if HP_FIX.startswith("research_runs/")
+                   else open(HP_FIX, encoding="utf-8").read()) if HP_FIX else None
 
 
 def _space(t):
@@ -152,13 +159,23 @@ def metrics(pf):
                perfold=[round(float(p.sum() * 0.01), 1) for p in pf])
 
 
-perfold = []
-for fi, (trn, tst) in enumerate(FOLDS):
+# FOLD_PAR>1: run folds concurrently (folds share no mutable state — fresh seeded
+# optuna study / RandomState per call, per-train xgb seed+nthread unchanged), so
+# results are bit-identical to sequential; only stdout line order may differ.
+# Parity-gated (ledger xgb-optuna-foldpar-REFACTOR_PREREG). Default 1 = sequential.
+FOLD_PAR = int(os.environ.get("FOLD_PAR", "1"))
+
+
+def run_fold(fi, trn, tst):
     dtr = day[trn]; tr_days = sorted(set(dtr.tolist())); sv = set(tr_days[-SUBVAL_D:])
     sub = trn & np.isin(day, list(tr_days[:-(SUBVAL_D + EMB)])); val = trn & np.isin(day, list(sv))
     thr = float(np.quantile(np.abs(rH[trn]), 1 - NF_RATE)); yA = (np.abs(rH) >= thr).astype(int)
     spwA = float((yA[sub] == 0).sum() / max((yA[sub] == 1).sum(), 1))
-    hpA, biA, aucA = tune_A(Fn[sub], yA[sub], Fn[val], yA[val], spwA)
+    fx = HPFIX.get(f"f{fi}") if HPFIX else None
+    if fx is None:
+        hpA, biA, aucA = tune_A(Fn[sub], yA[sub], Fn[val], yA[val], spwA)
+    else:
+        hpA, biA, aucA = dict(fx["hpA"]), int(fx["biA"]), float("nan")
     spwAf = float((yA[trn] == 0).sum() / max((yA[trn] == 1).sum(), 1))
     A = fith(hpA, biA, Fn[trn], yA[trn], spw=spwAf)
     oof = oof_pA(Fn, yA, trn, day, hpA, biA); valid = trn & np.isfinite(oof)
@@ -167,7 +184,10 @@ for fi, (trn, tst) in enumerate(FOLDS):
     wq = np.where(both, np.abs(netl - nets), np.where(fl, np.abs(netl), np.where(fs, np.abs(nets), 0.0)))
     wcl = lambda mk: np.clip(wq[mk], 0, np.quantile(wq[mk][wq[mk] > 0], 0.99) if (wq[mk] > 0).any() else 1.0)
     sb = sub & (fl | fs); vb = val & both   # IC target on both-filled sub-val
-    hpB, biB, icB = tune_B_ic(Fn[sb], yB[sb], wcl(sb), Fn[vb], (netl[vb] - nets[vb]))
+    if fx is None:
+        hpB, biB, icB = tune_B_ic(Fn[sb], yB[sb], wcl(sb), Fn[vb], (netl[vb] - nets[vb]))
+    else:
+        hpB, biB, icB = dict(fx["hpB"]), int(fx["biB"]), float("nan")
     gfull = trn & (fl | fs); ggate = gate & (fl | fs)
     Bf = fith(hpB, biB, Fn[gfull], yB[gfull], w=wcl(gfull)); Bg = fith(hpB, biB, Fn[ggate], yB[ggate], w=wcl(ggate))
     tri = np.where(trn)[0]; tei = np.where(tst)[0]
@@ -178,8 +198,17 @@ for fi, (trn, tst) in enumerate(FOLDS):
     axb_tr = (np.searchsorted(sA, pA_tr, "right") / len(sA)) * (np.searchsorted(sBg, np.abs(pBg_tr - 0.5), "right") / len(sBg))
     axb_te = cdf_map(pA_te, sA) * cdf_map(np.abs(pBg_te - 0.5), sBg)
     noa_tr = np.searchsorted(sBf, np.abs(pBf_tr - 0.5), "right") / len(sBf); noa_te = cdf_map(np.abs(pBf_te - 0.5), sBf)
-    perfold.append((axb_tr, axb_te, noa_tr, noa_te, day[tri], day[tei], pBg_te >= 0.5, pBf_te >= 0.5, fl[tei], fs[tei], netl[tei], nets[tei]))
-    print(f"  fold{fi}: A AUC={aucA:.3f} | B IC(val)={icB:+.4f} (d{hpB['max_depth']},nr{biB})", flush=True)
+    _src = "" if fx is None else f" | HP_FIX trial {fx.get('src_trial')}"
+    print(f"  fold{fi}: A AUC={aucA:.3f} | B IC(val)={icB:+.4f} (d{hpB['max_depth']},nr{biB}){_src}", flush=True)
+    return (axb_tr, axb_te, noa_tr, noa_te, day[tri], day[tei], pBg_te >= 0.5, pBf_te >= 0.5, fl[tei], fs[tei], netl[tei], nets[tei])
+
+
+if FOLD_PAR > 1:
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=FOLD_PAR) as _ex:
+        perfold = list(_ex.map(lambda a: run_fold(*a), [(fi, trn, tst) for fi, (trn, tst) in enumerate(FOLDS)]))
+else:
+    perfold = [run_fold(fi, trn, tst) for fi, (trn, tst) in enumerate(FOLDS)]
 
 if os.environ.get("SAVE_PF", "") == "1":   # capture-everything: per-fold test scores for offline selectivity work
     tag = os.environ.get("PFTAG", "")

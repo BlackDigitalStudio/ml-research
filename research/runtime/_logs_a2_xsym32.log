@@ -1,0 +1,144 @@
+=== capture campaign done, A2 starts 2026-07-31T03:17:13Z ===
+[load features] research_runs/maker_labels_tb3s_h150anch/DOGE.npz
+[load labels]   research_runs/maker_labels_tb3s_h150strict/DOGE.npz
+  features N=8976874 cols=71 | labels N=8976874
+[gates] row alignment + frozen-label identity PASS
+[fills] frozen 0.8062/0.8123 -> strict 0.6665/0.6730
+[saved] gs://market-data-0998ac51/research_runs/maker_labels_tb3s_h150anch_strict/DOGE.npz (1873MB)
+[load features] research_runs/maker_labels_tb3s_h150anch/XRP.npz
+[load labels]   research_runs/maker_labels_tb3s_h150strict/XRP.npz
+  features N=8940292 cols=71 | labels N=8940292
+[gates] row alignment + frozen-label identity PASS
+[fills] frozen 0.7961/0.8002 -> strict 0.6500/0.6512
+[saved] gs://market-data-0998ac51/research_runs/maker_labels_tb3s_h150anch_strict/XRP.npz (1865MB)
+[load features] research_runs/maker_labels_tb3s_h150d/BTC.npz
+[load labels]   research_runs/maker_labels_tb3s_h150dstrict/BTC.npz
+  features N=10438107 cols=71 | labels N=10438107
+[gates] row alignment + frozen-label identity PASS
+[fills] frozen 0.7577/0.7610 -> strict 0.6150/0.6150
+[saved] gs://market-data-0998ac51/research_runs/maker_labels_tb3s_h150d_strict/BTC.npz (2234MB)
+[load features] research_runs/maker_labels_tb3s_h150danch/ETH.npz
+[load labels]   research_runs/maker_labels_tb3s_h150dstrict/ETH.npz
+  features N=10224311 cols=71 | labels N=10224311
+[gates] row alignment + frozen-label identity PASS
+[fills] frozen 0.8494/0.8544 -> strict 0.7406/0.7437
+[saved] gs://market-data-0998ac51/research_runs/maker_labels_tb3s_h150danch_strict/ETH.npz (2309MB)
+=== A2 datasets built 2026-07-31T03:29:40Z ===
+[start] A2 XRP seed2 -> a2_h150anch_strict 2026-07-31T03:29:41Z
+[start] A2 DOGE seed2 -> a2_h150anch_strict 2026-07-31T03:29:41Z
+[start] A2 DOGE seed1 -> a2_h150anch_strict 2026-07-31T03:29:41Z
+[start] A2 DOGE seed3 -> a2_h150anch_strict 2026-07-31T03:29:41Z
+[start] A2 XRP seed0 -> a2_h150anch_strict 2026-07-31T03:29:41Z
+[start] A2 DOGE seed0 -> a2_h150anch_strict 2026-07-31T03:29:41Z
+[start] A2 XRP seed1 -> a2_h150anch_strict 2026-07-31T03:29:41Z
+[done ] A2 DOGE seed1 rc=0 2026-07-31T04:59:35Z
+[start] A2 XRP seed3 -> a2_h150anch_strict 2026-07-31T04:59:42Z
+[done ] A2 XRP seed2 rc=0 2026-07-31T05:02:44Z
+[start] A2 BTC seed0 -> a2_h150d_strict 2026-07-31T05:03:12Z
+[done ] A2 XRP seed1 rc=0 2026-07-31T05:11:54Z
+[start] A2 BTC seed1 -> a2_h150d_strict 2026-07-31T05:12:12Z
+[done ] A2 DOGE seed0 rc=0 2026-07-31T05:16:55Z
+[start] A2 BTC seed2 -> a2_h150d_strict 2026-07-31T05:17:13Z
+[done ] A2 XRP seed0 rc=0 2026-07-31T05:17:50Z
+[start] A2 BTC seed3 -> a2_h150d_strict 2026-07-31T05:18:13Z
+[done ] A2 DOGE seed2 rc=0 2026-07-31T05:22:09Z
+[start] A2 ETH seed0 -> a2_v2notod_strict 2026-07-31T05:22:13Z
+[done ] A2 DOGE seed3 rc=0 2026-07-31T05:23:30Z
+[start] A2 ETH seed1 -> a2_v2notod_strict 2026-07-31T05:23:43Z
+[done ] A2 XRP seed3 rc=0 2026-07-31T06:41:16Z
+[start] A2 ETH seed2 -> a2_v2notod_strict 2026-07-31T06:41:45Z
+[done ] A2 ETH seed0 rc=0 2026-07-31T06:46:49Z
+[start] A2 ETH seed3 -> a2_v2notod_strict 2026-07-31T06:47:15Z
+[done ] A2 BTC seed1 rc=0 2026-07-31T06:58:44Z
+[start] A2 ETH seed4 -> a2_v2notod_strict 2026-07-31T06:59:15Z
+[done ] A2 ETH seed1 rc=0 2026-07-31T06:59:16Z
+[start] A2 ETH seed5 -> a2_v2notod_strict 2026-07-31T06:59:45Z
+[done ] A2 BTC seed3 rc=0 2026-07-31T07:24:16Z
+[start] A2 ETH seed6 -> a2_v2notod_strict 2026-07-31T07:24:46Z
+[done ] A2 BTC seed0 rc=0 2026-07-31T07:26:49Z
+[start] A2 ETH seed7 -> a2_v2notod_strict 2026-07-31T07:27:17Z
+[done ] A2 BTC seed2 rc=0 2026-07-31T07:30:26Z
+[done ] A2 ETH seed3 rc=0 2026-07-31T08:12:46Z
+[done ] A2 ETH seed4 rc=0 2026-07-31T08:26:33Z
+[done ] A2 ETH seed2 rc=0 2026-07-31T08:31:08Z
+[done ] A2 ETH seed5 rc=0 2026-07-31T08:40:10Z
+[done ] A2 ETH seed6 rc=0 2026-07-31T08:49:08Z
+[done ] A2 ETH seed7 rc=0 2026-07-31T09:00:26Z
+=== A2 training done, cells 2026-07-31T09:00:26Z ===
+[load] research_runs/maker_labels_tb3s_h150strict/DOGE.npz
+[load] N=8976874 days=371 fill(frozen)=0.8062 fill(strict)=0.6665
+[folds] 6  seeds=4  policy=fixq K=10.0 harmony=False
+  fold0: n_te=733418 days=30 GATES OK
+  fold1: n_te=749692 days=30 GATES OK
+  fold2: n_te=699635 days=30 GATES OK
+  fold3: n_te=758620 days=30 GATES OK
+  fold4: n_te=774967 days=30 GATES OK
+  fold5: n_te=474790 days=19 GATES OK
+[gates] all folds passed the row-join gates; test days total = 169
+[ENS frozen] EV  +3.479bp  n= 1143  tpd  6.76  bpd  +23.53  hit 55.9%  perfold ['+5.13(31)', '+4.45(271)', '+3.08(395)', '+14.19(49)', '-10.22(44)', '+3.26(353)']
+[ENS strict] EV  +4.420bp  n= 1151  tpd  6.81  bpd  +30.11  hit 56.0%  perfold ['+3.46(30)', '+4.71(268)', '+6.21(414)', '+12.43(49)', '-12.05(42)', '+3.01(348)']
+[seed0]   frozen EV  +2.208 (n=1035)   strict EV  +2.815 (n=1055)
+[seed1]   frozen EV  +3.966 (n=1332)   strict EV  +4.579 (n=1327)
+[seed2]   frozen EV  +4.401 (n=1461)   strict EV  +4.822 (n=1472)
+[seed3]   frozen EV  +3.450 (n=1335)   strict EV  +4.058 (n=1350)
+[SUMMARY DOGE fixq t10] selected 1303 | filled frozen 1143 (87.7%) strict 1151 (88.3%) | EV +3.48 -> +4.42 | bpd +23.53 -> +30.11 = 128% of this run's own frozen-label twin (NOT the published cell)
+[saved] gs://market-data-0998ac51/research_runs/strictfill_cells/A2_DOGE_fixq_t10.json
+[load] research_runs/maker_labels_tb3s_h150strict/XRP.npz
+[load] N=8940292 days=365 fill(frozen)=0.7961 fill(strict)=0.6500
+[folds] 6  seeds=4  policy=fixq K=5.0 harmony=False
+  fold0: n_te=744340 days=30 GATES OK
+  fold1: n_te=753191 days=30 GATES OK
+  fold2: n_te=704872 days=30 GATES OK
+  fold3: n_te=744743 days=30 GATES OK
+  fold4: n_te=806219 days=30 GATES OK
+  fold5: n_te=354543 days=13 GATES OK
+[gates] all folds passed the row-join gates; test days total = 163
+[ENS frozen] EV  +5.033bp  n=  758  tpd  4.65  bpd  +23.40  hit 52.0%  perfold ['-7.90(34)', '+12.16(62)', '+5.71(493)', '+20.43(30)', '-1.07(122)', '+1.88(17)']
+[ENS strict] EV  +5.161bp  n=  760  tpd  4.66  bpd  +24.06  hit 52.2%  perfold ['-8.85(33)', '+14.22(61)', '+5.83(499)', '+18.81(30)', '-1.30(121)', '+1.83(16)']
+[seed0]   frozen EV  +9.601 (n=574)   strict EV +10.805 (n=581)
+[seed1]   frozen EV  +3.408 (n=1012)   strict EV  +4.088 (n=1015)
+[seed2]   frozen EV  +2.244 (n=775)   strict EV  +2.629 (n=781)
+[seed3]   frozen EV  +2.450 (n=1122)   strict EV  +2.812 (n=1131)
+[SUMMARY XRP fixq t5] selected 849 | filled frozen 758 (89.3%) strict 760 (89.5%) | EV +5.03 -> +5.16 | bpd +23.40 -> +24.06 = 103% of this run's own frozen-label twin (NOT the published cell)
+[saved] gs://market-data-0998ac51/research_runs/strictfill_cells/A2_XRP_fixq_t5.json
+[load] research_runs/maker_labels_tb3s_h150dstrict/BTC.npz
+[load] N=10438107 days=370 fill(frozen)=0.7577 fill(strict)=0.6150
+[folds] 6  seeds=4  policy=dyn K=5.0 harmony=False
+  fold0: n_te=853315 days=30 GATES OK
+  fold1: n_te=854647 days=30 GATES OK
+  fold2: n_te=822369 days=30 GATES OK
+  fold3: n_te=849373 days=30 GATES OK
+  fold4: n_te=849455 days=30 GATES OK
+  fold5: n_te=453489 days=18 GATES OK
+[gates] all folds passed the row-join gates; test days total = 168
+[ENS frozen] EV  +7.997bp  n=  564  tpd  3.36  bpd  +26.85  hit 57.6%  perfold ['-1.84(26)', '+3.66(296)', '+25.86(90)', '+12.26(91)', '-1.55(43)', '+5.46(18)']
+[ENS strict] EV  +8.778bp  n=  562  tpd  3.35  bpd  +29.36  hit 57.3%  perfold ['-1.64(26)', '+3.71(295)', '+30.04(91)', '+12.31(91)', '-1.42(42)', '+5.15(17)']
+[seed0]   frozen EV  +6.902 (n=600)   strict EV  +7.694 (n=596)
+[seed1]   frozen EV  +9.393 (n=649)   strict EV +10.318 (n=641)
+[seed2]   frozen EV  +9.566 (n=557)   strict EV +10.480 (n=557)
+[seed3]   frozen EV  +6.816 (n=585)   strict EV  +7.727 (n=583)
+[SUMMARY BTC dyn t5] selected 580 | filled frozen 564 (97.2%) strict 562 (96.9%) | EV +8.00 -> +8.78 | bpd +26.85 -> +29.36 = 109% of this run's own frozen-label twin (NOT the published cell)
+[saved] gs://market-data-0998ac51/research_runs/strictfill_cells/A2_BTC_dyn_t5.json
+[load] research_runs/maker_labels_tb3s_h150dstrict/ETH.npz
+[load] N=10224311 days=361 fill(frozen)=0.8494 fill(strict)=0.7406
+[folds] 6  seeds=8  policy=dyn K=5.0 harmony=False
+  fold0: n_te=848547 days=30 GATES OK
+  fold1: n_te=852864 days=30 GATES OK
+  fold2: n_te=819144 days=30 GATES OK
+  fold3: n_te=849095 days=30 GATES OK
+  fold4: n_te=853119 days=30 GATES OK
+  fold5: n_te=257131 days=9 GATES OK
+[gates] all folds passed the row-join gates; test days total = 159
+[ENS frozen] EV  +5.726bp  n=  377  tpd  2.37  bpd  +13.58  hit 58.1%  perfold ['-2.21(76)', '+10.26(74)', '+7.17(35)', '+13.57(94)', '+3.38(58)', '-3.87(40)']
+[ENS strict] EV  +6.635bp  n=  375  tpd  2.36  bpd  +15.65  hit 58.4%  perfold ['-0.77(77)', '+10.01(73)', '+13.07(36)', '+14.56(92)', '+3.48(58)', '-5.02(39)']
+[seed0]   frozen EV  +8.373 (n=339)   strict EV  +9.284 (n=336)
+[seed1]   frozen EV  +6.940 (n=524)   strict EV  +7.955 (n=524)
+[seed2]   frozen EV  +4.820 (n=456)   strict EV  +5.290 (n=457)
+[seed3]   frozen EV  +9.572 (n=499)   strict EV +10.681 (n=501)
+[seed4]   frozen EV  +9.522 (n=471)   strict EV +10.540 (n=470)
+[seed5]   frozen EV  +4.949 (n=438)   strict EV  +5.975 (n=434)
+[seed6]   frozen EV  +8.941 (n=405)   strict EV +10.102 (n=404)
+[seed7]   frozen EV  +7.182 (n=500)   strict EV  +8.420 (n=499)
+[SUMMARY ETH dyn t5] selected 389 | filled frozen 377 (96.9%) strict 375 (96.4%) | EV +5.73 -> +6.63 | bpd +13.58 -> +15.65 = 115% of this run's own frozen-label twin (NOT the published cell)
+[saved] gs://market-data-0998ac51/research_runs/strictfill_cells/A2_ETH_dyn_t5.json
+=== A2 DONE 2026-07-31T09:03:33Z ===

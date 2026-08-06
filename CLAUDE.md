@@ -79,6 +79,16 @@ file or prior-session summary:
    execution × features × protocol), not a law. State the cell before
    reusing the number; outside its cell it is a hypothesis to re-measure.
 
+## Run infrastructure is a first-class asset (binding)
+
+Research throughput (speed × accuracy of runs) ranks ABOVE any single strategy
+(user directive 2026-07-11). Before writing ANY run/backtest orchestration code,
+read `research/runtime/README.md` and `research/runtime/KNOWN_PITFALLS.md` — the
+runners, VM recipes, binary builds, sizing numbers and debugged failure modes
+already exist there. Improve them in place (with the parity ritual for anything
+touching the frozen measurement layer); do not write a new ad-hoc runner. Record
+every production invocation (env + command) in the ledger record.
+
 ## Mechanics (unchanged, still binding)
 
 - Develop on the assigned feature branch; commit + push; never push
@@ -98,3 +108,7 @@ file or prior-session summary:
   capture-everything / never-kill-in-flight discipline.
 - The model identifier from the system prompt stays out of commits, PRs,
   code comments, and any pushed artifact — chat replies only.
+- **Deploy-showcase ritual**: every deploy add/remove/resize/re-weight updates
+  `BlackDigitalStudio/trading_algorithm` in the SAME change-window —
+  `DEPLOYMENTS.md` manifest + unit files + validation-tool snapshots. Production
+  and that repo must never diverge (token: `C:\Разработки\ml_research_token.txt`).
