@@ -37,6 +37,11 @@ if _env_pools:
         POOLS[name] = [(("%s" % p.split(":")[0]), int(p.split(":")[1])) for p in members.split(",")]
 ENS_T = [float(x) for x in os.environ.get("ENS_T", "1,2.5,5,10").split(",")]
 UNION_T = [float(x) for x in os.environ.get("UNION_T", "0.625,1.25,2.5,5").split(",")]
+# FEE_BP: flat per-trade round-trip fee subtracted from every net (bp). Bybit linear
+# non-VIP maker 0.02%/side -> 4 bp RT (both legs maker in the pegged cycle). The
+# Bybit cells were simulated at 0 fee (CL DOGEUSDC promo convention) — this makes
+# them honest for the venue that actually produced the data.
+FEE_BP = float(os.environ.get("FEE_BP", "0"))
 
 _cache = {}
 
@@ -90,6 +95,7 @@ def run_pool(name, members):
                 net = float(z0["netl"][i]) if s_ else float(z0["nets"][i])
                 fill = bool(z0["fl"][i]) if s_ else bool(z0["fs"][i])
                 if fill and np.isfinite(net):
+                    net -= FEE_BP
                     fn.append(net); nets.append(net); tdays.append(int(z0["day_te"][i]))
             fold_nets.append(np.array(fn))
         m = battery(nets, tdays, fold_nets, days_sorted)
@@ -114,6 +120,7 @@ def run_pool(name, members):
                 net = float(z0["netl"][i]) if s_ else float(z0["nets"][i])
                 fill = bool(z0["fl"][i]) if s_ else bool(z0["fs"][i])
                 if fill and np.isfinite(net):
+                    net -= FEE_BP
                     fn.append(net); nets.append(net); tdays.append(int(z0["day_te"][i]))
             fold_nets.append(np.array(fn))
         m = battery(nets, tdays, fold_nets, days_sorted)

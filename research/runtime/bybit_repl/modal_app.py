@@ -274,8 +274,9 @@ def gain_fn(sub: str = "maker_labels_tb3s_h150anch", drop: str = ""):
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=6144, timeout=3600)
-def audit_fn(pools: str = "", ens_t: str = "1,2.5,5,10", union_t: str = "0.625,1.25,2.5,5"):
-    extra = {"ENS_T": ens_t, "UNION_T": union_t}
+def audit_fn(pools: str = "", ens_t: str = "1,2.5,5,10", union_t: str = "0.625,1.25,2.5,5",
+             fee_bp: str = "0"):
+    extra = {"ENS_T": ens_t, "UNION_T": union_t, "FEE_BP": fee_bp}
     if pools:
         extra["POOLS"] = pools
     return _run([sys.executable, "/repo/runtime/bybit_repl/full_audit.py"], extra=extra)
