@@ -66,6 +66,7 @@ for tgt in TGTS:
     ties = 0; total = 0
     day_net = defaultdict(list)   # global day index -> nets
     all_days = []
+    ordered_trades = []           # chronological nets for the compounded curve
     for f in range(nf):
         sets = {s: select(Z[s][f], tgt) for s in SEEDS}
         union = sorted(set().union(*sets.values()))
@@ -90,6 +91,7 @@ for tgt in TGTS:
             kbucket[len(ks)].append(net)
             day_net[int(day_te[i])].append(net)
         fold_nets.append(np.array(nets_f))
+        ordered_trades.extend(nets_f)          # fold/decision order = chronological
         fdays = sorted(set(day_te.tolist()))
         fold_days_list.append(fdays)
         all_days.extend(fdays)
@@ -118,6 +120,28 @@ for tgt in TGTS:
         vals = [x for d in dset for x in day_net.get(int(d), [])]
         mb.append(round(float(np.sum(vals) * 0.01), 1) if vals else 0.0)
     print(f"  month buckets sum%: {mb}", flush=True)
+    # ROI / maxDD (README trading_algorithm 4.1 methodology, @0.5 convention:
+    # equity *= 1 + 0.5*net per trade, sequential; fair here — hold ~150s at
+    # 3-10 tr/d means near-zero overlap, unlike the CL FIXQ burst stacks).
+    FRAC = 0.5
+    eq = np.cumprod(1.0 + FRAC * np.asarray(ordered_trades) * 1e-4)
+    run_max = np.maximum.accumulate(np.concatenate([[1.0], eq]))
+    maxdd = float((1.0 - np.concatenate([[1.0], eq]) / run_max).max())
+    span_days = max(len(days_sorted), 1)
+    roi_month = float(eq[-1] ** (30.0 / span_days) - 1.0) if len(eq) else 0.0
+    dret = []
+    for d in days_sorted:
+        vals = day_net.get(int(d), [])
+        dret.append(float(np.prod([1.0 + FRAC * x * 1e-4 for x in vals]) - 1.0))
+    dret = np.array(dret)
+    worst_day = float(dret.min()) if len(dret) else 0.0
+    sharpe = float(dret.mean() / dret.std() * np.sqrt(365.0)) if len(dret) and dret.std() > 0 else 0.0
+    mroi = []
+    for m0 in range(0, span_days, 30):
+        mroi.append(round(100 * float(np.prod(1.0 + dret[m0:m0 + 30]) - 1.0), 1))
+    print(f"  ROI@0.5: monthly {100*roi_month:+.1f}% | maxDD(trade-level) {-100*maxdd:.1f}% | "
+          f"worst day {100*worst_day:+.1f}% | Sharpe(daily,ann) {sharpe:.2f}", flush=True)
+    print(f"  month ROI%: {mroi}", flush=True)
     # day-block bootstrap L=7
     span = len(days_sorted)
     rngb = np.random.default_rng(1)
@@ -142,6 +166,8 @@ for tgt in TGTS:
                             perfold_n=[int(len(x)) for x in fold_nets],
                             lofo=[round(v, 2) for v in lofo],
                             gate=dict(neg_folds=n_neg_folds, lofo_min=float(np.nanmin(lofo))),
+                            roi=dict(frac=FRAC, monthly=roi_month, maxdd=maxdd,
+                                     worst_day=worst_day, sharpe=sharpe, month_roi_pct=mroi),
                             perfold=[round(float(x.sum() * 0.01), 1) for x in fold_nets],
                             month=mb, consensus=ks,
                             boot=dict(ev_p5=float(np.quantile(b_ev, .05)), ev_p50=float(np.quantile(b_ev, .5)),
