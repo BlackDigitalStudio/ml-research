@@ -268,9 +268,9 @@ def tsurf_fn(tgt: str):
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
-def gain_fn(sub: str = "maker_labels_tb3s_h150anch"):
+def gain_fn(sub: str = "maker_labels_tb3s_h150anch", drop: str = ""):
     return _run([sys.executable, "/repo/runtime/bybit_repl/models_gain.py", "DOGE"],
-                extra={"XSYM_SUB": sub})
+                extra={"XSYM_SUB": sub, "DROP_COLS": drop})
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)

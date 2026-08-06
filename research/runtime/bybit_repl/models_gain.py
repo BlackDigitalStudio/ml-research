@@ -29,6 +29,12 @@ N56 = ("ofi imbalance_ratio imbalance_velocity spread depth_ratio_l5 large_order
 NAMES = N56 + [f"ext{i}" for i in range(56, 64)] + ["btc_ret5", "btc_ret30", "btc_ret60",
                                                     "sin_h", "cos_h", "sin_f8", "cos_f8"]
 
+# DROP_COLS (same value the training run used): model feature index i maps to the
+# original schema index AFTER re-inserting the dropped columns.
+_drop = sorted(int(x) for x in os.environ.get("DROP_COLS", "").split(",") if x)
+_keep = [i for i in range(len(NAMES)) if i not in _drop]
+IDXMAP = {mi: oi for mi, oi in enumerate(_keep)}
+
 blobs = [b.name for b in bk.client.list_blobs(bk, prefix=f"{SUB}/MODELS_S")
          if b.name.endswith((".json",)) and "_hp" not in b.name]
 agg = {}
@@ -44,7 +50,7 @@ for name in blobs:
     sc = b.get_score(importance_type="total_gain")
     d = agg.setdefault(cls, np.zeros(len(NAMES)))
     for k, v in sc.items():
-        d[int(k[1:])] += v
+        d[IDXMAP[int(k[1:])]] += v
     cnt[cls] = cnt.get(cls, 0) + 1
 
 FAM = {"funding": [13, 43, 44], "OI": [17, 59, 60], "liq": [19] + list(range(56, 59)),
