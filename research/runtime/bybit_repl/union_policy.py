@@ -23,7 +23,7 @@ from google.cloud import storage
 SYM = sys.argv[1] if len(sys.argv) > 1 else "DOGE"
 SUB = "research_runs/" + os.environ.get("XSYM_SUB", "maker_labels_tb3s_h150anch")
 TGTS = [float(x) for x in os.environ.get("TGTS", "1.25,2.5,5").split(",")]
-SEEDS = [0, 1, 2, 3]
+SEEDS = [int(x) for x in os.environ.get("SEEDS", "0,1,2,3").split(",")]
 KDAYS = 30
 bk = storage.Client(project="x").bucket("market-data-0998ac51")
 
@@ -121,5 +121,6 @@ for tgt in TGTS:
                                       ev_p95=float(np.quantile(b_ev, .95)), Ppos=float(100 * np.mean(b_ev > 0)),
                                       bpd_p5=float(np.quantile(b_bpd, .05)), bpd_p95=float(np.quantile(b_bpd, .95))))
 
-bk.blob(f"{SUB}/HBV1_UNION_{SYM}.json").upload_from_string(json.dumps(out, default=float))
+_tag = "" if SEEDS == [0, 1, 2, 3] else f"_s{len(SEEDS)}"
+bk.blob(f"{SUB}/HBV1_UNION_{SYM}{_tag}.json").upload_from_string(json.dumps(out, default=float))
 print("\n[saved HBV1_UNION]", flush=True)

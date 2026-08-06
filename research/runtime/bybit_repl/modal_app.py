@@ -280,9 +280,46 @@ def corr_fn(sub: str = "maker_labels_tb3s_h150anch"):
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
-def union_fn(sub: str = "maker_labels_tb3s_h150anch"):
+def union_fn(sub: str = "maker_labels_tb3s_h150anch", seeds: str = "0,1,2,3", tgts: str = "1.25,2.5,5"):
     return _run([sys.executable, "/repo/runtime/bybit_repl/union_policy.py", "DOGE"],
-                extra={"XSYM_SUB": sub})
+                extra={"XSYM_SUB": sub, "SEEDS": seeds, "TGTS": tgts})
+
+
+V1NOOI_SUB = "maker_labels_tb3s_h150anch_v1_nooi"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=2048, timeout=1800)
+def v1_nooi_prep():
+    import shutil
+    src = "/vol/gcs/market-data-0998ac51/research_runs/maker_labels_tb3s_h150anch/DOGE.npz"
+    dst_dir = f"/vol/gcs/market-data-0998ac51/research_runs/{V1NOOI_SUB}"
+    os.makedirs(dst_dir, exist_ok=True)
+    dst = f"{dst_dir}/DOGE.npz"
+    if not os.path.exists(dst):
+        shutil.copyfile(src, dst + ".tmp")
+        os.replace(dst + ".tmp", dst)
+    vol.commit()
+    return "v1_nooi dataset prefix ready"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=5, memory=18432, timeout=6 * 3600)
+def train_v1_nooi_fn(seed: int):
+    _run([sys.executable, "/repo/scripts/subs60_xgb_optuna_ic.py", "DOGE", V1NOOI_SUB, "0", "5"],
+         extra={"SEED": str(seed), "CFGIDX": "1", "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{seed}", "FOLD_PAR": "1", "DROP_COLS": "59,60"})
+    vol.commit()
+    return f"v1_nooi seed{seed} trained"
+
+
+@app.local_entrypoint()
+def train_8seed():
+    print(v1_nooi_prep.remote())
+    calls = [train_v1_nooi_fn.spawn(s) for s in range(8)] + [train_nooi_fn.spawn(s) for s in (4, 5, 6, 7)]
+    for c in calls:
+        try:
+            print(c.get(timeout=6 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
 
 
 @app.local_entrypoint()
