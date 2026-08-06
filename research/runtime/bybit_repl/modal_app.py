@@ -325,6 +325,17 @@ def train_v1_nooi_fn(seed: int):
 
 
 @app.local_entrypoint()
+def train_v1_missing(seeds: str = "0,1,2,4,5,6"):
+    print(v1_nooi_prep.remote())
+    calls = [train_v1_nooi_fn.spawn(int(s)) for s in seeds.split(",")]
+    for c in calls:
+        try:
+            print(c.get(timeout=6 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
+
+
+@app.local_entrypoint()
 def train_8seed():
     print(v1_nooi_prep.remote())
     calls = [train_v1_nooi_fn.spawn(s) for s in range(8)] + [train_nooi_fn.spawn(s) for s in (4, 5, 6, 7)]
