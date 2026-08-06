@@ -98,7 +98,18 @@ for tgt in TGTS:
     ev = float(a.mean()); tpd = len(a) / max(tot_days, 1)
     print(f"\n== union T_s={tgt:g}: EV {ev:+.2f}bp n={len(a)} tpd {tpd:.2f} hit {100*(a>0).mean():.1f}% "
           f"ties {100*ties/max(total,1):.1f}%", flush=True)
+    print("  per-fold EV(n): " + " ".join(f"{(x.mean() if len(x) else 0):+.1f}({len(x)})" for x in fold_nets), flush=True)
     print("  per-fold sum%: " + " ".join(f"{x.sum()*0.01:+.1f}" for x in fold_nets), flush=True)
+    # VALIDITY GATE (user directive 2026-08-06): all folds positive + LOFO (worst = drop
+    # the BEST fold) materially positive + BOOT floor > 0.
+    lofo = []
+    for f in range(nf):
+        rest = np.concatenate([fold_nets[g] for g in range(nf) if g != f and len(fold_nets[g])]) \
+            if nf > 1 else np.array([])
+        lofo.append(float(rest.mean()) if len(rest) else float("nan"))
+    print("  LOFO EV: " + " ".join(f"-f{f}:{v:+.1f}" for f, v in enumerate(lofo)), flush=True)
+    n_neg_folds = sum(1 for x in fold_nets if len(x) and x.mean() < 0)
+    print(f"  GATE: neg-folds={n_neg_folds} | LOFO-min {np.nanmin(lofo):+.2f}", flush=True)
     # 30-day month buckets over the global ordered day sequence
     days_sorted = sorted(set(all_days))
     mb = []
@@ -127,6 +138,10 @@ for tgt in TGTS:
     print("  consensus-k: " + " | ".join(f"k={k}: n={v['n']} EV {v['ev']:+.2f}" for k, v in ks.items()), flush=True)
     out[f"T{tgt:g}"] = dict(ev=ev, n=int(len(a)), tpd=tpd, hit=float((a > 0).mean()),
                             ties_pct=100 * ties / max(total, 1),
+                            perfold_ev=[round(float(x.mean()), 2) if len(x) else None for x in fold_nets],
+                            perfold_n=[int(len(x)) for x in fold_nets],
+                            lofo=[round(v, 2) for v in lofo],
+                            gate=dict(neg_folds=n_neg_folds, lofo_min=float(np.nanmin(lofo))),
                             perfold=[round(float(x.sum() * 0.01), 1) for x in fold_nets],
                             month=mb, consensus=ks,
                             boot=dict(ev_p5=float(np.quantile(b_ev, .05)), ev_p50=float(np.quantile(b_ev, .5)),
