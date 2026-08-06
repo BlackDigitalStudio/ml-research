@@ -282,6 +282,11 @@ def audit_fn(pools: str = "", ens_t: str = "1,2.5,5,10", union_t: str = "0.625,1
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
+def hp_fn():
+    return _run([sys.executable, "/repo/runtime/bybit_repl/hp_tendency.py"])
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
 def corr_fn(sub: str = "maker_labels_tb3s_h150anch"):
     return _run([sys.executable, "/repo/runtime/bybit_repl/seed_corr.py", "DOGE"],
                 extra={"XSYM_SUB": sub})
