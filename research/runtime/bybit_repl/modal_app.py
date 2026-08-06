@@ -267,6 +267,12 @@ def tsurf_fn(tgt: str):
     return _run([sys.executable, "/repo/runtime/bybit_repl/bybit_t10.py", "DOGE"], extra={"TGT": tgt})
 
 
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
+def gain_fn(sub: str = "maker_labels_tb3s_h150anch"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/models_gain.py", "DOGE"],
+                extra={"XSYM_SUB": sub})
+
+
 @app.local_entrypoint()
 def tsurf():
     for r in tsurf_fn.map(["1", "2", "3", "20"], return_exceptions=True):
