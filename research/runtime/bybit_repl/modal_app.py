@@ -458,7 +458,7 @@ def forensics_fn(members: str, sym: str = "DOGE", tgt: str = "5", ftag: str = ""
                 extra={"MEMBERS": members, "SYM": sym, "TGT": tgt, "FTAG": ftag})
 
 
-@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=16384, timeout=3600)
 def corr_members_fn(members: str, corrtag: str, tgts: str = "5,10", sym: str = "DOGE"):
     return _run([sys.executable, "/repo/runtime/bybit_repl/seed_corr.py", sym],
                 extra={"MEMBERS": members, "CORRTAG": corrtag, "TGTS": tgts})
