@@ -25,6 +25,9 @@ struct Args {
     /// Directory with golden npys + model jsons (score_golden)
     #[arg(long)]
     golden: PathBuf,
+    /// "anchor" (day-anchor single-row contract) | "true" (stream funding rows)
+    #[arg(long, default_value = "anchor")]
+    funding_mode: String,
 }
 
 const NS: i64 = 1_000_000_000;
@@ -49,9 +52,15 @@ fn main() -> Result<()> {
     let is = idx.as_slice().unwrap();
 
     let mut st = FeatState::new();
-    st.anchor_rate = Some(funding.funding_rate[0]);
+    let funding_true = a.funding_mode == "true";
+    if funding_true {
+        st.funding_true = true; // rows streamed in the replay loop below
+    } else {
+        st.anchor_rate = Some(funding.funding_rate[0]);
+    }
     let d_ts = depth.timestamps.as_slice().unwrap();
-    let (mut pt, mut pe, mut pl, mut po) = (0usize, 0usize, 0usize, 0usize);
+    let (mut pt, mut pe, mut pl, mut po, mut pf) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let f_ts = funding.timestamps.as_slice().unwrap();
     let tt = trades.timestamps.as_slice().unwrap();
     let et = eth.timestamps.as_slice().unwrap();
     let lt = liq.timestamps.as_slice().unwrap();
@@ -75,6 +84,12 @@ fn main() -> Result<()> {
         while po < ot.len() && ot[po] <= ts {
             st.push_oi(ot[po], oi_v[po]);
             po += 1;
+        }
+        if funding_true {
+            while pf < f_ts.len() && f_ts[pf] <= ts {
+                st.push_funding(f_ts[pf], funding.funding_rate[pf], funding.mark_price[pf]);
+                pf += 1;
+            }
         }
         for k in 0..DEPTH_LEVELS {
             bids[k] = (depth.bid_prices[[i, k]], depth.bid_qtys[[i, k]]);

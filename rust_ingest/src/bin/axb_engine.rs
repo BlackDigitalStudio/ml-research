@@ -54,7 +54,7 @@ enum Ev {
     BookSnap { sym: u8, uid: i64, b: Vec<(f64, f64)>, a: Vec<(f64, f64)>, reconcile: bool },
     Trade { eth: bool, ts_ms: i64, px: f64, qty: f64, is_sell: bool },
     Liq { ts_ms: i64, sn: f64, an: f64 },
-    Mark { ets_ms: i64, rate: f64 },
+    Mark { ets_ms: i64, rate: f64, mark: f64 },
     Oi { ts_ms: i64, v: f64 },
 }
 
@@ -167,6 +167,7 @@ impl MirrorBook {
 struct Tau {
     buf: Vec<f64>,
     pending: Vec<f64>,
+    frozen: bool,
     day: String,
     taus: [f64; 4],
     cap: usize,
@@ -191,9 +192,17 @@ fn np_quantile_linear(sorted: &[f64], q: f64) -> f64 {
 impl Tau {
     fn new(work: &PathBuf, boot: &PathBuf, day: &str) -> Result<Self> {
         let cap = (KDAYS as f64 * WPD) as usize;
+        // FREEZE_TAU=1 -> FIXQ policy (HD5-DEPLOY): taus fixed at the boot-seed
+        // quantiles for the whole run; recalibration = refresh RECEV_DIR + restart.
+        // Frozen mode always derives from tau_seed.npy (never state_buf.npy) so a
+        // restart is idempotent and rolling state cannot leak into the threshold.
+        let frozen = std::env::var("FREEZE_TAU").map(|v| v == "1").unwrap_or(false);
         let (buf, pending, saved_day): (Vec<f64>, Vec<f64>, String) = {
             let b = work.join("state_buf.npy");
-            if b.exists() {
+            if frozen {
+                let sv: Array1<f64> = read_npy(boot.join("tau_seed.npy")).context("tau_seed")?;
+                (sv.to_vec(), Vec::new(), String::new())
+            } else if b.exists() {
                 let bv: Array1<f64> = read_npy(&b).context("state_buf")?;
                 let pv: Array1<f64> = read_npy(work.join("state_pending.npy")).unwrap_or_else(|_| Array1::zeros(0));
                 let d = std::fs::read_to_string(work.join("state_day.txt")).unwrap_or_default();
@@ -204,12 +213,12 @@ impl Tau {
             }
         };
         let pending = if saved_day == day { pending } else { Vec::new() };
-        let mut t = Self { buf, pending, day: day.to_string(), taus: [0.0; 4], cap, work: work.clone() };
+        let mut t = Self { buf, pending, day: day.to_string(), taus: [0.0; 4], cap, work: work.clone(), frozen };
         if t.buf.len() > t.cap {
             t.buf = t.buf.split_off(t.buf.len() - t.cap);
         }
         t.recompute();
-        eprintln!("tau seeded: buf={} pending={} taus={:?}", t.buf.len(), t.pending.len(), t.taus);
+        eprintln!("tau seeded: buf={} pending={} taus={:?} frozen={}", t.buf.len(), t.pending.len(), t.taus, t.frozen);
         Ok(t)
     }
     fn recompute(&mut self) {
@@ -226,8 +235,10 @@ impl Tau {
                 self.buf = self.buf.split_off(self.buf.len() - self.cap);
             }
             self.day = day.to_string();
-            self.recompute();
-            eprintln!("UTC day roll -> {} buf={} taus={:?}", day, self.buf.len(), self.taus);
+            if !self.frozen {
+                self.recompute();
+            }
+            eprintln!("UTC day roll -> {} buf={} taus={:?} frozen={}", day, self.buf.len(), self.taus, self.frozen);
         }
         self.pending.push(score);
         self.taus
@@ -250,8 +261,10 @@ struct Seed {
 }
 
 fn load_seeds(boot: &PathBuf) -> Result<Vec<Seed>> {
+    // v4: dynamic seed count — load A{s}.json while present (4 for DOGE/XRP/BTC, 8 for ETH)
     let mut out = Vec::new();
-    for s in 0..4 {
+    let mut s = 0usize;
+    while boot.join(format!("A{s}.json")).exists() {
         let mut a = Gbt::load_json(&boot.join(format!("A{s}.json")))?;
         let mut bg = Gbt::load_json(&boot.join(format!("Bg{s}.json")))?;
         let ba: Array1<f32> = read_npy(boot.join(format!("base_A{s}.npy")))?;
@@ -263,7 +276,9 @@ fn load_seeds(boot: &PathBuf) -> Result<Vec<Seed>> {
         let s_a: Array1<f64> = read_npy(boot.join(format!("sA{s}.npy")))?;
         let s_bg: Array1<f64> = read_npy(boot.join(format!("sBg{s}.npy")))?;
         out.push(Seed { a, bg, mu: mu.to_vec(), sd: sd.to_vec(), s_a: s_a.to_vec(), s_bg: s_bg.to_vec() });
+        s += 1;
     }
+    anyhow::ensure!(!out.is_empty(), "no seed bundles in boot dir");
     Ok(out)
 }
 
@@ -428,6 +443,7 @@ async fn ws_task(
                                     let _ = tx.send(Ev::Mark {
                                         ets_ms: d["E"].as_i64().unwrap_or(0),
                                         rate: d["r"].as_str().and_then(|x| x.parse().ok()).unwrap_or(0.0),
+                                        mark: d["p"].as_str().and_then(|x| x.parse().ok()).unwrap_or(0.0),
                                     });
                                 }
                                 _ => {}
@@ -459,11 +475,48 @@ fn main() -> Result<()> {
     let sym = std::env::var("SIGNAL_SYM").unwrap_or_else(|_| "dogeusdt".into());
     let btc_sym = "btcusdt".to_string();
     let eth_sym = "ethusdt".to_string();
+    // Self-referential ETH instance (SIGNAL_SYM == eth trades symbol): the single
+    // ethusdt aggTrade stream must feed BOTH the signal trade queue and the eth
+    // queue (the dataset used ETH's own trades in both roles).
+    let self_eth = sym == eth_sym;
+    // Self-referential instance (SIGNAL_SYM == btc lead symbol, i.e. the BTC deploy):
+    // subscribe the depth stream ONCE and feed the btc_lead mid series from the same
+    // MirrorBook after each apply — identical semantics to the separate-book branch
+    // (offline builders read the same single stream for both roles).
+    let self_lead = sym == btc_sym;
     let trade_budget: f64 = std::env::var("TRADE_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
+    // FUNDING_MODE: "anchor" (default, deployed DOGE/XRP policy: col13 day-frozen,
+    // col44=0) | "true" (live markPrice rows -> col13/col44, batch semantics; the
+    // BTC x true-funding policy class, HD3 rev10).
+    let funding_true = std::env::var("FUNDING_MODE").map(|v| v == "true").unwrap_or(false);
     std::fs::create_dir_all(work.join("decisions"))?;
+    std::fs::create_dir_all(work.join("features"))?;
 
     let seeds = load_seeds(&boot)?;
     eprintln!("engine: {} seeds loaded, MODE={mode}", seeds.len());
+    // v4: feature keep-list (bundle trained with DROP_COLS -> boot writes keep.npy;
+    // absent = identity 71). mu/sd/model indices are in KEEP-space by construction.
+    let keep: Vec<usize> = if boot.join("keep.npy").exists() {
+        let k: ndarray::Array1<i64> = read_npy(boot.join("keep.npy"))?;
+        k.iter().map(|&x| x as usize).collect()
+    } else {
+        (0..71).collect()
+    };
+    eprintln!("feature keep-list: {} of 71", keep.len());
+    // v4: HARMONY filter (ETH safety form): skip execution when a MIDDLE fraction of
+    // seeds (2..=N-2) clear their own FROZEN per-seed taus (boot seed_taus.npy from
+    // the recorder per-seed score distributions; backtest = fold-frozen analog).
+    let harmony = std::env::var("HARMONY").map(|v| v == "1").unwrap_or(false);
+    let seed_taus: Option<Vec<f64>> = if boot.join("seed_taus.npy").exists() {
+        let t: ndarray::Array1<f64> = read_npy(boot.join("seed_taus.npy"))?;
+        Some(t.to_vec())
+    } else {
+        None
+    };
+    if harmony {
+        anyhow::ensure!(seed_taus.is_some(), "HARMONY=1 requires boot/seed_taus.npy");
+        eprintln!("HARMONY filter ON: skip when 2..={} seeds above frozen per-seed taus", seeds.len() - 2);
+    }
     // funding anchor from boot (mid-day restart); day rolls update it from the stream
     let anchor_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(boot.join("anchor.json")).unwrap_or_else(|_| "{}".into()))
@@ -482,13 +535,21 @@ fn main() -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     {
-        let pub_streams = vec![format!("{sym}@depth@100ms"), format!("{btc_sym}@depth@100ms")];
-        let mkt_streams = vec![
-            format!("{sym}@aggTrade"),
-            format!("{sym}@forceOrder"),
-            format!("{sym}@markPrice@1s"),
-            format!("{eth_sym}@aggTrade"),
-        ];
+        let pub_streams = if self_lead {
+            vec![format!("{sym}@depth@100ms")]
+        } else {
+            vec![format!("{sym}@depth@100ms"), format!("{btc_sym}@depth@100ms")]
+        };
+        let mkt_streams = if self_eth {
+            vec![format!("{sym}@aggTrade"), format!("{sym}@forceOrder"), format!("{sym}@markPrice@1s")]
+        } else {
+            vec![
+                format!("{sym}@aggTrade"),
+                format!("{sym}@forceOrder"),
+                format!("{sym}@markPrice@1s"),
+                format!("{eth_sym}@aggTrade"),
+            ]
+        };
         let (t1, t2, t3, t4) = (tx.clone(), tx.clone(), tx.clone(), tx.clone());
         let (s1, s2) = (sym.clone(), sym.clone());
         let (b1, b2) = (btc_sym.clone(), btc_sym.clone());
@@ -536,6 +597,10 @@ fn main() -> Result<()> {
     let mut btc = MirrorBook::new();
     let mut st = FeatState::new();
     st.anchor_rate = anchor_rate;
+    st.funding_true = funding_true;
+    if funding_true {
+        eprintln!("FUNDING_MODE=true: col13/col44 from live markPrice rows");
+    }
     let mut btc_ts: Vec<i64> = Vec::new();
     let mut btc_mid: Vec<f64> = Vec::new();
     // pending stream queues (commit contract: events with ts <= tick ts before the tick)
@@ -573,7 +638,11 @@ fn main() -> Result<()> {
                 }
             }
             Ev::Trade { eth, ts_ms, px, qty, is_sell } => {
-                if eth {
+                if self_eth {
+                    // single stream feeds both roles (dataset parity)
+                    q_tr.push_back((ts_ms, px, qty, is_sell));
+                    q_eth.push_back((ts_ms, px, qty, is_sell));
+                } else if eth {
                     q_eth.push_back((ts_ms, px, qty, is_sell));
                 } else {
                     q_tr.push_back((ts_ms, px, qty, is_sell));
@@ -581,13 +650,20 @@ fn main() -> Result<()> {
             }
             Ev::Liq { ts_ms, sn, an } => q_liq.push_back((ts_ms, sn, an)),
             Ev::Oi { ts_ms, v } => q_oi.push_back((ts_ms, v)),
-            Ev::Mark { ets_ms, rate } => {
-                let d = day_of_ms(ets_ms);
-                if d != anchor_day {
-                    anchor_day = d.clone();
-                    anchor_rate = Some(rate);
-                    st.anchor_rate = Some(rate);
-                    eprintln!("funding day-anchor {d} = {rate}");
+            Ev::Mark { ets_ms, rate, mark } => {
+                if funding_true {
+                    // TRUE mode: every markPrice row feeds col13/col44 (batch
+                    // at-or-before semantics inside compute64). Day roll clears
+                    // the rows with the rest of the day-anchored state.
+                    st.push_funding(ets_ms, rate, mark);
+                } else {
+                    let d = day_of_ms(ets_ms);
+                    if d != anchor_day {
+                        anchor_day = d.clone();
+                        anchor_rate = Some(rate);
+                        st.anchor_rate = Some(rate);
+                        eprintln!("funding day-anchor {d} = {rate}");
+                    }
                 }
             }
             Ev::Diff { sym: s, u, ets_ms, b, a } => {
@@ -604,6 +680,13 @@ fn main() -> Result<()> {
                 if !doge.apply(u, &b, &a) {
                     continue;
                 }
+                if self_lead {
+                    let m = doge.l1_mid();
+                    if m > 0.0 {
+                        btc_ts.push(ets_ms * 1_000_000);
+                        btc_mid.push(m);
+                    }
+                }
                 last_book_wall = Instant::now();
                 let tick_ns = ets_ms * 1_000_000;
                 // UTC day roll: reset day-anchored feature state (== per-day sim files)
@@ -615,6 +698,7 @@ fn main() -> Result<()> {
                     if st.n_ticks() > 0 {
                         st = FeatState::new();
                         st.anchor_rate = anchor_rate;
+                        st.funding_true = funding_true;
                         btc_ts.clear();
                         btc_mid.clear();
                         last_dec_tick = -1;
@@ -717,30 +801,40 @@ fn main() -> Result<()> {
                 for c in 0..71 {
                     x71[c] = row[c] as f32;
                 }
-                // score
-                let mut fn_row = [0f32; 71];
+                // score (v4: keep-sliced features, N seeds, per-seed consensus count)
+                let nk = keep.len();
+                let mut fn_row: Vec<f32> = vec![0f32; nk];
                 let mut sc = 0f64;
                 let mut pa_sum = 0f64;
                 let mut pb_sum = 0f64;
-                for sd_ in &seeds {
-                    for c in 0..71 {
-                        fn_row[c] = ((x71[c] as f64 - sd_.mu[c]) / sd_.sd[c]) as f32;
+                let mut cons = 0usize;
+                for (si, sd_) in seeds.iter().enumerate() {
+                    for (j, &c) in keep.iter().enumerate() {
+                        fn_row[j] = ((x71[c] as f64 - sd_.mu[j]) / sd_.sd[j]) as f32;
                     }
                     let pa = sd_.a.predict_prob(&fn_row);
                     let pb = sd_.bg.predict_prob(&fn_row);
-                    sc += cdf(&sd_.s_a, pa as f64) * cdf(&sd_.s_bg, (pb - 0.5f32).abs() as f64);
+                    let ps = cdf(&sd_.s_a, pa as f64) * cdf(&sd_.s_bg, (pb - 0.5f32).abs() as f64);
+                    sc += ps;
+                    if let Some(ts_) = &seed_taus {
+                        if ps >= ts_[si] {
+                            cons += 1;
+                        }
+                    }
                     pa_sum += pa as f64;
                     pb_sum += pb as f64;
                 }
-                sc /= 4.0;
-                let pa_m = pa_sum / 4.0;
-                let pb_m = pb_sum / 4.0;
+                let nseeds_f = seeds.len() as f64;
+                sc /= nseeds_f;
+                let pa_m = pa_sum / nseeds_f;
+                let pb_m = pb_sum / nseeds_f;
+                let harmony_block = harmony && cons >= 2 && cons <= seeds.len().saturating_sub(2);
                 let side_long = pb_m >= 0.5;
                 let taus = tau.observe(&grid_day, sc);
                 let takes: Vec<bool> = taus.iter().map(|&t| sc >= t).collect();
                 let mut executed = false;
                 let ti = BUDGETS.iter().position(|&b| b == trade_budget).unwrap_or(0);
-                if live && takes[ti] {
+                if live && takes[ti] && !harmony_block {
                     executed = exec.trade(side_long, sc);
                 }
                 let lat_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -752,7 +846,7 @@ fn main() -> Result<()> {
                     "book_ts_us": st.ts[idx] * 1000,
                     "grid_ts_us": g_eff / 1000,
                     "bid": st_bp0(&st, idx), "ask": st_ap0(&st, idx),
-                    "pA": (pa_m * 1e6).round() / 1e6, "pBg": (pb_m * 1e6).round() / 1e6,
+                    "pA": (pa_m * 1e6).round() / 1e6, "pBg": (pb_m * 1e6).round() / 1e6, "cons": cons, "hblock": harmony_block,
                     "score": (sc * 1e6).round() / 1e6,
                     "side": if side_long { "long" } else { "short" },
                     "tau": {"5": r6(taus[0]), "10": r6(taus[1]), "20": r6(taus[2]), "40": r6(taus[3])},
@@ -765,6 +859,18 @@ fn main() -> Result<()> {
                 let day_file = work.join("decisions").join(format!("{grid_day}.jsonl"));
                 if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&day_file) {
                     let _ = writeln!(f, "{}", rec);
+                }
+                // feature capture: the engine's own decision inputs, so offline replay
+                // is bit-exact by construction (independent of the recorder stream).
+                // Record = grid_ts_us i64 LE + 71 x f32 LE (292 B, ~8.4 MB/day).
+                let feat_file = work.join("features").join(format!("{grid_day}.bin"));
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&feat_file) {
+                    let mut fbuf = Vec::with_capacity(8 + 71 * 4);
+                    fbuf.extend_from_slice(&(g_eff / 1000).to_le_bytes());
+                    for c in 0..71 {
+                        fbuf.extend_from_slice(&x71[c].to_le_bytes());
+                    }
+                    let _ = f.write_all(&fbuf);
                 }
                 if takes.iter().any(|&t| t) || n_dec % 100 == 0 {
                     eprintln!("#{n_dec} score={sc:.4} side={} takes={:?} lat={lat_ms:.2}ms",

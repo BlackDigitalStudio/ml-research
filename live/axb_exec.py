@@ -40,8 +40,8 @@ SIZE_FRAC = float(os.environ.get("SIZE_FRAC", "1.0"))
 LEVERAGE = 2
 ENTRY_WIN_S = float(os.environ.get("ENTRY_WIN_S", "60.0"))
 HOLD_S = float(os.environ.get("HOLD_S", "150.0"))
-PX_DEC = {"DOGEUSDC": 5, "BTCUSDC": 1}.get(EXEC_SYM, 5)
-QTY_DEC = {"DOGEUSDC": 0, "BTCUSDC": 3}.get(EXEC_SYM, 0)
+PX_DEC = {"DOGEUSDC": 5, "BTCUSDC": 1, "XRPUSDC": 4}.get(EXEC_SYM, 5)
+QTY_DEC = {"DOGEUSDC": 0, "BTCUSDC": 3, "XRPUSDC": 1}.get(EXEC_SYM, 0)
 EXIT_MAX_S = float(os.environ.get("EXIT_MAX_S", "86400"))
 HARD_LOSS_BP = float(os.environ.get("HARD_LOSS_BP", "300"))
 DAY_LOSS_HALT = 0.05
@@ -372,6 +372,11 @@ async def uploader() -> None:
             ddir = f"{WORK}/decisions"
             for fn in sorted(os.listdir(ddir)):
                 mkt.blob(f"{SHADOW_GCS}/decisions/{fn}").upload_from_filename(f"{ddir}/{fn}")
+            # engine feature-capture files (bit-exact replay inputs)
+            fdir = f"{WORK}/features"
+            if os.path.isdir(fdir):
+                for fn in sorted(os.listdir(fdir)):
+                    mkt.blob(f"{SHADOW_GCS}/features/{fn}").upload_from_filename(f"{fdir}/{fn}")
             log.info("decisions uploaded")
         except Exception as ex:
             log.warning("decision upload failed: %s", ex)
