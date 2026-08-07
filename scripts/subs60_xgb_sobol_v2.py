@@ -223,12 +223,27 @@ Fn = ((F - mu_ref[day]) / sd_ref[day]).astype(np.float32)
 del F, d, day_mean, day_var, mu_ref, sd_ref   # v2: drop the f64 copies (~6GB) before training
 print(f"[v2 {SYM} {LABELSUB} qm{QMIDX} | Sobol{N_TRIALS}xpar{SOBOL_PAR} A-AUC + B-IC | out={OUT_SUB}] Fn={Fn.shape}", flush=True)
 
+# BAG_FRAC<1 (HBV1 rev16, user-authorized trainer change 2026-08-07): per-member
+# RF-style bagging of the TRAINING side — keep a deterministic random subset of
+# training DAYS (day-level, no replacement; row-level bootstrap would leak across
+# the 3s-grid autocorrelation). Test side untouched. RNG = (BAG_SEED, fold_start)
+# so every fold's draw is reproducible per member. Default 1.0 = code path and
+# output byte-identical to the pre-rev16 trainer.
+BAG_FRAC = float(os.environ.get("BAG_FRAC", "1"))
+BAG_SEED = int(os.environ.get("BAG_SEED", str(SEED)))
 FOLDS = []; ts = W + EMB
 while ts < ndays:
     te = min(ts + T, ndays); trn = (day >= ts - EMB - W) & (day < ts - EMB); tst = (day >= ts) & (day < te)
+    if BAG_FRAC < 1.0:
+        tdays = np.unique(day[trn])
+        keep = np.random.default_rng([BAG_SEED, ts]).choice(
+            tdays, size=max(1, int(round(BAG_FRAC * len(tdays)))), replace=False)
+        trn = trn & np.isin(day, keep)
     if tst.sum() >= 50 and trn.sum() >= 5000:
         FOLDS.append((trn, tst))
     ts += T
+if BAG_FRAC < 1.0:
+    print(f"*** BAG_FRAC={BAG_FRAC} BAG_SEED={BAG_SEED}: day-level train bagging active ***", flush=True)
 tot_days = sum(len(set(day[tst].tolist())) for _, tst in FOLDS)
 
 

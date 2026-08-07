@@ -9,6 +9,8 @@ Stages (run each as `modal run modal_app.py::<stage>` from the repo checkout):
   anch       - frozen prep_anch_sym.py (col13 day-first, col44=0)
   train      - 4 seeds x frozen PROTOCOL v2 (subs60_xgb_sobol_v2.py), parallel
   finish     - perseed_from_pf x4 + ens_sym -> prints the surface
+  train_decor - HBV1 rev15: 4 feature-bag + 2 hold-horizon members (v2.1, env-only)
+  (audit_fn cons_t/cons_ks - HBV1 rev14 consensus K-of-N grid via full_audit.py)
 
 All artifact IO goes through the google.cloud.storage local-FS shim onto the
 Volume (LOCAL_GCS_ROOT=/vol/gcs) — frozen scripts run byte-identical.
@@ -273,12 +275,16 @@ def gain_fn(sub: str = "maker_labels_tb3s_h150anch", drop: str = ""):
                 extra={"XSYM_SUB": sub, "DROP_COLS": drop})
 
 
-@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=6144, timeout=3600)
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=6144, timeout=2 * 3600)
 def audit_fn(pools: str = "", ens_t: str = "1,2.5,5,10", union_t: str = "0.625,1.25,2.5,5",
-             fee_bp: str = "0"):
-    extra = {"ENS_T": ens_t, "UNION_T": union_t, "FEE_BP": fee_bp}
+             fee_bp: str = "0", cons_t: str = "", cons_ks: str = "2,3,4,5,6,7,8",
+             out_tag: str = ""):
+    extra = {"ENS_T": ens_t, "UNION_T": union_t, "FEE_BP": fee_bp,
+             "CONS_T": cons_t, "CONS_KS": cons_ks}
     if pools:
         extra["POOLS"] = pools
+    if out_tag:
+        extra["OUT_TAG"] = out_tag
     return _run([sys.executable, "/repo/runtime/bybit_repl/full_audit.py"], extra=extra)
 
 
@@ -288,16 +294,16 @@ def bexec_fn(mode: str = "validate", members: str = "", tgt: str = "0.3125"):
                 extra={"MODE": mode, "MEMBERS": members, "TGT": tgt})
 
 
-@app.function(image=image, volumes={"/vol": vol}, cpu=4, memory=8192, timeout=3600)
-def bootf_fn(target_dd: str = "0.25", fee_bp: str = "4"):
+@app.function(image=image, volumes={"/vol": vol}, cpu=4, memory=8192, timeout=2 * 3600)
+def bootf_fn(target_dd: str = "0.25", fee_bp: str = "4", out_tag: str = ""):
     return _run([sys.executable, "/repo/runtime/bybit_repl/bootstrap_f.py"],
-                extra={"TARGET_DD": target_dd, "FEE_BP": fee_bp})
+                extra={"TARGET_DD": target_dd, "FEE_BP": fee_bp, "OUT_TAG": out_tag})
 
 
-@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
-def levnorm_fn(target_dd: str = "0.50"):
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=2 * 3600)
+def levnorm_fn(target_dd: str = "0.50", out_tag: str = ""):
     return _run([sys.executable, "/repo/runtime/bybit_repl/leverage_norm.py"],
-                extra={"TARGET_DD": target_dd})
+                extra={"TARGET_DD": target_dd, "OUT_TAG": out_tag})
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
@@ -374,6 +380,120 @@ def train_8seed():
 def tsurf():
     for r in tsurf_fn.map(["1", "2", "3", "20"], return_exceptions=True):
         print(r, flush=True)
+
+
+# ---- HBV1 rev15: DIVERSITY-AXIS WIDENING (beyond seed) --------------------
+# Feature-bag members: v2.1 frozen trainer, env-only — DROP_COLS = no-OI {59,60}
+# + a deterministic 25% bag of the 56 live cols (RNG 1000+j over the live set;
+# dead-on-Bybit cols 17,18,19,24,30,44,50-53,56-58 excluded from the draw —
+# dropping dead cols would be a no-op, not diversity). Bags hardcoded for exact
+# reproducibility (regenerate: np.random.default_rng(1000+j).choice(live,14)).
+FBAG_DROPS = {
+    0: "8,10,15,26,29,32,43,59,60,61,62,64,66,68,69,70",
+    1: "0,3,9,10,27,31,40,41,42,43,48,59,60,65,67,69",
+    2: "3,10,16,20,22,31,34,39,40,45,48,55,59,60,68,69",
+    3: "8,11,12,13,22,27,28,31,38,45,46,48,59,60,68,69",
+}
+FBAG_SUB = "maker_labels_tb3s_h150anch_v2_nooi_fb{j}"
+# Hold-horizon members: CFGIDX indexes HOLDS_S=[90,150,240] of the SAME dataset
+# (0=h90, 2=h240; 1=h150 is the deploy cell). Used as SELECTORS only — in any
+# mixed pool the exec member (first in MEMBERS/POOLS) stays an h150 artifact.
+HOLD_SUBS = {0: "maker_labels_tb3s_h150anch_v2_nooi_h90",
+             2: "maker_labels_tb3s_h150anch_v2_nooi_h240"}
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_fbag_fn(j: int):
+    sub = FBAG_SUB.format(j=j)
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", "DOGE", "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": str(j), "CFGIDX": "1", "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{j}", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": FBAG_DROPS[j], "OUT_SUB": sub})
+    import json as _json
+    os.makedirs(f"/vol/gcs/market-data-0998ac51/research_runs/{sub}", exist_ok=True)
+    with open(f"/vol/gcs/market-data-0998ac51/research_runs/{sub}/FBAG_SPEC.json", "w") as f:
+        _json.dump({"seed": j, "drop_cols": FBAG_DROPS[j], "rng": f"default_rng({1000 + j})",
+                    "frac": 0.25, "base": "no-OI (59,60) + 25% of 56 live cols"}, f)
+    vol.commit()
+    return f"fbag{j} trained (DROP {FBAG_DROPS[j]})"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_hold_fn(cfgidx: int):
+    sub = HOLD_SUBS[cfgidx]
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", "DOGE", "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": "0", "CFGIDX": str(cfgidx), "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": "_S0", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": "59,60", "OUT_SUB": sub})
+    vol.commit()
+    return f"hold cfgidx={cfgidx} trained -> {sub}"
+
+
+@app.local_entrypoint()
+def train_decor():
+    calls = [train_fbag_fn.spawn(j) for j in range(4)] + [train_hold_fn.spawn(c) for c in (0, 2)]
+    for c in calls:
+        try:
+            print(c.get(timeout=4 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
+def finish_decor_fn():
+    out = ""
+    for j in range(4):
+        out += _run([sys.executable, "/repo/runtime/perseed_from_pf.py", "DOGE", str(j)],
+                    extra={"XSYM_SUB": FBAG_SUB.format(j=j)})
+    for sub in HOLD_SUBS.values():
+        out += _run([sys.executable, "/repo/runtime/perseed_from_pf.py", "DOGE", "0"],
+                    extra={"XSYM_SUB": sub})
+    vol.commit()
+    return out
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
+def corr_members_fn(members: str, corrtag: str, tgts: str = "5,10"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/seed_corr.py", "DOGE"],
+                extra={"MEMBERS": members, "CORRTAG": corrtag, "TGTS": tgts})
+
+
+# ---- HBV1 rev16: full RF recipe over members = feature subspace (same bags as
+# fb0-3) + day-level train bagging (BAG_FRAC=0.632 ~ bootstrap-equivalent
+# subsample, no replacement) + seed. rf{j} vs fb{j} isolates the bag axis.
+RF_SUB = "maker_labels_tb3s_h150anch_v2_nooi_rf{j}"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_rf_fn(j: int):
+    sub = RF_SUB.format(j=j)
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", "DOGE", "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": str(j), "CFGIDX": "1", "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{j}", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": FBAG_DROPS[j],
+                "BAG_FRAC": "0.632", "BAG_SEED": str(j), "OUT_SUB": sub})
+    vol.commit()
+    return f"rf{j} trained (bag 0.632 + DROP {FBAG_DROPS[j]})"
+
+
+@app.local_entrypoint()
+def train_rf():
+    calls = [train_rf_fn.spawn(j) for j in range(4)]
+    for c in calls:
+        try:
+            print(c.get(timeout=4 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
+def finish_rf_fn():
+    out = ""
+    for j in range(4):
+        out += _run([sys.executable, "/repo/runtime/perseed_from_pf.py", "DOGE", str(j)],
+                    extra={"XSYM_SUB": RF_SUB.format(j=j)})
+    vol.commit()
+    return out
 
 
 @app.local_entrypoint()

@@ -19,14 +19,24 @@ FEE_BP = 4.0
 TARGET_DD = float(os.environ.get("TARGET_DD", "0.50"))
 B = "maker_labels_tb3s_h150anch"
 
+V2N4 = [(B + "_v2_nooi", s) for s in range(4)]
+FB4 = [(B + f"_v2_nooi_fb{j}", j) for j in range(4)]
+RF4 = [(B + f"_v2_nooi_rf{j}", j) for j in range(4)]
+# (name, members, T_s, K): K=1 = union, K>=2 = consensus K-of-N (rev14 form).
 FORMS = [
-    ("v2-nooi4  union T1.25", [(B + "_v2_nooi", s) for s in range(4)], 1.25),
-    ("v2-nooi4  union T0.625", [(B + "_v2_nooi", s) for s in range(4)], 0.625),
-    ("xproto16  union T0.3125", [(B + "_v1_nooi", s) for s in range(8)] + [(B + "_v2_nooi", s) for s in range(8)], 0.3125),
-    ("v1-nooi8  union T0.3125", [(B + "_v1_nooi", s) for s in range(8)], 0.3125),
-    ("v2-nooi8  union T0.3125", [(B + "_v2_nooi", s) for s in range(8)], 0.3125),
-    ("v2-nooi4  union T0.3125", [(B + "_v2_nooi", s) for s in range(4)], 0.3125),
+    ("v1-nooi8  union T0.3125", [(B + "_v1_nooi", s) for s in range(8)], 0.3125, 1),
+    ("rf4       union T0.625", RF4, 0.625, 1),
+    ("rf4       union T0.3125", RF4, 0.3125, 1),
+    ("rf4       cons T5 k>=3", RF4, 5.0, 3),
+    ("rf4       cons T10 k>=4", RF4, 10.0, 4),
+    ("rf-mix8   union T0.3125", V2N4 + RF4, 0.3125, 1),
+    ("rf-mix8   cons T1.25 k>=3", V2N4 + RF4, 1.25, 3),
+    ("fb4       cons T2.5 k>=3", FB4, 2.5, 3),
+    ("fb4       cons T1.25 k>=2", FB4, 1.25, 2),
+    ("fbag-mix8 cons T2.5 k>=7", V2N4 + FB4, 2.5, 7),
+    ("v2-nooi8  cons T1.25 k>=3", [(B + "_v2_nooi", s) for s in range(8)], 1.25, 3),
 ]
+OUT_TAG = os.environ.get("OUT_TAG", "")
 
 _cache = {}
 
@@ -51,7 +61,7 @@ def causal_sel(sc_tr, sc_te, day_tr, day_te, tgt):
     return np.array(sel, dtype=int)
 
 
-def union_nets(members, tgt):
+def union_nets(members, tgt, K=1):
     nf = sum(1 for b in bk.client.list_blobs(bk, prefix=f"research_runs/{members[0][0]}/PERFOLD_S{members[0][1]}_{SYM}_qm0_f")
              if b.name.endswith(".npz"))
     Z = {m: [load(m[0], m[1], f) for f in range(nf)] for m in members}
@@ -64,6 +74,8 @@ def union_nets(members, tgt):
         days_all |= set(int(d) for d in np.unique(z0["day_te"]))
         for i in sorted(set().union(*sets.values())):
             ks = [m for m in members if i in sets[m]]
+            if len(ks) < K:
+                continue
             sides = [bool(Z[m][f]["side"][i]) for m in ks]
             nl_ = sum(sides)
             if nl_ * 2 == len(sides):
@@ -98,8 +110,8 @@ def metrics_at(nets, days, days_sorted, F):
 
 out = {}
 print(f"target maxDD = {100*TARGET_DD:.0f}% (fee 4bp, bisection on F)", flush=True)
-for name, members, tgt in FORMS:
-    nets, days, days_sorted = union_nets(members, tgt)
+for name, members, tgt, K in FORMS:
+    nets, days, days_sorted = union_nets(members, tgt, K)
     lo, hi = 0.1, 200.0
     for _ in range(60):
         mid = 0.5 * (lo + hi)
@@ -113,5 +125,5 @@ for name, members, tgt in FORMS:
     print(f"{name:26s} F*={F:5.2f} n={len(nets):4d} | ROI/mo {100*m['roi_m']:+7.1f}% ann {100*m['roi_a']:+9.0f}% | "
           f"DD {100*m['dd']:.1f}% worst-d {100*m['worst_day']:+.1f}% | Sh {m['sharpe']:.1f} So {m['sortino']:.1f} "
           f"Ca {m['calmar']:.0f}", flush=True)
-bk.blob(f"research_runs/HBV1_LEVNORM_DD{int(100*TARGET_DD)}.json").upload_from_string(json.dumps(out, default=float))
+bk.blob(f"research_runs/HBV1_LEVNORM_DD{int(100*TARGET_DD)}{OUT_TAG}.json").upload_from_string(json.dumps(out, default=float))
 print("[saved]", flush=True)
