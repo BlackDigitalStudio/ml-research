@@ -136,5 +136,6 @@ if __name__ == "__main__":
             allres[name] = run_pool(name, members)
         except Exception as e:
             print(f"### pool {name}: FAILED {e}", flush=True)
-    bk.blob("research_runs/HBV1_FULL_AUDIT.json").upload_from_string(json.dumps(allres, default=float))
-    print("\n[saved HBV1_FULL_AUDIT.json]", flush=True)
+    tag = os.environ.get("OUT_TAG") or "_".join(POOLS)
+    bk.blob(f"research_runs/HBV1_FULL_AUDIT_{tag}.json").upload_from_string(json.dumps(allres, default=float))
+    print(f"\n[saved HBV1_FULL_AUDIT_{tag}.json]", flush=True)
