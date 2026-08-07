@@ -452,6 +452,12 @@ def finish_decor_fn():
     return out
 
 
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=6144, timeout=3600)
+def forensics_fn(members: str, sym: str = "DOGE", tgt: str = "5", ftag: str = ""):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/member_forensics.py"],
+                extra={"MEMBERS": members, "SYM": sym, "TGT": tgt, "FTAG": ftag})
+
+
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
 def corr_members_fn(members: str, corrtag: str, tgts: str = "5,10", sym: str = "DOGE"):
     return _run([sys.executable, "/repo/runtime/bybit_repl/seed_corr.py", sym],
