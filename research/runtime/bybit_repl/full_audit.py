@@ -184,11 +184,14 @@ def run_pool(name, members):
 
 if __name__ == "__main__":
     allres = {}
+    tag = os.environ.get("OUT_TAG") or "_".join(POOLS)
     for name, members in POOLS.items():
         try:
             allres[name] = run_pool(name, members)
         except Exception as e:
             print(f"### pool {name}: FAILED {e}", flush=True)
-    tag = os.environ.get("OUT_TAG") or "_".join(POOLS)
-    bk.blob(f"research_runs/HBV1_FULL_AUDIT_{tag}.json").upload_from_string(json.dumps(allres, default=float))
-    print(f"\n[saved HBV1_FULL_AUDIT_{tag}.json]", flush=True)
+        # incremental save after EVERY pool — preemption/timeout loses at most
+        # the pool in flight (the 2026-08-07 rev14 4-pool run lost 60 min to a
+        # preempt+restart and saved nothing)
+        bk.blob(f"research_runs/HBV1_FULL_AUDIT_{tag}.json").upload_from_string(json.dumps(allres, default=float))
+        print(f"[saved HBV1_FULL_AUDIT_{tag}.json through pool {name}]", flush=True)

@@ -275,7 +275,7 @@ def gain_fn(sub: str = "maker_labels_tb3s_h150anch", drop: str = ""):
                 extra={"XSYM_SUB": sub, "DROP_COLS": drop})
 
 
-@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=6144, timeout=3600)
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=6144, timeout=2 * 3600)
 def audit_fn(pools: str = "", ens_t: str = "1,2.5,5,10", union_t: str = "0.625,1.25,2.5,5",
              fee_bp: str = "0", cons_t: str = "", cons_ks: str = "2,3,4,5,6,7,8",
              out_tag: str = ""):
