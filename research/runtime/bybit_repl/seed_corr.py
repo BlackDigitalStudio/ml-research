@@ -12,7 +12,11 @@ Per (fold, seed): selected decision set S_s. Reported across seeds:
     (EV = mean over selecting seeds of that seed's own-side filled net; the
     consensus-selectivity axis of rev22, measured on this cell)
   - full-score corr kept as context.
-Usage: seed_corr.py [SYM]; env XSYM_SUB, TGTS (default "5,10")."""
+Usage: seed_corr.py [SYM]; env XSYM_SUB, TGTS (default "5,10").
+MEMBERS env ("sub:seed,sub:seed,...", cross-prefix, same dataset/folds) overrides
+XSYM_SUB+the default 4 seeds — lets the same diagnostics run on mixed-axis pools
+(feature-bag / hold-horizon / cross-protocol members, HBV1 rev15). CORRTAG env
+suffixes the artifact name so pool runs don't overwrite the seed-pool json."""
 import io
 import json
 import os
@@ -25,7 +29,11 @@ from google.cloud import storage
 SYM = sys.argv[1] if len(sys.argv) > 1 else "DOGE"
 SUB = "research_runs/" + os.environ.get("XSYM_SUB", "maker_labels_tb3s_h150anch")
 TGTS = [float(x) for x in os.environ.get("TGTS", "5,10").split(",")]
-SEEDS = [0, 1, 2, 3]
+_MEMBERS = os.environ.get("MEMBERS", "")
+if _MEMBERS:
+    SEEDS = [(("research_runs/" + p.split(":")[0]), int(p.split(":")[1])) for p in _MEMBERS.split(",")]
+else:
+    SEEDS = [(SUB, s) for s in (0, 1, 2, 3)]
 KDAYS = 30
 bk = storage.Client(project="x").bucket("market-data-0998ac51")
 
@@ -53,20 +61,24 @@ def trade_net(z, idx):
     return np.where(fc & np.isfinite(net), net, np.nan)
 
 
-nf = sum(1 for b in bk.client.list_blobs(bk, prefix=f"{SUB}/PERFOLD_S0_{SYM}_qm0_f") if b.name.endswith(".npz"))
-Z = {s: [np.load(io.BytesIO(bk.blob(f"{SUB}/PERFOLD_S{s}_{SYM}_qm0_f{f}.npz").download_as_bytes()))
-         for f in range(nf)] for s in SEEDS}
+_sub0, _s0 = SEEDS[0]
+nf = sum(1 for b in bk.client.list_blobs(bk, prefix=f"{_sub0}/PERFOLD_S{_s0}_{SYM}_qm0_f") if b.name.endswith(".npz"))
+Z = {m: [np.load(io.BytesIO(bk.blob(f"{m[0]}/PERFOLD_S{m[1]}_{SYM}_qm0_f{f}.npz").download_as_bytes()))
+         for f in range(nf)] for m in SEEDS}
+NK = len(SEEDS)
 
 # context: full-score corr (kept, labelled as distribution-wide)
 cors = [float(np.corrcoef(Z[a][f]["axb_te"].astype(np.float64), Z[b][f]["axb_te"].astype(np.float64))[0, 1])
         for f in range(nf) for a, b in combinations(SEEDS, 2)]
 print(f"{SUB.split('/')[-1]} {SYM}: folds={nf} | context full-score corr mean {np.mean(cors):.3f}", flush=True)
 
-out = {"nf": nf, "score_corr_full": float(np.mean(cors))}
+out = {"nf": nf, "score_corr_full": float(np.mean(cors)),
+       "members": [(m[0].split("/")[-1], m[1]) for m in SEEDS]}
+KRANGE = tuple(range(1, NK + 1))
 for tgt in TGTS:
     jac, sagree = [], []
-    kn = {k: [] for k in (1, 2, 3, 4)}
-    kev = {k: [] for k in (1, 2, 3, 4)}
+    kn = {k: [] for k in KRANGE}
+    kev = {k: [] for k in KRANGE}
     for f in range(nf):
         sels = {s: select(Z[s][f], tgt) for s in SEEDS}
         sets = {s: set(sels[s].tolist()) for s in SEEDS}
@@ -87,12 +99,13 @@ for tgt in TGTS:
                 kev[len(ks)].append(float(np.mean(nets)))
     res = {"jaccard": float(np.mean(jac)), "side_agree_inter": float(np.mean(sagree)) if sagree else None,
            "consensus": {k: {"n": len(kn[k]), "ev": (float(np.mean(kev[k])) if kev[k] else None)}
-                         for k in (1, 2, 3, 4)}}
+                         for k in KRANGE}}
     out[f"t{tgt:g}"] = res
     cons = " | ".join(f"k={k}: n={len(kn[k])} EV {np.mean(kev[k]):+.2f}bp" if kev[k] else f"k={k}: n={len(kn[k])}"
-                      for k in (1, 2, 3, 4))
+                      for k in KRANGE)
     print(f"  t{tgt:g}: traded-set Jaccard {np.mean(jac):.3f} | side-agree on overlap "
           f"{(np.mean(sagree)*100 if sagree else float('nan')):.1f}% | {cons}", flush=True)
 
-bk.blob(f"{SUB}/HBV1_SEEDCORR_{SYM}.json").upload_from_string(json.dumps(out, default=float))
-print("[saved HBV1_SEEDCORR]", flush=True)
+_tag = os.environ.get("CORRTAG", "")
+bk.blob(f"{SUB}/HBV1_SEEDCORR_{SYM}{_tag}.json").upload_from_string(json.dumps(out, default=float))
+print(f"[saved HBV1_SEEDCORR{_tag}]", flush=True)
