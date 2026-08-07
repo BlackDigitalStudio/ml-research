@@ -13,7 +13,7 @@ import numpy as np
 from google.cloud import storage
 
 bk = storage.Client(project="x").bucket("market-data-0998ac51")
-SYM = "DOGE"
+SYM = os.environ.get("SYM", "DOGE")
 KDAYS = 30
 FEE_BP = float(os.environ.get("FEE_BP", "4"))
 B = "maker_labels_tb3s_h150anch"

@@ -278,9 +278,9 @@ def gain_fn(sub: str = "maker_labels_tb3s_h150anch", drop: str = ""):
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=6144, timeout=2 * 3600)
 def audit_fn(pools: str = "", ens_t: str = "1,2.5,5,10", union_t: str = "0.625,1.25,2.5,5",
              fee_bp: str = "0", cons_t: str = "", cons_ks: str = "2,3,4,5,6,7,8",
-             out_tag: str = ""):
+             out_tag: str = "", sym: str = "DOGE"):
     extra = {"ENS_T": ens_t, "UNION_T": union_t, "FEE_BP": fee_bp,
-             "CONS_T": cons_t, "CONS_KS": cons_ks}
+             "CONS_T": cons_t, "CONS_KS": cons_ks, "SYM": sym}
     if pools:
         extra["POOLS"] = pools
     if out_tag:
@@ -453,8 +453,8 @@ def finish_decor_fn():
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
-def corr_members_fn(members: str, corrtag: str, tgts: str = "5,10"):
-    return _run([sys.executable, "/repo/runtime/bybit_repl/seed_corr.py", "DOGE"],
+def corr_members_fn(members: str, corrtag: str, tgts: str = "5,10", sym: str = "DOGE"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/seed_corr.py", sym],
                 extra={"MEMBERS": members, "CORRTAG": corrtag, "TGTS": tgts})
 
 
@@ -488,8 +488,9 @@ def train_rf():
 
 # ---- HBV1 rev18 wave-1 analyses ----
 @app.function(image=image, volumes={"/vol": vol}, cpu=4, memory=8192, timeout=2 * 3600)
-def sizedu_fn(pools: str = "", tgts: str = "2.5,5,10", gammas: str = "0,0.5,1,2,3", fee_bp: str = "4"):
-    extra = {"TGTS": tgts, "GAMMAS": gammas, "FEE_BP": fee_bp}
+def sizedu_fn(pools: str = "", tgts: str = "2.5,5,10", gammas: str = "0,0.5,1,2,3", fee_bp: str = "4",
+              sym: str = "DOGE"):
+    extra = {"TGTS": tgts, "GAMMAS": gammas, "FEE_BP": fee_bp, "SYM": sym}
     if pools:
         extra["POOLS"] = pools
     return _run([sys.executable, "/repo/runtime/bybit_repl/sized_union.py"], extra=extra)

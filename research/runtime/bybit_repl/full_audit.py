@@ -26,7 +26,7 @@ from google.cloud import storage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from policy_metrics import battery, fmt  # noqa: E402
 
-SYM = "DOGE"
+SYM = os.environ.get("SYM", "DOGE")
 KDAYS = 30
 bk = storage.Client(project="x").bucket("market-data-0998ac51")
 

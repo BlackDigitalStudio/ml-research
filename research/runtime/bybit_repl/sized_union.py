@@ -20,7 +20,7 @@ import numpy as np
 from google.cloud import storage
 
 bk = storage.Client(project="x").bucket("market-data-0998ac51")
-SYM = "DOGE"
+SYM = os.environ.get("SYM", "DOGE")
 KDAYS = 30
 FEE_BP = float(os.environ.get("FEE_BP", "4"))
 TGTS = [float(x) for x in os.environ.get("TGTS", "2.5,5,10").split(",")]
