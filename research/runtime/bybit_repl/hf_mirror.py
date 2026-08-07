@@ -21,7 +21,11 @@ vol = modal.Volume.from_name("bybit-cl")
 image = modal.Image.debian_slim(python_version="3.11").pip_install("huggingface_hub[hf_transfer]")
 
 ROOT = "/vol/gcs/market-data-0998ac51"
-INCLUDE = [
+# INCLUDE env ("path,path,..."): overrides the default DOGE core list — lets the
+# same mirror run per account/symbol (rf/fb prefixes on 08, 1000PEPE/LTC cells
+# on 05/06). Secret hf-write-token replicated to all virginship0{5,6,7,8}
+# (2026-08-07); default repo stays delmiron27/hbv1-bybit-artifacts.
+INCLUDE = [x for x in os.environ.get("INCLUDE", "").split(",") if x] or [
     "research_runs/maker_labels_tb3s_h150/DOGE.npz",
     "research_runs/maker_labels_tb3s_h150anch",
     "research_runs/maker_labels_tb3s_h150anch_v1",
