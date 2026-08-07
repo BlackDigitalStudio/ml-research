@@ -288,6 +288,12 @@ def bexec_fn(mode: str = "validate", members: str = "", tgt: str = "0.3125"):
                 extra={"MODE": mode, "MEMBERS": members, "TGT": tgt})
 
 
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
+def levnorm_fn(target_dd: str = "0.50"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/leverage_norm.py"],
+                extra={"TARGET_DD": target_dd})
+
+
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
 def hp_fn():
     return _run([sys.executable, "/repo/runtime/bybit_repl/hp_tendency.py"])
