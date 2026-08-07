@@ -39,6 +39,11 @@ def battery(ordered_nets, ordered_days, fold_nets, days_sorted, boot_reps=1000, 
                      for d in days_sorted])
     out["worst_day"] = float(dret.min())
     out["sharpe"] = float(dret.mean() / dret.std() * np.sqrt(365.0)) if dret.std() > 0 else 0.0
+    out["roi_annual"] = float((1.0 + out["roi_monthly"]) ** 12 - 1.0)
+    downside = dret[dret < 0]
+    dstd = float(np.sqrt(np.mean(downside ** 2))) if len(downside) else 0.0
+    out["sortino"] = float(dret.mean() / dstd * np.sqrt(365.0)) if dstd > 0 else float("inf")
+    out["calmar"] = float(out["roi_annual"] / out["maxdd"]) if out["maxdd"] > 0 else float("inf")
     out["month_roi_pct"] = [round(100 * float(np.prod(1.0 + dret[m:m + 30]) - 1.0), 1)
                             for m in range(0, span, 30)]
     # gate

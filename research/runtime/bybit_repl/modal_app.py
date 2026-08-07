@@ -282,6 +282,12 @@ def audit_fn(pools: str = "", ens_t: str = "1,2.5,5,10", union_t: str = "0.625,1
     return _run([sys.executable, "/repo/runtime/bybit_repl/full_audit.py"], extra=extra)
 
 
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=10240, timeout=2 * 3600)
+def bexec_fn(mode: str = "validate", members: str = "", tgt: str = "0.3125"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/binance_exec.py"],
+                extra={"MODE": mode, "MEMBERS": members, "TGT": tgt})
+
+
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
 def hp_fn():
     return _run([sys.executable, "/repo/runtime/bybit_repl/hp_tendency.py"])
