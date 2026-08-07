@@ -83,7 +83,10 @@ def battery(ordered_nets, ordered_days, fold_nets, days_sorted, boot_reps=1000, 
         c = np.cumprod(1.0 + F * path * 1e-4)
         c = np.concatenate([[1.0], c])
         return float((1.0 - c / np.maximum.accumulate(c)).max())
-    lo, hi = 0.02, 100.0
+    # hi capped at 25x: beyond that leverage the number is non-operational
+    # (tiny-n forms whose DD never reaches 25% would otherwise clamp at the
+    # search bound and explode ROI25); f10_capped flags those cells.
+    lo, hi = 0.02, 25.0
     for _ in range(30):
         mid = 0.5 * (lo + hi)
         if float(np.mean([_dd(p_, mid) > 0.25 for p_ in b_paths])) <= 0.10:
@@ -92,6 +95,7 @@ def battery(ordered_nets, ordered_days, fold_nets, days_sorted, boot_reps=1000, 
             hi = mid
     F10 = 0.5 * (lo + hi)
     out["F10_dd25"] = F10
+    out["f10_capped"] = bool(F10 > 24.5)
     eqF = np.cumprod(1.0 + F10 * a * 1e-4)
     out["roi25_monthly"] = float(eqF[-1] ** (30.0 / span) - 1.0) if len(eqF) else 0.0
     rois = [float(np.cumprod(1.0 + F10 * p_ * 1e-4)[-1] ** (30.0 / span) - 1.0) if len(p_) else 0.0
