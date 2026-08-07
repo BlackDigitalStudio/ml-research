@@ -294,16 +294,16 @@ def bexec_fn(mode: str = "validate", members: str = "", tgt: str = "0.3125"):
                 extra={"MODE": mode, "MEMBERS": members, "TGT": tgt})
 
 
-@app.function(image=image, volumes={"/vol": vol}, cpu=4, memory=8192, timeout=3600)
-def bootf_fn(target_dd: str = "0.25", fee_bp: str = "4"):
+@app.function(image=image, volumes={"/vol": vol}, cpu=4, memory=8192, timeout=2 * 3600)
+def bootf_fn(target_dd: str = "0.25", fee_bp: str = "4", out_tag: str = ""):
     return _run([sys.executable, "/repo/runtime/bybit_repl/bootstrap_f.py"],
-                extra={"TARGET_DD": target_dd, "FEE_BP": fee_bp})
+                extra={"TARGET_DD": target_dd, "FEE_BP": fee_bp, "OUT_TAG": out_tag})
 
 
-@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
-def levnorm_fn(target_dd: str = "0.50"):
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=2 * 3600)
+def levnorm_fn(target_dd: str = "0.50", out_tag: str = ""):
     return _run([sys.executable, "/repo/runtime/bybit_repl/leverage_norm.py"],
-                extra={"TARGET_DD": target_dd})
+                extra={"TARGET_DD": target_dd, "OUT_TAG": out_tag})
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
