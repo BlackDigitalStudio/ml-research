@@ -566,6 +566,103 @@ def finish_rf_fn():
     return out
 
 
+# ---- HBV2: symbol-parameterized build/train stages (DOGE stages above stay
+# byte-identical; new symbols run on their own accounts/volumes). spec format
+# for day fan-out: "day|SYM|SYMF" (e.g. "2025-05-09|1000PEPEUSDT|1000PEPE-USDT-PERP").
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=3600)
+def aux_sym_fn(sym: str):
+    _run([sys.executable, "/repo/runtime/bybit_repl/fetch_aux.py"],
+         extra={"START": "2025-05-01", "END": "2026-06-05", "SYM": sym})
+    vol.commit()
+    return f"aux {sym} done"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=9216, timeout=5400,
+              retries=modal.Retries(max_retries=2), max_containers=40)
+def day_sym_fn(spec: str):
+    day, sym, symf = spec.split("|")
+    base = symf.split("-")[0]
+    done = f"/vol/gcs/market-data-0998ac51/research_runs/maker_labels_tb3s_h150/daily/{base}_{day}.npz"
+    if os.path.exists(done):
+        return f"{day}: already-done"
+    sys.path.insert(0, "/repo/runtime/bybit_repl")
+    os.environ.update(ENV)
+    os.environ["WORK"] = "/tmp/conv"
+    os.environ["SYM"] = sym
+    os.environ["SYMF_CONV"] = symf
+    import convert_bybit
+    conv = convert_bybit.run_day(day)
+    vol.commit()
+    if "book-missing" in conv or "trades-missing" in conv.split("|")[1]:
+        return f"{day}: SKIP no-raw ({conv})"
+    out = _run([sys.executable, "/repo/scripts/subs60_build_tb3s_labels.py"],
+               extra=dict(BUILD_ENV, SYMF=symf, START=day, END=day, WORKDIR="/tmp/tb3s"))
+    vol.commit()
+    tail = [ln for ln in out.splitlines() if ln.strip().startswith(day)]
+    return f"{day}: {conv} || {tail[-1].strip() if tail else 'no-day-line'}"
+
+
+@app.local_entrypoint()
+def days_sym(sym: str, symf: str, start: str = START, end: str = END):
+    import numpy as np
+    all_days = [str(d) for d in np.arange(np.datetime64(start), np.datetime64(end) + 1)]
+    print(f"{sym}: {len(all_days)} days {all_days[0]}..{all_days[-1]}")
+    specs = [f"{d}|{sym}|{symf}" for d in all_days]
+    ok = skip = 0
+    for res in day_sym_fn.map(specs, return_exceptions=True):
+        s = str(res)
+        print(s, flush=True)
+        if "SKIP" in s or "Exception" in s:
+            skip += 1
+        else:
+            ok += 1
+    print(f"[days done] ok={ok} skip/fail={skip}")
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=20480, timeout=5400)
+def combine_sym_fn(symf: str):
+    _run([sys.executable, "/repo/scripts/subs60_build_tb3s_labels.py"],
+         extra=dict(BUILD_ENV, SYMF=symf, START=START, END=END, COMBINE="1", WORKDIR="/tmp/tb3s"))
+    vol.commit()
+    return f"combined {symf}"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=12288, timeout=3600)
+def anch_sym_fn(base: str):
+    _run([sys.executable, "/repo/runtime/prep_anch_sym.py", base])
+    vol.commit()
+    return f"anch {base} done"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_sym_rf_fn(spec: str):
+    base, j_s = spec.split("|")
+    j = int(j_s)
+    drop = _bag(j)
+    sub = f"maker_labels_tb3s_h150anch_v2_nooi_rf{j}"
+    done = f"/vol/gcs/market-data-0998ac51/research_runs/{sub}/PERFOLD_S{j}_{base}_qm0_f6.npz"
+    if os.path.exists(done):
+        return f"{base} rf{j} already-done"
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", base, "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": str(j), "CFGIDX": "1", "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{j}", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": drop,
+                "BAG_FRAC": "0.632", "BAG_SEED": str(j), "OUT_SUB": sub})
+    vol.commit()
+    return f"{base} rf{j} trained"
+
+
+@app.local_entrypoint()
+def train_sym_forest(base: str, js: str = "0-7"):
+    a, b = js.split("-")
+    calls = [train_sym_rf_fn.spawn(f"{base}|{j}") for j in range(int(a), int(b) + 1)]
+    for c in calls:
+        try:
+            print(c.get(timeout=4 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
+
+
 @app.local_entrypoint()
 def stage(name: str = "probe"):
     if name == "probe":
