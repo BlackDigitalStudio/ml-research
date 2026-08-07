@@ -691,6 +691,37 @@ def train_solo(base: str, specs: str):
             print("FAIL:", e, flush=True)
 
 
+# HBV2 rev4: targeted-axis ensemble members — the WINNING solo spec (fixed
+# drop set + cfgidx) x seed/data-bag diversity (NO random feature bags: the
+# symbol's axes stay fixed; decorrelation comes from seed + BAG_FRAC only).
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_axis_fn(spec: str):
+    base, tag, drop, cfg, j_s = spec.split("|")
+    j = int(j_s)
+    sub = f"maker_labels_tb3s_h150anch_ax_{tag}_m{j}"
+    done = f"/vol/gcs/market-data-0998ac51/research_runs/{sub}/PERFOLD_S{j}_{base}_qm0_f6.npz"
+    if os.path.exists(done):
+        return f"{base} ax_{tag} m{j} already-done"
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", base, "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": str(j), "CFGIDX": cfg, "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{j}", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": drop,
+                "BAG_FRAC": "0.632", "BAG_SEED": str(j), "OUT_SUB": sub})
+    vol.commit()
+    return f"{base} ax_{tag} m{j} trained"
+
+
+@app.local_entrypoint()
+def train_axis(base: str, tag: str, drop: str, cfg: str = "1", js: str = "0-5"):
+    a, b = js.split("-")
+    calls = [train_axis_fn.spawn(f"{base}|{tag}|{drop}|{cfg}|{j}") for j in range(int(a), int(b) + 1)]
+    for c in calls:
+        try:
+            print(c.get(timeout=4 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
+
+
 @app.local_entrypoint()
 def train_sym_forest(base: str, js: str = "0-7"):
     a, b = js.split("-")
