@@ -458,6 +458,44 @@ def corr_members_fn(members: str, corrtag: str, tgts: str = "5,10"):
                 extra={"MEMBERS": members, "CORRTAG": corrtag, "TGTS": tgts})
 
 
+# ---- HBV1 rev16: full RF recipe over members = feature subspace (same bags as
+# fb0-3) + day-level train bagging (BAG_FRAC=0.632 ~ bootstrap-equivalent
+# subsample, no replacement) + seed. rf{j} vs fb{j} isolates the bag axis.
+RF_SUB = "maker_labels_tb3s_h150anch_v2_nooi_rf{j}"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_rf_fn(j: int):
+    sub = RF_SUB.format(j=j)
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", "DOGE", "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": str(j), "CFGIDX": "1", "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{j}", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": FBAG_DROPS[j],
+                "BAG_FRAC": "0.632", "BAG_SEED": str(j), "OUT_SUB": sub})
+    vol.commit()
+    return f"rf{j} trained (bag 0.632 + DROP {FBAG_DROPS[j]})"
+
+
+@app.local_entrypoint()
+def train_rf():
+    calls = [train_rf_fn.spawn(j) for j in range(4)]
+    for c in calls:
+        try:
+            print(c.get(timeout=4 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
+def finish_rf_fn():
+    out = ""
+    for j in range(4):
+        out += _run([sys.executable, "/repo/runtime/perseed_from_pf.py", "DOGE", str(j)],
+                    extra={"XSYM_SUB": RF_SUB.format(j=j)})
+    vol.commit()
+    return out
+
+
 @app.local_entrypoint()
 def stage(name: str = "probe"):
     if name == "probe":
