@@ -486,6 +486,76 @@ def train_rf():
             print("FAIL:", e, flush=True)
 
 
+# ---- HBV1 rev18 wave-1 analyses ----
+@app.function(image=image, volumes={"/vol": vol}, cpu=4, memory=8192, timeout=2 * 3600)
+def sizedu_fn(pools: str = "", tgts: str = "2.5,5,10", gammas: str = "0,0.5,1,2,3", fee_bp: str = "4"):
+    extra = {"TGTS": tgts, "GAMMAS": gammas, "FEE_BP": fee_bp}
+    if pools:
+        extra["POOLS"] = pools
+    return _run([sys.executable, "/repo/runtime/bybit_repl/sized_union.py"], extra=extra)
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=4, memory=8192, timeout=2 * 3600)
+def portfolio_fn(fee_bp: str = "4", target_dd: str = "0.25"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/form_portfolio.py"],
+                extra={"FEE_BP": fee_bp, "TARGET_DD": target_dd})
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=14336, timeout=2 * 3600)
+def anatomy_fn(fee_bp: str = "4"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/regime_anatomy.py"], extra={"FEE_BP": fee_bp})
+
+
+# ---- HBV1 rev19: forest scaling — bag generator for arbitrary j (reproduces
+# FBAG_DROPS exactly on j=0..3; asserted at call time).
+def _bag(j: int) -> str:
+    import numpy as np
+    dead = {17, 18, 19, 24, 30, 44, 50, 51, 52, 53, 56, 57, 58}
+    live = [i for i in range(71) if i not in dead and i not in (59, 60)]
+    extra = np.random.default_rng(1000 + j).choice(live, size=14, replace=False)
+    return ",".join(map(str, sorted({59, 60} | {int(x) for x in extra})))
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_rf_any_fn(j: int):
+    drop = _bag(j)
+    if j in FBAG_DROPS:
+        assert drop == FBAG_DROPS[j], f"bag generator mismatch at j={j}"
+    sub = RF_SUB.format(j=j)
+    done = f"/vol/gcs/market-data-0998ac51/research_runs/{sub}/PERFOLD_S{j}_DOGE_qm0_f6.npz"
+    if os.path.exists(done):
+        return f"rf{j} already-done"
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", "DOGE", "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": str(j), "CFGIDX": "1", "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{j}", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": drop,
+                "BAG_FRAC": "0.632", "BAG_SEED": str(j), "OUT_SUB": sub})
+    vol.commit()
+    return f"rf{j} trained (bag 0.632 + DROP {drop})"
+
+
+@app.local_entrypoint()
+def train_forest(js: str = "4-31"):
+    a, b = js.split("-")
+    calls = [train_rf_any_fn.spawn(j) for j in range(int(a), int(b) + 1)]
+    for c in calls:
+        try:
+            print(c.get(timeout=4 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=2 * 3600)
+def finish_forest_fn(js: str = "0-31"):
+    a, b = js.split("-")
+    out = ""
+    for j in range(int(a), int(b) + 1):
+        out += _run([sys.executable, "/repo/runtime/perseed_from_pf.py", "DOGE", str(j)],
+                    extra={"XSYM_SUB": RF_SUB.format(j=j)})
+    vol.commit()
+    return out
+
+
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
 def finish_rf_fn():
     out = ""
