@@ -289,9 +289,9 @@ def bexec_fn(mode: str = "validate", members: str = "", tgt: str = "0.3125"):
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=4, memory=8192, timeout=3600)
-def bootf_fn(target_dd: str = "0.25"):
+def bootf_fn(target_dd: str = "0.25", fee_bp: str = "4"):
     return _run([sys.executable, "/repo/runtime/bybit_repl/bootstrap_f.py"],
-                extra={"TARGET_DD": target_dd})
+                extra={"TARGET_DD": target_dd, "FEE_BP": fee_bp})
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)

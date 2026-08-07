@@ -18,7 +18,7 @@ from google.cloud import storage
 bk = storage.Client(project="x").bucket("market-data-0998ac51")
 SYM = "DOGE"
 KDAYS = 30
-FEE_BP = 4.0
+FEE_BP = float(os.environ.get("FEE_BP", "4"))
 TARGET_DD = float(os.environ.get("TARGET_DD", "0.25"))
 L = 7
 REPS = 1000
@@ -139,5 +139,5 @@ for name, members, tgt in FORMS:
           f"boot p10/p50/p90 {100*np.quantile(rois,.1):+6.1f}/{100*np.quantile(rois,.5):+6.1f}/"
           f"{100*np.quantile(rois,.9):+6.1f}% P(>0)={100*np.mean(rois>0):3.0f}% | DD(real path)@F10 "
           f"{100*dd_real:.1f}%", flush=True)
-bk.blob(f"research_runs/HBV1_BOOTF_DD{int(100*TARGET_DD)}.json").upload_from_string(json.dumps(out, default=float))
+bk.blob(f"research_runs/HBV1_BOOTF_DD{int(100*TARGET_DD)}_fee{int(FEE_BP)}.json").upload_from_string(json.dumps(out, default=float))
 print("[saved]", flush=True)
