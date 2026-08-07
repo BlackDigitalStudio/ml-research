@@ -88,8 +88,14 @@ def run_pool(name, members):
     print(f"\n### pool {name}: {len(members)} members, {nf} folds, {len(days_sorted)} test days", flush=True)
     results = {}
 
-    # ---- mean-rank ensemble forms
-    for tgt in ENS_T:
+    # ---- mean-rank ensemble forms. BAG_FRAC members (rev16) have SHORTER
+    # train-score arrays (bagged train days) -> cross-member train means are
+    # undefined; ens is skipped for such pools (union/cons don't need alignment).
+    ens_ok = all(len(Z[m_][f]["axb_tr"]) == len(Z[members[0]][f]["axb_tr"])
+                 for f in range(nf) for m_ in members)
+    if not ens_ok:
+        print("  ens: SKIPPED (members' train-score lengths differ — bagged members)", flush=True)
+    for tgt in (ENS_T if ens_ok else []):
         nets, tdays, fold_nets = [], [], []
         for f in range(nf):
             zs = [Z[m][f] for m in members]
