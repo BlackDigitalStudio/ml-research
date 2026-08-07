@@ -659,6 +659,38 @@ def train_sym_rf_fn(spec: str):
     return f"{base} rf{j} trained"
 
 
+# HBV2 rev3 (signal-first canon): SINGLE-model condition cells — SEED=0, no
+# data-bag, TARGETED (non-random) drop sets from member forensics / HD3 axes.
+# spec: "BASE|tag|drop_cols|cfgidx"
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_solo_fn(spec: str):
+    base, tag, drop, cfg = spec.split("|")
+    sub = f"maker_labels_tb3s_h150anch_solo_{tag}"
+    done = f"/vol/gcs/market-data-0998ac51/research_runs/{sub}/PERFOLD_S0_{base}_qm0_f6.npz"
+    if os.path.exists(done):
+        return f"{base} solo_{tag} already-done"
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", base, "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": "0", "CFGIDX": cfg, "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": "_S0", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": drop, "OUT_SUB": sub})
+    vol.commit()
+    return f"{base} solo_{tag} trained (DROP {drop} cfg {cfg})"
+
+
+@app.local_entrypoint()
+def train_solo(base: str, specs: str):
+    """specs: semicolon-separated tag:drop:cfgidx triples."""
+    calls = []
+    for spec in specs.split(";"):
+        tag, drop, cfg = spec.split(":")
+        calls.append(train_solo_fn.spawn(f"{base}|{tag}|{drop}|{cfg}"))
+    for c in calls:
+        try:
+            print(c.get(timeout=4 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
+
+
 @app.local_entrypoint()
 def train_sym_forest(base: str, js: str = "0-7"):
     a, b = js.split("-")
