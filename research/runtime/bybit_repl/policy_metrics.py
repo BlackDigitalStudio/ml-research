@@ -70,6 +70,18 @@ def battery(ordered_nets, ordered_days, fold_nets, days_sorted, boot_reps=1000, 
         if len(seq):
             b_ev.append(float(seq.mean()))
     b_ev = np.array(b_ev)
+    if not len(b_ev):
+        # degenerate corner: no bootstrap path contains a trade (possible when the
+        # form's few trades sit only on the final <block>-tail days the block
+        # sampler cannot reach). No evidence => no floor, no gate. Non-degenerate
+        # forms are byte-unaffected by this guard.
+        out.update({"boot_p5": 0.0, "boot_p95": 0.0, "boot_Ppos": 0.0, "boot_se": 0.0,
+                    "folds_traded": int(sum(1 for v in pf_ev if v is not None)),
+                    "active_days": int(len(by_day)), "n_ok": False,
+                    "power80_ok": False, "gate_pass": False,
+                    "F10_dd25": 0.0, "f10_capped": False,
+                    "roi25_monthly": 0.0, "roi25_p10": 0.0})
+        return out
     out["boot_p5"] = float(np.quantile(b_ev, .05)); out["boot_p95"] = float(np.quantile(b_ev, .95))
     out["boot_Ppos"] = float(100 * np.mean(b_ev > 0))
     # SAMPLE-SIZE GATE (standing directive 2026-08-08): the anecdote floor is part

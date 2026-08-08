@@ -196,6 +196,8 @@ if __name__ == "__main__":
         try:
             allres[name] = run_pool(name, members)
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"### pool {name}: FAILED {e}", flush=True)
         # incremental save after EVERY pool — preemption/timeout loses at most
         # the pool in flight (the 2026-08-07 rev14 4-pool run lost 60 min to a
