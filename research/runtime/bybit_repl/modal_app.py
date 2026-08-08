@@ -722,6 +722,46 @@ def train_axis(base: str, tag: str, drop: str, cfg: str = "1", js: str = "0-5"):
             print("FAIL:", e, flush=True)
 
 
+# HBV3 rev5 arm B: plain-seed members (rev4.1-replication recipe — seed diversity
+# only, no bags, no targeted drops beyond the Bybit no-OI convention). All seeds
+# share OUT_SUB so ens_sym/bybit_t10 read the 4-seed cell from one prefix.
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_plain_fn(spec: str):
+    base, sub, drop, cfg, s_ = spec.split("|")
+    done = f"/vol/gcs/market-data-0998ac51/research_runs/{sub}/PERFOLD_S{s_}_{base}_qm0_f6.npz"
+    if os.path.exists(done):
+        return f"{base} plain S{s_} already-done"
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", base, "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": s_, "CFGIDX": cfg, "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{s_}", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": drop, "OUT_SUB": sub})
+    vol.commit()
+    return f"{base} plain S{s_} trained -> {sub}"
+
+
+@app.local_entrypoint()
+def train_plain(base: str, sub: str, drop: str = "59,60", cfg: str = "1", seeds: str = "0,1,2,3"):
+    calls = [train_plain_fn.spawn(f"{base}|{sub}|{drop}|{cfg}|{s}") for s in seeds.split(",")]
+    for c in calls:
+        try:
+            print(c.get(timeout=4 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
+def finish_plain_fn(base: str, sub: str, seeds: str = "0,1,2,3", tgts: str = "5,10"):
+    ex = {"XSYM_SUB": sub}
+    out = ""
+    for s in seeds.split(","):
+        out += _run([sys.executable, "/repo/runtime/perseed_from_pf.py", base, s], extra=ex)
+    out += _run([sys.executable, "/repo/runtime/ens_sym.py", base], extra=ex)
+    for t in tgts.split(","):
+        out += _run([sys.executable, "/repo/runtime/bybit_repl/bybit_t10.py", base], extra=dict(ex, TGT=t))
+    vol.commit()
+    return out
+
+
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
 def perseed_any_fn(sub: str, sym: str, seed: int = 0):
     out = _run([sys.executable, "/repo/runtime/perseed_from_pf.py", sym, str(seed)],
