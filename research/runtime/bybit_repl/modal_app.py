@@ -481,6 +481,55 @@ def sized_burst_fn(forms: str, out_tag: str, sym: str = "DOGE", gammas: str = "1
                        "HARD_CAP": hard_cap, "F_GRID": f_grid})
 
 
+# ---- HBV1 rev25: tick-level intra-burst tail from raw L2 book replay
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=16384, timeout=7200)
+def export_trades_fn(forms: str, sym: str = "DOGE"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/export_trades.py"],
+                extra={"FORMS": forms, "SYM": sym})
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=1800)
+def tick_day_fn(day: str, sym: str = "DOGE", forms_list: str = ""):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/tick_tail_day.py"],
+                extra={"DAY": day, "SYM": sym, "FORMS_LIST": forms_list})
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=3600)
+def tick_agg_fn(sym: str = "DOGE", forms_list: str = ""):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/tick_tail_agg.py"],
+                extra={"SYM": sym, "FORMS_LIST": forms_list})
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=1, memory=2048, timeout=600)
+def cat_fn(path: str) -> bytes:
+    with open(f"/vol/gcs/market-data-0998ac51/{path}", "rb") as f:
+        return f.read()
+
+
+@app.local_entrypoint()
+def tick_days(sym: str = "DOGE", forms_list: str = ""):
+    import datetime
+    import json as _json
+    days = set()
+    for name in forms_list.split(","):
+        raw = cat_fn.remote(f"research_runs/HBV1_TRADES_{name}_{sym}.json")
+        for ts0, *_ in _json.loads(raw):
+            days.add(str(datetime.datetime.utcfromtimestamp(ts0).date()))
+    days = sorted(days)
+    print(f"{len(days)} active days {days[0]}..{days[-1]}", flush=True)
+    ok = fail = 0
+    for res in tick_day_fn.starmap([(d, sym, forms_list) for d in days],
+                                   return_exceptions=True):
+        s = str(res)
+        print(s, flush=True)
+        if "Exception" in s or "Error" in s:
+            fail += 1
+        else:
+            ok += 1
+    print(f"[tick days done] ok={ok} fail={fail}", flush=True)
+    print(tick_agg_fn.remote(sym=sym, forms_list=forms_list), flush=True)
+
+
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=16384, timeout=3600)
 def corr_members_fn(members: str, corrtag: str, tgts: str = "5,10", sym: str = "DOGE"):
     return _run([sys.executable, "/repo/runtime/bybit_repl/seed_corr.py", sym],
