@@ -72,7 +72,21 @@ def battery(ordered_nets, ordered_days, fold_nets, days_sorted, boot_reps=1000, 
     b_ev = np.array(b_ev)
     out["boot_p5"] = float(np.quantile(b_ev, .05)); out["boot_p95"] = float(np.quantile(b_ev, .95))
     out["boot_Ppos"] = float(100 * np.mean(b_ev > 0))
-    out["gate_pass"] = bool(out["neg_folds"] == 0 and out["lofo_min"] > 0.25 * out["ev"] and out["boot_p5"] > 0)
+    # SAMPLE-SIZE GATE (standing directive 2026-08-08): the anecdote floor is part
+    # of the gate — n>=100 AND trades in >=5 folds (of 7; scaled if nf differs).
+    # Below it the bootstrap/LOFO machinery itself is unreliable and floor>0
+    # carries no evidence. power80_ok is a MARKER, not a gate: bootstrap
+    # SE <= EV/2.49 means a TRUE edge of this size is confirmable with 80% power
+    # (n_min ~ (2.49*c/EV)^2, c = SE*sqrt(n) ~ 273bp median on measured cells) —
+    # thinner edges need quadratically more trades.
+    out["folds_traded"] = int(sum(1 for v in pf_ev if v is not None))
+    out["active_days"] = int(len(by_day))
+    out["n_ok"] = bool(out["n"] >= 100 and out["folds_traded"] >= min(5, nf))
+    se = (out["boot_p95"] - out["boot_p5"]) / (2 * 1.645)
+    out["boot_se"] = float(se)
+    out["power80_ok"] = bool(se > 0 and out["ev"] / se >= 2.49)
+    out["gate_pass"] = bool(out["neg_folds"] == 0 and out["lofo_min"] > 0.25 * out["ev"]
+                            and out["boot_p5"] > 0 and out["n_ok"])
     # DD-25 NORMALIZATION (standing directive 2026-08-08: variants are COMPARED
     # and recorded at a COMMON maxDD=25% capital sizing; raw FRAC=1.0 numbers
     # above remain the measurement layer, not the comparison layer).
@@ -108,6 +122,8 @@ def fmt(name, m):
     if not m.get("n"):
         return f"{name:38s} EMPTY"
     g = "PASS" if m.get("gate_pass") else "fail"
+    if m.get("gate_pass"):
+        g += "/p80" if m.get("power80_ok") else "/upow"
     return (f"{name:38s} EV {m['ev']:+6.2f} n={m['n']:5d} {m['tpd']:5.2f}/d hit {100*m['hit']:4.1f}% | "
             f"ROI25 {100*m.get('roi25_monthly',0):+6.1f}%@F{m.get('F10_dd25',0):4.1f} p10 {100*m.get('roi25_p10',0):+5.1f}% | "
             f"raw {100*m['roi_monthly']:+5.1f}% DD {-100*m['maxdd']:4.1f}% Sh {m['sharpe']:4.1f} | "
