@@ -458,6 +458,12 @@ def forensics_fn(members: str, sym: str = "DOGE", tgt: str = "5", ftag: str = ""
                 extra={"MEMBERS": members, "SYM": sym, "TGT": tgt, "FTAG": ftag})
 
 
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=14336, timeout=3600)
+def overlap_fn(forms: str, sym: str = "DOGE", f: str = "1"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/overlap_probe.py"],
+                extra={"FORMS": forms, "SYM": sym, "F": f})
+
+
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=16384, timeout=3600)
 def corr_members_fn(members: str, corrtag: str, tgts: str = "5,10", sym: str = "DOGE"):
     return _run([sys.executable, "/repo/runtime/bybit_repl/seed_corr.py", sym],
