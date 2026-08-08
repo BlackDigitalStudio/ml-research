@@ -473,6 +473,12 @@ def overlap_capped_fn(forms: str, out_tag: str, sym: str = "DOGE",
                        "OUT_TAG": out_tag, "PER_FORM": per_form})
 
 
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=16384, timeout=7200)
+def sized_burst_fn(forms: str, out_tag: str, sym: str = "DOGE", gammas: str = "1,2"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/sized_burst.py"],
+                extra={"FORMS": forms, "SYM": sym, "GAMMAS": gammas, "OUT_TAG": out_tag})
+
+
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=16384, timeout=3600)
 def corr_members_fn(members: str, corrtag: str, tgts: str = "5,10", sym: str = "DOGE"):
     return _run([sys.executable, "/repo/runtime/bybit_repl/seed_corr.py", sym],
