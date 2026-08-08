@@ -22,6 +22,9 @@ F10 re-bisected per mode (day-block boot L=7 x1000, P(maxDD>25%)<=10%);
 day return = arithmetic within day, compounded daily.
 Env: SYM, FORMS "name~sub:seed,...~T~K~1;...", FEE_BP (4), SPAN_S (210),
 GAMMAS ("1,2"), OUT_TAG.
+Addendum mode (HARD_CAP set, e.g. "3"): target = min(F*g, HARD_CAP), F swept
+over F_GRID ("3,6,12,24,48") with NO DD bisection (the DD-25 budget does not
+bind under the ceiling) — the implementable working-band comparison vs flat-C.
 """
 import io
 import json
@@ -37,6 +40,8 @@ FEE_BP = float(os.environ.get("FEE_BP", "4"))
 SPAN_S = float(os.environ.get("SPAN_S", "210"))
 GAMMAS = [float(x) for x in os.environ.get("GAMMAS", "1,2").split(",")]
 OUT_TAG = os.environ.get("OUT_TAG", "sized")
+HARD_CAP = float(os.environ["HARD_CAP"]) if os.environ.get("HARD_CAP") else None
+F_GRID = [float(x) for x in os.environ.get("F_GRID", "3,6,12,24,48").split(",")]
 TARGET_DD, L, REPS = 0.25, 7, 1000
 B = "maker_labels_tb3s_h150anch"
 
@@ -160,7 +165,7 @@ def sim(events, N, F, mode, gamma):
             g = (k / N) ** gamma
         else:
             g = (min(S, N) / N) ** gamma
-        target = F * g
+        target = F * g if HARD_CAP is None else min(F * g, HARD_CAP)
         if target > g_cur:
             sl = target - g_cur
             active.append((t + SPAN_S, sl))
@@ -207,12 +212,28 @@ for name, members, tgt, K in FORMS:
         modes = [("flat", 0.0)] + [("propk", g) for g in GAMMAS] + [("propscore", g) for g in GAMMAS]
         for mode, gamma in modes:
             tag = mode if mode == "flat" else f"{mode}_g{gamma:g}"
-            res[tag] = f10_metrics(events, N, mode, gamma)
-            m = res[tag]
-            print(f"form {name} {tag:14s}: F10 {m['F10']:6.2f}{'^' if m['f10_capped'] else ' '} "
-                  f"ROI25 {100*m['roi25_monthly']:+7.1f}% p10 {100*m['roi25_p10']:+6.1f}% "
-                  f"Sh {m['sharpe']:5.2f} max-gross {m['max_gross']:6.2f} slices {m['n_slices']} "
-                  f"DDreal {100*m['dd_real']:4.1f}%", flush=True)
+            if HARD_CAP is None:
+                res[tag] = f10_metrics(events, N, mode, gamma)
+                m = res[tag]
+                print(f"form {name} {tag:14s}: F10 {m['F10']:6.2f}{'^' if m['f10_capped'] else ' '} "
+                      f"ROI25 {100*m['roi25_monthly']:+7.1f}% p10 {100*m['roi25_p10']:+6.1f}% "
+                      f"Sh {m['sharpe']:5.2f} max-gross {m['max_gross']:6.2f} slices {m['n_slices']} "
+                      f"DDreal {100*m['dd_real']:4.1f}%", flush=True)
+                continue
+            fgrid = [HARD_CAP] if mode == "flat" else F_GRID
+            for F in fgrid:
+                dret, max_g, used, n_slices = sim(events, N, F, mode, gamma)
+                eq = np.cumprod(1.0 + dret)
+                roi = float(eq[-1] ** (30.0 / span) - 1.0)
+                rois = [float(np.cumprod(1.0 + dret[p])[-1] ** (30.0 / span) - 1.0) for p in paths]
+                sh = float(dret.mean() / dret.std() * np.sqrt(365.0)) if dret.std() > 0 else 0.0
+                m = dict(F=F, roi_monthly=roi, roi_p10=float(np.quantile(rois, .1)),
+                         roi_p50=float(np.quantile(rois, .5)), sharpe=sh,
+                         max_gross=max_g, n_slices=n_slices, dd_real=dd_of(dret))
+                res[f"{tag}_F{F:g}"] = m
+                print(f"form {name} {tag:14s} F{F:<5g}: ROI {100*roi:+6.1f}% p10 {100*m['roi_p10']:+6.1f}% "
+                      f"Sh {sh:5.2f} max-gross {max_g:5.2f} slices {n_slices} "
+                      f"DDreal {100*m['dd_real']:4.1f}%", flush=True)
         allout[name] = res
     except Exception as ex:
         print(f"form {name}: FAILED ({type(ex).__name__}: {ex})", flush=True)

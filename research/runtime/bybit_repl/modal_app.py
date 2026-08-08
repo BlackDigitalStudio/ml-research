@@ -474,9 +474,11 @@ def overlap_capped_fn(forms: str, out_tag: str, sym: str = "DOGE",
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=16384, timeout=7200)
-def sized_burst_fn(forms: str, out_tag: str, sym: str = "DOGE", gammas: str = "1,2"):
+def sized_burst_fn(forms: str, out_tag: str, sym: str = "DOGE", gammas: str = "1,2",
+                   hard_cap: str = "", f_grid: str = "3,6,12,24,48"):
     return _run([sys.executable, "/repo/runtime/bybit_repl/sized_burst.py"],
-                extra={"FORMS": forms, "SYM": sym, "GAMMAS": gammas, "OUT_TAG": out_tag})
+                extra={"FORMS": forms, "SYM": sym, "GAMMAS": gammas, "OUT_TAG": out_tag,
+                       "HARD_CAP": hard_cap, "F_GRID": f_grid})
 
 
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=16384, timeout=3600)
