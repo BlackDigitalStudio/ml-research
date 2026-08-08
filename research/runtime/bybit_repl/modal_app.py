@@ -464,6 +464,14 @@ def overlap_fn(forms: str, sym: str = "DOGE", f: str = "1"):
                 extra={"FORMS": forms, "SYM": sym, "F": f})
 
 
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=14336, timeout=3600)
+def overlap_capped_fn(forms: str, out_tag: str, sym: str = "DOGE",
+                      caps: str = "0.5,1,2,3,burst1", span_s: str = "210"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/overlap_capped.py"],
+                extra={"FORMS": forms, "SYM": sym, "CAPS": caps, "SPAN_S": span_s,
+                       "OUT_TAG": out_tag})
+
+
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=16384, timeout=3600)
 def corr_members_fn(members: str, corrtag: str, tgts: str = "5,10", sym: str = "DOGE"):
     return _run([sys.executable, "/repo/runtime/bybit_repl/seed_corr.py", sym],
