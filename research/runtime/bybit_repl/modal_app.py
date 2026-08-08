@@ -722,6 +722,28 @@ def train_axis(base: str, tag: str, drop: str, cfg: str = "1", js: str = "0-5"):
             print("FAIL:", e, flush=True)
 
 
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
+def perseed_any_fn(sub: str, sym: str, seed: int = 0):
+    out = _run([sys.executable, "/repo/runtime/perseed_from_pf.py", sym, str(seed)],
+               extra={"XSYM_SUB": sub})
+    vol.commit()
+    return out
+
+
+@app.local_entrypoint()
+def perseed_many(sym: str, subs: str, seeds: str = ""):
+    """subs: comma-separated artifact subdirs; seeds: comma-separated, one per sub
+    (default 0 for each). Prints each perseed t5/t10 line."""
+    sub_l = subs.split(",")
+    seed_l = [int(s) for s in seeds.split(",")] if seeds else [0] * len(sub_l)
+    calls = [perseed_any_fn.spawn(sub, sym, sd) for sub, sd in zip(sub_l, seed_l)]
+    for sub, c in zip(sub_l, calls):
+        try:
+            print(f"== {sub}\n{c.get(timeout=3600)}", flush=True)
+        except Exception as e:
+            print(f"== {sub} FAIL: {e}", flush=True)
+
+
 @app.local_entrypoint()
 def train_sym_forest(base: str, js: str = "0-7"):
     a, b = js.split("-")
