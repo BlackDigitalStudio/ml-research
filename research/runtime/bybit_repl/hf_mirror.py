@@ -21,7 +21,11 @@ vol = modal.Volume.from_name("bybit-cl")
 image = modal.Image.debian_slim(python_version="3.11").pip_install("huggingface_hub[hf_transfer]")
 
 ROOT = "/vol/gcs/market-data-0998ac51"
-INCLUDE = [
+# INCLUDE env ("path,path,..."): overrides the default DOGE core list — lets the
+# same mirror run per account/symbol (rf/fb prefixes on 08, 1000PEPE/LTC cells
+# on 05/06). Secret hf-write-token replicated to all virginship0{5,6,7,8}
+# (2026-08-07); default repo stays delmiron27/hbv1-bybit-artifacts.
+INCLUDE = [x for x in os.environ.get("INCLUDE", "").split(",") if x] or [
     "research_runs/maker_labels_tb3s_h150/DOGE.npz",
     "research_runs/maker_labels_tb3s_h150anch",
     "research_runs/maker_labels_tb3s_h150anch_v1",
@@ -33,17 +37,18 @@ INCLUDE = [
 
 @app.function(image=image, volumes={"/vol": vol}, timeout=4 * 3600, cpu=4, memory=8192,
               secrets=[modal.Secret.from_name("hf-write-token")])
-def mirror(repo: str):
+def mirror(repo: str, include: str = ""):
     import shutil
     from huggingface_hub import HfApi
 
     os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
     api = HfApi(token=os.environ["HF_TOKEN"])
     api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
+    inc = [x for x in include.split(",") if x] or INCLUDE
     stage = "/tmp/stage"
     shutil.rmtree(stage, ignore_errors=True)
     total = 0
-    for rel in INCLUDE:
+    for rel in inc:
         src = os.path.join(ROOT, rel)
         dst = os.path.join(stage, rel)
         if os.path.isdir(src):
@@ -70,5 +75,5 @@ def mirror(repo: str):
 
 
 @app.local_entrypoint()
-def main(repo: str = "delmiron27/hbv1-bybit-artifacts"):
-    print(mirror.remote(repo))
+def main(repo: str = "delmiron27/hbv1-bybit-artifacts", include: str = ""):
+    print(mirror.remote(repo, include))

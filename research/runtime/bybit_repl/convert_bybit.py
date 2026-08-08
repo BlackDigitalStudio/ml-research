@@ -246,18 +246,23 @@ def convert_oi(symf, day):
 
 
 def run_day(day):
+    # HBV2: symbol via env (SYM exchange name / SYMF internal name); defaults keep
+    # the DOGE path byte-identical. BTC/ETH aux legs are cross-asset inputs and
+    # stay fixed regardless of the target symbol.
+    sym = os.environ.get("SYM", "DOGEUSDT")
+    symf = os.environ.get("SYMF_CONV", "DOGE-USDT-PERP")
     log = [day]
-    st, doge_tp = convert_trades("DOGEUSDT", "DOGE-USDT-PERP", day)
+    st, tgt_tp = convert_trades(sym, symf, day)
     log.append(st)
-    log.append(convert_book("DOGEUSDT", "DOGE-USDT-PERP", day))
+    log.append(convert_book(sym, symf, day))
     st_eth, _ = convert_trades("ETHUSDT", "ETH-USDT-PERP", day)
     log.append(st_eth)
     st_btc, btc_tp = convert_trades("BTCUSDT", "BTC-USDT-PERP", day)
     log.append(st_btc)
     if btc_tp is not None:
         log.append(btc_mid_npz(day, btc_tp))
-    log.append(convert_funding("DOGE-USDT-PERP", day, doge_tp))
-    log.append(convert_oi("DOGE-USDT-PERP", day))
+    log.append(convert_funding(symf, day, tgt_tp))
+    log.append(convert_oi(symf, day))
     return " | ".join(log)
 
 

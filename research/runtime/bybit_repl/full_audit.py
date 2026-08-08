@@ -26,7 +26,7 @@ from google.cloud import storage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from policy_metrics import battery, fmt  # noqa: E402
 
-SYM = "DOGE"
+SYM = os.environ.get("SYM", "DOGE")
 KDAYS = 30
 bk = storage.Client(project="x").bucket("market-data-0998ac51")
 
@@ -189,6 +189,7 @@ def run_pool(name, members):
 
 
 if __name__ == "__main__":
+    print(f"[full_audit SYM={SYM} FEE_BP={FEE_BP} pools={list(POOLS)}]", flush=True)
     allres = {}
     tag = os.environ.get("OUT_TAG") or "_".join(POOLS)
     for name, members in POOLS.items():

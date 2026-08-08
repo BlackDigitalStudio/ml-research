@@ -278,9 +278,9 @@ def gain_fn(sub: str = "maker_labels_tb3s_h150anch", drop: str = ""):
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=6144, timeout=2 * 3600)
 def audit_fn(pools: str = "", ens_t: str = "1,2.5,5,10", union_t: str = "0.625,1.25,2.5,5",
              fee_bp: str = "0", cons_t: str = "", cons_ks: str = "2,3,4,5,6,7,8",
-             out_tag: str = ""):
+             out_tag: str = "", sym: str = "DOGE"):
     extra = {"ENS_T": ens_t, "UNION_T": union_t, "FEE_BP": fee_bp,
-             "CONS_T": cons_t, "CONS_KS": cons_ks}
+             "CONS_T": cons_t, "CONS_KS": cons_ks, "SYM": sym}
     if pools:
         extra["POOLS"] = pools
     if out_tag:
@@ -452,9 +452,15 @@ def finish_decor_fn():
     return out
 
 
-@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=1800)
-def corr_members_fn(members: str, corrtag: str, tgts: str = "5,10"):
-    return _run([sys.executable, "/repo/runtime/bybit_repl/seed_corr.py", "DOGE"],
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=6144, timeout=3600)
+def forensics_fn(members: str, sym: str = "DOGE", tgt: str = "5", ftag: str = ""):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/member_forensics.py"],
+                extra={"MEMBERS": members, "SYM": sym, "TGT": tgt, "FTAG": ftag})
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=16384, timeout=3600)
+def corr_members_fn(members: str, corrtag: str, tgts: str = "5,10", sym: str = "DOGE"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/seed_corr.py", sym],
                 extra={"MEMBERS": members, "CORRTAG": corrtag, "TGTS": tgts})
 
 
@@ -486,6 +492,77 @@ def train_rf():
             print("FAIL:", e, flush=True)
 
 
+# ---- HBV1 rev18 wave-1 analyses ----
+@app.function(image=image, volumes={"/vol": vol}, cpu=4, memory=8192, timeout=2 * 3600)
+def sizedu_fn(pools: str = "", tgts: str = "2.5,5,10", gammas: str = "0,0.5,1,2,3", fee_bp: str = "4",
+              sym: str = "DOGE"):
+    extra = {"TGTS": tgts, "GAMMAS": gammas, "FEE_BP": fee_bp, "SYM": sym}
+    if pools:
+        extra["POOLS"] = pools
+    return _run([sys.executable, "/repo/runtime/bybit_repl/sized_union.py"], extra=extra)
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=4, memory=8192, timeout=2 * 3600)
+def portfolio_fn(fee_bp: str = "4", target_dd: str = "0.25"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/form_portfolio.py"],
+                extra={"FEE_BP": fee_bp, "TARGET_DD": target_dd})
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=14336, timeout=2 * 3600)
+def anatomy_fn(fee_bp: str = "4"):
+    return _run([sys.executable, "/repo/runtime/bybit_repl/regime_anatomy.py"], extra={"FEE_BP": fee_bp})
+
+
+# ---- HBV1 rev19: forest scaling — bag generator for arbitrary j (reproduces
+# FBAG_DROPS exactly on j=0..3; asserted at call time).
+def _bag(j: int) -> str:
+    import numpy as np
+    dead = {17, 18, 19, 24, 30, 44, 50, 51, 52, 53, 56, 57, 58}
+    live = [i for i in range(71) if i not in dead and i not in (59, 60)]
+    extra = np.random.default_rng(1000 + j).choice(live, size=14, replace=False)
+    return ",".join(map(str, sorted({59, 60} | {int(x) for x in extra})))
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_rf_any_fn(j: int):
+    drop = _bag(j)
+    if j in FBAG_DROPS:
+        assert drop == FBAG_DROPS[j], f"bag generator mismatch at j={j}"
+    sub = RF_SUB.format(j=j)
+    done = f"/vol/gcs/market-data-0998ac51/research_runs/{sub}/PERFOLD_S{j}_DOGE_qm0_f6.npz"
+    if os.path.exists(done):
+        return f"rf{j} already-done"
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", "DOGE", "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": str(j), "CFGIDX": "1", "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{j}", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": drop,
+                "BAG_FRAC": "0.632", "BAG_SEED": str(j), "OUT_SUB": sub})
+    vol.commit()
+    return f"rf{j} trained (bag 0.632 + DROP {drop})"
+
+
+@app.local_entrypoint()
+def train_forest(js: str = "4-31"):
+    a, b = js.split("-")
+    calls = [train_rf_any_fn.spawn(j) for j in range(int(a), int(b) + 1)]
+    for c in calls:
+        try:
+            print(c.get(timeout=4 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=2 * 3600)
+def finish_forest_fn(js: str = "0-31"):
+    a, b = js.split("-")
+    out = ""
+    for j in range(int(a), int(b) + 1):
+        out += _run([sys.executable, "/repo/runtime/perseed_from_pf.py", "DOGE", str(j)],
+                    extra={"XSYM_SUB": RF_SUB.format(j=j)})
+    vol.commit()
+    return out
+
+
 @app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=8192, timeout=3600)
 def finish_rf_fn():
     out = ""
@@ -494,6 +571,166 @@ def finish_rf_fn():
                     extra={"XSYM_SUB": RF_SUB.format(j=j)})
     vol.commit()
     return out
+
+
+# ---- HBV2: symbol-parameterized build/train stages (DOGE stages above stay
+# byte-identical; new symbols run on their own accounts/volumes). spec format
+# for day fan-out: "day|SYM|SYMF" (e.g. "2025-05-09|1000PEPEUSDT|1000PEPE-USDT-PERP").
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=4096, timeout=3600)
+def aux_sym_fn(sym: str):
+    _run([sys.executable, "/repo/runtime/bybit_repl/fetch_aux.py"],
+         extra={"START": "2025-05-01", "END": "2026-06-05", "SYM": sym})
+    vol.commit()
+    return f"aux {sym} done"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=9216, timeout=5400,
+              retries=modal.Retries(max_retries=2), max_containers=40)
+def day_sym_fn(spec: str):
+    day, sym, symf = spec.split("|")
+    base = symf.split("-")[0]
+    done = f"/vol/gcs/market-data-0998ac51/research_runs/maker_labels_tb3s_h150/daily/{base}_{day}.npz"
+    if os.path.exists(done):
+        return f"{day}: already-done"
+    sys.path.insert(0, "/repo/runtime/bybit_repl")
+    os.environ.update(ENV)
+    os.environ["WORK"] = "/tmp/conv"
+    os.environ["SYM"] = sym
+    os.environ["SYMF_CONV"] = symf
+    import convert_bybit
+    conv = convert_bybit.run_day(day)
+    vol.commit()
+    if "book-missing" in conv or "trades-missing" in conv.split("|")[1]:
+        return f"{day}: SKIP no-raw ({conv})"
+    out = _run([sys.executable, "/repo/scripts/subs60_build_tb3s_labels.py"],
+               extra=dict(BUILD_ENV, SYMF=symf, START=day, END=day, WORKDIR="/tmp/tb3s"))
+    vol.commit()
+    tail = [ln for ln in out.splitlines() if ln.strip().startswith(day)]
+    return f"{day}: {conv} || {tail[-1].strip() if tail else 'no-day-line'}"
+
+
+@app.local_entrypoint()
+def days_sym(sym: str, symf: str, start: str = START, end: str = END):
+    import numpy as np
+    all_days = [str(d) for d in np.arange(np.datetime64(start), np.datetime64(end) + 1)]
+    print(f"{sym}: {len(all_days)} days {all_days[0]}..{all_days[-1]}")
+    specs = [f"{d}|{sym}|{symf}" for d in all_days]
+    ok = skip = 0
+    for res in day_sym_fn.map(specs, return_exceptions=True):
+        s = str(res)
+        print(s, flush=True)
+        if "SKIP" in s or "Exception" in s:
+            skip += 1
+        else:
+            ok += 1
+    print(f"[days done] ok={ok} skip/fail={skip}")
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=20480, timeout=5400)
+def combine_sym_fn(symf: str):
+    _run([sys.executable, "/repo/scripts/subs60_build_tb3s_labels.py"],
+         extra=dict(BUILD_ENV, SYMF=symf, START=START, END=END, COMBINE="1", WORKDIR="/tmp/tb3s"))
+    vol.commit()
+    return f"combined {symf}"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=2, memory=12288, timeout=3600)
+def anch_sym_fn(base: str):
+    _run([sys.executable, "/repo/runtime/prep_anch_sym.py", base])
+    vol.commit()
+    return f"anch {base} done"
+
+
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_sym_rf_fn(spec: str):
+    base, j_s = spec.split("|")
+    j = int(j_s)
+    drop = _bag(j)
+    sub = f"maker_labels_tb3s_h150anch_v2_nooi_rf{j}"
+    done = f"/vol/gcs/market-data-0998ac51/research_runs/{sub}/PERFOLD_S{j}_{base}_qm0_f6.npz"
+    if os.path.exists(done):
+        return f"{base} rf{j} already-done"
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", base, "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": str(j), "CFGIDX": "1", "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{j}", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": drop,
+                "BAG_FRAC": "0.632", "BAG_SEED": str(j), "OUT_SUB": sub})
+    vol.commit()
+    return f"{base} rf{j} trained"
+
+
+# HBV2 rev3 (signal-first canon): SINGLE-model condition cells — SEED=0, no
+# data-bag, TARGETED (non-random) drop sets from member forensics / HD3 axes.
+# spec: "BASE|tag|drop_cols|cfgidx"
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_solo_fn(spec: str):
+    base, tag, drop, cfg = spec.split("|")
+    sub = f"maker_labels_tb3s_h150anch_solo_{tag}"
+    done = f"/vol/gcs/market-data-0998ac51/research_runs/{sub}/PERFOLD_S0_{base}_qm0_f6.npz"
+    if os.path.exists(done):
+        return f"{base} solo_{tag} already-done"
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", base, "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": "0", "CFGIDX": cfg, "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": "_S0", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": drop, "OUT_SUB": sub})
+    vol.commit()
+    return f"{base} solo_{tag} trained (DROP {drop} cfg {cfg})"
+
+
+@app.local_entrypoint()
+def train_solo(base: str, specs: str):
+    """specs: semicolon-separated tag:drop:cfgidx triples."""
+    calls = []
+    for spec in specs.split(";"):
+        tag, drop, cfg = spec.split(":")
+        calls.append(train_solo_fn.spawn(f"{base}|{tag}|{drop}|{cfg}"))
+    for c in calls:
+        try:
+            print(c.get(timeout=4 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
+
+
+# HBV2 rev4: targeted-axis ensemble members — the WINNING solo spec (fixed
+# drop set + cfgidx) x seed/data-bag diversity (NO random feature bags: the
+# symbol's axes stay fixed; decorrelation comes from seed + BAG_FRAC only).
+@app.function(image=image, volumes={"/vol": vol}, cpu=6, memory=20480, timeout=4 * 3600)
+def train_axis_fn(spec: str):
+    base, tag, drop, cfg, j_s = spec.split("|")
+    j = int(j_s)
+    sub = f"maker_labels_tb3s_h150anch_ax_{tag}_m{j}"
+    done = f"/vol/gcs/market-data-0998ac51/research_runs/{sub}/PERFOLD_S{j}_{base}_qm0_f6.npz"
+    if os.path.exists(done):
+        return f"{base} ax_{tag} m{j} already-done"
+    _run([sys.executable, "/repo/scripts/subs60_xgb_sobol_v2.py", base, "maker_labels_tb3s_h150anch", "0", "6"],
+         extra={"SEED": str(j), "CFGIDX": cfg, "BUDGETS": "5,10", "SAVE_PF": "1",
+                "PFTAG": f"_S{j}", "MODEL_DUMP": "1", "DATA_CACHE": "/tmp/cache",
+                "SOBOL_PAR": "6", "FOLD_PAR": "1", "DROP_COLS": drop,
+                "BAG_FRAC": "0.632", "BAG_SEED": str(j), "OUT_SUB": sub})
+    vol.commit()
+    return f"{base} ax_{tag} m{j} trained"
+
+
+@app.local_entrypoint()
+def train_axis(base: str, tag: str, drop: str, cfg: str = "1", js: str = "0-5"):
+    a, b = js.split("-")
+    calls = [train_axis_fn.spawn(f"{base}|{tag}|{drop}|{cfg}|{j}") for j in range(int(a), int(b) + 1)]
+    for c in calls:
+        try:
+            print(c.get(timeout=4 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
+
+
+@app.local_entrypoint()
+def train_sym_forest(base: str, js: str = "0-7"):
+    a, b = js.split("-")
+    calls = [train_sym_rf_fn.spawn(f"{base}|{j}") for j in range(int(a), int(b) + 1)]
+    for c in calls:
+        try:
+            print(c.get(timeout=4 * 3600), flush=True)
+        except Exception as e:
+            print("FAIL:", e, flush=True)
 
 
 @app.local_entrypoint()
